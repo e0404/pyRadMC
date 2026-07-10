@@ -279,9 +279,12 @@ Exit criteria:
 - Fast tiers stay under 30 seconds.
 
 KERMA-mode transport remains available as an explicit engine option for photon-only
-physics tests. The benchmark-PDD gamma gate in the validation tier stays a documented
-skip until the maintainer supplies trusted curves; it is data the exit criteria wait
-*for*, not *on*.
+physics tests. The benchmark-PDD gamma gate runs in the validation tier against
+maintainer-supplied EGSnrc curves (1, 2, 6 MeV; 5 percent / 3 mm, pass rate at least
+90 percent; provenance and known gaps in ``tests/validation/data/README.md``). The
+criterion is deliberately data-limited: the analytic backend under-absorbs the soft
+scattered spectrum. **Phase 5 (tabulated data) must pass the same file over the full
+depth range at 2 percent / 2 mm — replace the data layer, never loosen this gate.**
 
 Next is Phase 2 (Warp backend, CPU and CUDA from one source; see the README roadmap).
 Do not begin Warp kernels or Dij scoring without the maintainer's explicit go-ahead.

@@ -125,9 +125,10 @@ repeating here because they are the ones people break:
 | 4 | Correlated sampling; study of per-beamlet noise vs. optimized-plan bias |
 | 5 | Tabulated data, phase-space source, pyRadPlan adapter |
 
-¹ The gamma-index PDD gate is scaffolded and skipped: it waits for trusted benchmark
-curves (see ``tests/validation/test_ranges_and_pdd.py``). Range and buildup gates
-anchored to NIST ESTAR run nightly.
+¹ The nightly validation tier gates against NIST ESTAR ranges and against
+maintainer-supplied EGSnrc depth-dose curves (1, 2 and 6 MeV; gamma 5%/3mm — the
+criterion is limited by the analytic cross-sections, and Phase 5 must pass the same
+data at 2%/2mm over the full depth range).
 
 ## License
 
