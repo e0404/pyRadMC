@@ -24,13 +24,23 @@ class TestMajorantContract:
         will not show up as a crash, an assertion, or a visibly wrong depth-dose curve.
         It will show up as a two percent error in bone that nobody finds for a year.
         """
-        pytest.skip("Phase 0: analytic backend not implemented")
+        from pyRadMC.data.analytic import AnalyticCrossSections
+        from pyRadMC.data.materials import WATER
 
-        from pyRadMC.data.analytic import AnalyticCrossSections  # noqa: F401
+        # Densities bracketing what a Phase 0 water-with-density-scaling geometry can
+        # contain, including a >1 g/cm^3 voxel (contoured bolus, wet lung, CT noise).
+        geometry = ((WATER, 1.2),)
+        xs = AnalyticCrossSections(geometry_densities=geometry)
 
-        # for each energy on the transport grid:
-        #     mu_max = max over (material, density) of rho * mu_over_rho_total
-        #     assert xs.majorant(energy) >= mu_max
+        for energy in np.geomspace(0.05, 20.0, 300):
+            mu_max = max(
+                density * xs.mu_over_rho_total(float(energy), material)
+                for material, density in geometry
+            )
+            assert xs.majorant(float(energy)) >= mu_max, (
+                f"majorant violated at {energy:.4f} MeV: "
+                f"{xs.majorant(float(energy)):.6e} < {mu_max:.6e} 1/cm"
+            )
 
 
 class TestUniformContract:
