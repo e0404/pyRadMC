@@ -53,11 +53,22 @@ class TestUniformContract:
         boundary bug in the bit-manipulation of the underlying generator would surface;
         1e7 is cheap and catches the common float32 rounding-to-one case.
         """
-        pytest.skip("Phase 0: RNG backends not implemented")
+        from pyRadMC.rng.host import HostRNG
 
-        # for each RNG implementation:
-        #     u = draw 1e7 samples
-        #     assert np.all(u >= 0.0) and np.all(u < 1.0)
+        rng = HostRNG()
+        state = rng.init_state(seed=1234, history_index=0)
+
+        # Bulk draws through the same underlying generator: 1e7 is cheap vectorized.
+        # HostRNG.uniform is documented as scalar-equivalent to Generator.random().
+        u = state.random(10_000_000)
+        assert np.all(u >= 0.0)
+        assert np.all(u < 1.0)
+
+        # And through the actual scalar interface the physics routines call.
+        state = rng.init_state(seed=1234, history_index=1)
+        draws = np.array([rng.uniform(state) for _ in range(100_000)])
+        assert np.all(draws >= 0.0)
+        assert np.all(draws < 1.0)
 
     def test_stream_independent_of_history_partitioning(self) -> None:
         """Counter-based seeding: the stream depends on (seed, history_index) only.
@@ -66,7 +77,29 @@ class TestUniformContract:
         the property that makes within-target reproducibility survive a change of
         thread count.
         """
-        pytest.skip("Phase 0: RNG backends not implemented")
+        from pyRadMC.rng.host import HostRNG
+
+        rng = HostRNG()
+        seed = 42
+
+        # "Partition A": histories created sequentially, each fully drained in order.
+        streams_sequential = {}
+        for history in range(8):
+            state = rng.init_state(seed, history)
+            streams_sequential[history] = [rng.uniform(state) for _ in range(16)]
+
+        # "Partition B": histories created in reverse and drawn interleaved, as a
+        # different batch decomposition or thread schedule would.
+        states = {history: rng.init_state(seed, history) for history in reversed(range(8))}
+        streams_interleaved: dict[int, list[float]] = {h: [] for h in range(8)}
+        for _ in range(16):
+            for history in range(8):
+                streams_interleaved[history].append(rng.uniform(states[history]))
+
+        assert streams_sequential == streams_interleaved
+
+        # Distinct histories must not share a stream.
+        assert streams_sequential[0] != streams_sequential[1]
 
 
 class TestTableIntegrationContract:
