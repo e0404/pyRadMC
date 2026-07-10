@@ -77,7 +77,8 @@ warn_unreachable = true
 plugins = []
 
 [[tool.mypy.overrides]]
-module = ["pyRadMC.backends.warp.*", "pyRadMC.backends.numba.*"]
+# rng.warp_shim is Warp kernel code (AGENTS.md 5: kernels are exempt, marked).
+module = ["pyRadMC.backends.warp.*", "pyRadMC.backends.numba.*", "pyRadMC.rng.warp_shim"]
 ignore_errors = true
 
 [[tool.mypy.overrides]]

@@ -42,8 +42,9 @@ def sample_moller_delta_energy(energy: float, delta_cut: float, rng_state: RNGSt
         Per-history RNG state; two uniforms per rejection round.
     """
     tau = energy / ELECTRON_MASS_MEV
-    tau_ratio_sq = (tau / (tau + 1.0)) ** 2
-    two_tau_term = (2.0 * tau + 1.0) / (tau + 1.0) ** 2
+    tau_ratio = tau / (tau + 1.0)
+    tau_ratio_sq = tau_ratio * tau_ratio
+    two_tau_term = (2.0 * tau + 1.0) / ((tau + 1.0) * (tau + 1.0))
     w_min = delta_cut / energy
     bound = 2.0 + 0.25 * tau_ratio_sq
 
