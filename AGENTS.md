@@ -139,6 +139,23 @@ Docstrings carry the governing equation and a DOI-cited reference. Stated approx
 (no fluorescence; no Rayleigh by default; positron annihilation at rest) are named explicitly
 at the point of implementation, not buried in a design document.
 
+### 2.10 Physics is data-driven, never flag-driven
+
+What physics runs is decided by the data source and the phase plan — never by a per-run
+option. A planning engine's validation certifies **one configuration**; toggleable physics
+multiplies the configuration space every backend-equivalence test must cover and invites
+silent misconfiguration downstream. Concretely:
+
+- The transport loop is **channel-complete**: it samples every interaction channel the
+  ``CrossSectionSource`` reports as nonzero. Enabling a channel (e.g. Rayleigh, Phase 5)
+  is a data change in the backend, not a transport flag.
+- An approximation is retired by **replacing it as the default**, with a test showing the
+  dosimetric effect — never by adding an option next to it. (If positron physics is ever
+  upgraded, Bhabha and annihilation in flight go in together, as the new default.)
+- The only sanctioned toggles are **test instruments** — options that exist so a test can
+  isolate one piece of physics, like the engine's KERMA mode — and each must say so in its
+  docstring.
+
 ---
 
 ## 3. Architecture
@@ -288,3 +305,19 @@ depth range at 2 percent / 2 mm — replace the data layer, never loosen this ga
 
 Next is Phase 2 (Warp backend, CPU and CUDA from one source; see the README roadmap).
 Do not begin Warp kernels or Dij scoring without the maintainer's explicit go-ahead.
+
+Standing items for the Phase 2 design (maintainer-approved 2026-07-11):
+
+- **Kernels are born channel-complete** (section 2.10): the photon loop carries all four
+  ``PhotonProcess`` branches, including Rayleigh sampling for any data source whose
+  coherent cross-section is nonzero. The analytic backend keeps Rayleigh at zero.
+- **Pair-refit warning for whoever enables Rayleigh (Phase 5)**: the analytic pair
+  channel is calibrated against water totals that *include* coherent scattering, i.e. it
+  silently absorbs the Rayleigh contribution above 2 MeV. Turning on a real coherent
+  channel without recalibrating pair against coherent-free totals double-counts
+  attenuation. The tabulated backend must take its channels from one consistent
+  decomposition of the same library.
+- **Positrons stay Moller-approximated** (no Bhabha, annihilation at rest): sub-half-
+  percent in water at these energies. If ever upgraded, Bhabha and annihilation in
+  flight land together as the new default per section 2.10, with a test showing the
+  dosimetric effect.
