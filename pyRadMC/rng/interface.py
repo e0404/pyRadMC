@@ -26,9 +26,17 @@ threads. This is what makes within-target reproducibility independent of schedul
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import Any, TypeAlias
 
-__all__ = ["RNG"]
+__all__ = ["RNG", "RNGState"]
+
+RNGState: TypeAlias = Any
+"""Opaque per-history RNG state.
+
+Deliberately untyped: physics routines annotate their state parameter with this alias
+and pass it to ``uniform`` unopened. What it actually is (a NumPy ``Generator``, a Warp
+thread state, a xoroshiro array slot) is a per-target detail physics never sees.
+"""
 
 
 class RNG(ABC):

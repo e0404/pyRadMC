@@ -7,6 +7,6 @@ time and never route through this module.
 """
 
 from pyRadMC.rng.host import HostRNG, uniform
-from pyRadMC.rng.interface import RNG
+from pyRadMC.rng.interface import RNG, RNGState
 
-__all__ = ["RNG", "HostRNG", "uniform"]
+__all__ = ["RNG", "HostRNG", "RNGState", "uniform"]
