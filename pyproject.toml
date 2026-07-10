@@ -1,0 +1,105 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pyRadMC"
+version = "0.0.1.dev0"
+description = "Fast photon Monte Carlo engine for beamlet-resolved radiotherapy treatment planning"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Niklas Wahl" }]
+keywords = ["monte-carlo", "radiotherapy", "dose-calculation", "treatment-planning"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Medical Science Apps.",
+    "Topic :: Scientific/Engineering :: Physics",
+]
+
+# Core stays deliberately thin. The reference backend needs nothing but NumPy.
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+]
+
+[project.optional-dependencies]
+# Production backend. Apache-2.0. CUDA GPU and CPU from one source.
+warp = ["warp-lang>=1.12"]
+# Optional CPU cross-check only. See AGENTS.md 3: delete if it diverges.
+numba = ["numba>=0.59"]
+dev = [
+    "pytest>=8.0",
+    "pytest-benchmark>=4.0",
+    "hypothesis>=6.100",
+    "mypy>=1.10",
+    "ruff>=0.5",
+]
+docs = ["mkdocs-material>=9.5"]
+all = ["pyRadMC[warp,numba,dev,docs]"]
+
+[project.urls]
+Homepage = "https://github.com/CHANGEME/pyRadMC"
+Issues = "https://github.com/CHANGEME/pyRadMC/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["pyRadMC"]
+
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+# Default run is the fast tiers only; see AGENTS.md 4.
+addopts = "-m 'not validation and not perf' --strict-markers --strict-config -ra"
+markers = [
+    "validation: slow, high-statistics physical validation against published data",
+    "perf: benchmarks; alerts on regression, not pass/fail",
+    "gpu: requires a CUDA device",
+    "warp: requires the warp-lang optional dependency",
+    "numba: requires the numba optional dependency",
+]
+filterwarnings = ["error"]
+
+# ---------------------------------------------------------------------------
+# Typing. Warp kernels are exempt; see AGENTS.md 5.
+# ---------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.10"
+strict = true
+warn_unreachable = true
+plugins = []
+
+[[tool.mypy.overrides]]
+module = ["pyRadMC.backends.warp.*", "pyRadMC.backends.numba.*"]
+ignore_errors = true
+
+[[tool.mypy.overrides]]
+module = ["warp.*", "numba.*", "scipy.*"]
+ignore_missing_imports = true
+
+# ---------------------------------------------------------------------------
+# Lint
+# ---------------------------------------------------------------------------
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "SIM", "NPY", "RUF", "D"]
+ignore = [
+    "D203",  # conflicts with D211
+    "D213",  # conflicts with D212
+    "E741",  # single-letter names are idiomatic in transport physics (E, Z, A, w)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["D"]
+"pyRadMC/backends/warp/*" = ["N803", "N806"]  # kernel arg naming follows physics notation
+
+[tool.ruff.lint.pydocstyle]
+convention = "numpy"
