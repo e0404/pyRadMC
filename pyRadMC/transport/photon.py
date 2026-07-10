@@ -1,6 +1,6 @@
-"""Photon transport with Woodcock tracking and local electron energy deposition.
+"""Photon transport with Woodcock tracking.
 
-One history at a time: this loop serves the reference backend and is the behavioural
+One photon at a time: this loop serves the reference backend and is the behavioural
 specification for the Warp kernels (Phase 2). Sampling lives in :mod:`pyRadMC.physics`;
 data access goes through :class:`pyRadMC.data.interface.CrossSectionSource`; this
 module only sequences them.
@@ -9,18 +9,20 @@ Tracking is Woodcock (delta) tracking: free paths are sampled with the majorant
 cross-section and interactions are accepted with probability mu_real / mu_majorant,
 so voxel boundaries never need to be ray-traced. Woodcock et al. (1965), ANL-7050.
 
-Stated approximations (Phase 0, AGENTS.md section 7), named here because this is where
-they are implemented:
+Interactions hand their charged secondaries to the caller through ``spawn`` when
+electron transport is on (Phase 1); with it off, the electron energy is deposited at
+the interaction voxel — the Phase 0 KERMA approximation, kept as an explicit option
+for photon-only physics tests (AGENTS.md 7.2).
 
-- **KERMA / local deposition**: secondary electrons and positrons are not transported;
-  their kinetic energy is deposited in the interaction voxel. Valid where charged-
-  particle equilibrium holds; systematically wrong within an electron range of
-  interfaces and the surface. Electron transport is Phase 1.
-- **No fluorescence**: the photoelectric event deposits the full photon energy
-  locally; characteristic x-rays (< 1 keV in water) are not emitted.
-- **Positron annihilation at rest**: pair events deposit E - 2 m_e c^2 locally and
-  emit two back-to-back 511 keV photons, isotropically oriented, from the pair vertex.
-  Annihilation in flight is neglected.
+Stated approximations, named here because this is where they are implemented:
+
+- **No fluorescence**: the photoelectric event hands the full photon energy to the
+  photoelectron (or the voxel); characteristic x-rays (< 1 keV in water) are not
+  emitted. The photoelectron is emitted **forward** (maintainer-approved; the Sauter
+  distribution is strongly forward at these energies anyway).
+- **Pair energy split sampled uniformly** between the electron and positron
+  (maintainer-approved), both emitted **forward**; the positron annihilates at rest
+  (see :mod:`pyRadMC.transport.particles`).
 - **No Rayleigh by default** (see :mod:`pyRadMC.data.analytic`).
 
 Photons at or below ``pcut`` deposit their energy locally and terminate.
@@ -29,21 +31,30 @@ Photons at or below ``pcut`` deposit their energy locally and terminate.
 from __future__ import annotations
 
 import math
-from collections.abc import Callable
 
 from pyRadMC import ELECTRON_MASS_MEV
 from pyRadMC.data.interface import CrossSectionSource, PhotonProcess
 from pyRadMC.geometry.grid import VoxelGrid
 from pyRadMC.physics.channel import select_photon_process
-from pyRadMC.physics.compton import compton_cos_theta, sample_compton_energy_ratio
-from pyRadMC.physics.direction import rotate_direction, sample_isotropic_direction
+from pyRadMC.physics.compton import (
+    compton_cos_theta,
+    compton_electron_cos_theta,
+    sample_compton_energy_ratio,
+)
+from pyRadMC.physics.direction import rotate_direction
 from pyRadMC.physics.path import sample_path_length
 from pyRadMC.rng import RNGState, uniform
+from pyRadMC.transport.particles import (
+    ELECTRON,
+    PHOTON,
+    POSITRON,
+    DepositFn,
+    SpawnFn,
+    StackEntry,
+    annihilate_at_rest,
+)
 
-__all__ = ["DepositFn", "transport_photon"]
-
-DepositFn = Callable[[int, int, int, float], None]
-"""Callback ``(ix, iy, iz, energy_mev)`` scoring one energy deposit."""
+__all__ = ["DepositFn", "photon_steps", "transport_photon"]
 
 # Nudge past the grid surface after the vacuum flight, so the entry position is
 # strictly inside under the half-open convention. 1e-9 cm is float-noise relative to
@@ -53,6 +64,116 @@ _ENTRY_NUDGE_CM = 1.0e-9
 # Relative headroom for the majorant sanity check. The majorant must bound the real
 # cross-section exactly; the epsilon only forgives float evaluation-order noise.
 _MAJORANT_TOLERANCE = 1.0e-9
+
+
+def photon_steps(
+    energy: float,
+    x: float,
+    y: float,
+    z: float,
+    ux: float,
+    uy: float,
+    uz: float,
+    grid: VoxelGrid,
+    cross_sections: CrossSectionSource,
+    rng_state: RNGState,
+    deposit: DepositFn,
+    spawn: SpawnFn,
+    pcut: float,
+    ecut: float,
+    transport_electrons: bool,
+) -> float:
+    """Transport one photon; secondaries go to ``spawn``. Returns escaped energy.
+
+    With ``transport_electrons`` false, charged secondaries deposit locally (KERMA);
+    annihilation photons are spawned in either mode. Charged secondaries at or below
+    ``ecut`` deposit locally in either mode (production threshold).
+    """
+    escaped = 0.0
+    e = energy
+
+    # Fly through the vacuum outside the grid, if born there.
+    if not grid.contains(x, y, z):
+        t = grid.distance_to_entry(x, y, z, ux, uy, uz)
+        if math.isinf(t):
+            return e
+        t += _ENTRY_NUDGE_CM
+        x += t * ux
+        y += t * uy
+        z += t * uz
+        if not grid.contains(x, y, z):  # grazing-corner numerics
+            return e
+
+    while True:
+        mu_majorant = cross_sections.majorant(e)
+        step = sample_path_length(mu_majorant, rng_state)
+        x += step * ux
+        y += step * uy
+        z += step * uz
+        if not grid.contains(x, y, z):
+            return escaped + e
+
+        ix, iy, iz = grid.voxel_index(x, y, z)
+        rho = float(grid.density[ix, iy, iz])
+        material = int(grid.material[ix, iy, iz])
+        mu_compton = rho * cross_sections.mu_over_rho(e, material, PhotonProcess.COMPTON)
+        mu_photo = rho * cross_sections.mu_over_rho(e, material, PhotonProcess.PHOTOELECTRIC)
+        mu_pair = rho * cross_sections.mu_over_rho(e, material, PhotonProcess.PAIR)
+        mu_real = mu_compton + mu_photo + mu_pair
+        if mu_real > mu_majorant * (1.0 + _MAJORANT_TOLERANCE):
+            raise RuntimeError(
+                f"Woodcock majorant violated: mu_real={mu_real:.6e} > "
+                f"majorant={mu_majorant:.6e} 1/cm at E={e:.4f} MeV, "
+                f"voxel ({ix}, {iy}, {iz}). The geometry contains material or "
+                "density the majorant declaration did not cover."
+            )
+
+        # Delta (fictitious) scattering: no interaction, keep flying.
+        if uniform(rng_state) * mu_majorant >= mu_real:
+            continue
+
+        process = select_photon_process(mu_compton, mu_photo, mu_pair, rng_state)
+
+        if process == PhotonProcess.COMPTON:
+            ratio = sample_compton_energy_ratio(e, rng_state)
+            recoil = e * (1.0 - ratio)
+            phi = 2.0 * math.pi * uniform(rng_state)
+            if transport_electrons and recoil > ecut:
+                cos_electron = compton_electron_cos_theta(e, ratio)
+                edir = rotate_direction(ux, uy, uz, cos_electron, phi + math.pi)
+                spawn((ELECTRON, recoil, x, y, z, *edir))
+            else:
+                deposit(ix, iy, iz, recoil)
+            cos_gamma = compton_cos_theta(e, ratio)
+            ux, uy, uz = rotate_direction(ux, uy, uz, cos_gamma, phi)
+            e *= ratio
+            if e <= pcut:
+                deposit(ix, iy, iz, e)
+                return escaped
+        elif process == PhotonProcess.PHOTOELECTRIC:
+            if transport_electrons and e > ecut:
+                spawn((ELECTRON, e, x, y, z, ux, uy, uz))  # forward, no fluorescence
+            else:
+                deposit(ix, iy, iz, e)
+            return escaped
+        else:  # pair production
+            kinetic = e - 2.0 * ELECTRON_MASS_MEV
+            if transport_electrons:
+                fraction = uniform(rng_state)  # uniform split, stated approximation
+                for kind, share in (
+                    (ELECTRON, fraction * kinetic),
+                    (POSITRON, (1.0 - fraction) * kinetic),
+                ):
+                    if share > ecut:
+                        spawn((kind, share, x, y, z, ux, uy, uz))  # forward
+                    else:
+                        deposit(ix, iy, iz, share)
+                        if kind == POSITRON:
+                            annihilate_at_rest(x, y, z, grid, rng_state, deposit, spawn, pcut)
+            else:
+                deposit(ix, iy, iz, kinetic)
+                annihilate_at_rest(x, y, z, grid, rng_state, deposit, spawn, pcut)
+            return escaped
 
 
 def transport_photon(
@@ -69,109 +190,49 @@ def transport_photon(
     deposit: DepositFn,
     pcut: float,
 ) -> float:
-    """Transport one photon history (primary plus its annihilation photons).
+    """Transport one photon history in KERMA mode (Phase 0 behaviour).
 
-    Parameters
-    ----------
-    energy
-        Photon energy in MeV.
-    x, y, z
-        Start position in cm; may be outside the grid (the outside is vacuum).
-    ux, uy, uz
-        Unit direction.
-    grid
-        The voxel phantom.
-    cross_sections
-        Interaction data source; also supplies the Woodcock majorant, which is
-        sanity-checked against the local cross-section at every real-interaction
-        candidate (a violated majorant biases dose smoothly and invisibly).
-    rng_state
-        Per-history RNG state.
-    deposit
-        Scoring callback receiving voxel indices and the deposited energy in MeV.
-    pcut
-        Photon cutoff in MeV (see ``pyRadMC.PCUT_MEV``); accuracy-defining, so it is
-        an explicit argument, never defaulted here.
-
-    Returns
-    -------
-    float
-        Energy escaping the grid, in MeV. The caller balances this against emitted
-        and deposited energy; the sum is exact.
+    Electron energy deposits at the interaction voxel; annihilation photons are
+    followed. Kept as the photon-only entry point for attenuation and scatter tests,
+    where local deposition *is* the observable being tested. Full histories with
+    electron transport go through :func:`pyRadMC.transport.history.transport_history`.
     """
-    escaped = 0.0
-    # The history's particle stack: the primary, then annihilation photons.
-    stack = [(energy, x, y, z, ux, uy, uz)]
-
+    stack: list[StackEntry] = []
+    escaped = photon_steps(
+        energy,
+        x,
+        y,
+        z,
+        ux,
+        uy,
+        uz,
+        grid,
+        cross_sections,
+        rng_state,
+        deposit,
+        stack.append,
+        pcut,
+        ecut=math.inf,  # unused in KERMA mode: every charged secondary deposits
+        transport_electrons=False,
+    )
     while stack:
-        e, px, py, pz, dx, dy, dz = stack.pop()
-
-        # Fly through the vacuum outside the grid, if born there.
-        if not grid.contains(px, py, pz):
-            t = grid.distance_to_entry(px, py, pz, dx, dy, dz)
-            if math.isinf(t):
-                escaped += e
-                continue
-            t += _ENTRY_NUDGE_CM
-            px += t * dx
-            py += t * dy
-            pz += t * dz
-            if not grid.contains(px, py, pz):  # grazing-corner numerics
-                escaped += e
-                continue
-
-        while True:
-            mu_majorant = cross_sections.majorant(e)
-            step = sample_path_length(mu_majorant, rng_state)
-            px += step * dx
-            py += step * dy
-            pz += step * dz
-            if not grid.contains(px, py, pz):
-                escaped += e
-                break
-
-            ix, iy, iz = grid.voxel_index(px, py, pz)
-            rho = float(grid.density[ix, iy, iz])
-            material = int(grid.material[ix, iy, iz])
-            mu_compton = rho * cross_sections.mu_over_rho(e, material, PhotonProcess.COMPTON)
-            mu_photo = rho * cross_sections.mu_over_rho(e, material, PhotonProcess.PHOTOELECTRIC)
-            mu_pair = rho * cross_sections.mu_over_rho(e, material, PhotonProcess.PAIR)
-            mu_real = mu_compton + mu_photo + mu_pair
-            if mu_real > mu_majorant * (1.0 + _MAJORANT_TOLERANCE):
-                raise RuntimeError(
-                    f"Woodcock majorant violated: mu_real={mu_real:.6e} > "
-                    f"majorant={mu_majorant:.6e} 1/cm at E={e:.4f} MeV, "
-                    f"voxel ({ix}, {iy}, {iz}). The geometry contains material or "
-                    "density the majorant declaration did not cover."
-                )
-
-            # Delta (fictitious) scattering: no interaction, keep flying.
-            if uniform(rng_state) * mu_majorant >= mu_real:
-                continue
-
-            process = select_photon_process(mu_compton, mu_photo, mu_pair, rng_state)
-
-            if process == PhotonProcess.COMPTON:
-                ratio = sample_compton_energy_ratio(e, rng_state)
-                deposit(ix, iy, iz, e * (1.0 - ratio))  # electron energy, locally
-                cos_theta = compton_cos_theta(e, ratio)
-                phi = 2.0 * math.pi * uniform(rng_state)
-                dx, dy, dz = rotate_direction(dx, dy, dz, cos_theta, phi)
-                e *= ratio
-                if e <= pcut:
-                    deposit(ix, iy, iz, e)
-                    break
-            elif process == PhotonProcess.PHOTOELECTRIC:
-                deposit(ix, iy, iz, e)  # no fluorescence
-                break
-            else:  # pair production
-                deposit(ix, iy, iz, e - 2.0 * ELECTRON_MASS_MEV)
-                if pcut >= ELECTRON_MASS_MEV:
-                    deposit(ix, iy, iz, 2.0 * ELECTRON_MASS_MEV)
-                else:
-                    ax, ay, az = sample_isotropic_direction(rng_state)
-                    stack.append((ELECTRON_MASS_MEV, px, py, pz, ax, ay, az))
-                    stack.append((ELECTRON_MASS_MEV, px, py, pz, -ax, -ay, -az))
-                break
-
+        kind, e, px, py, pz, dx, dy, dz = stack.pop()
+        assert kind == PHOTON  # KERMA mode spawns nothing else
+        escaped += photon_steps(
+            e,
+            px,
+            py,
+            pz,
+            dx,
+            dy,
+            dz,
+            grid,
+            cross_sections,
+            rng_state,
+            deposit,
+            stack.append,
+            pcut,
+            ecut=math.inf,
+            transport_electrons=False,
+        )
     return escaped

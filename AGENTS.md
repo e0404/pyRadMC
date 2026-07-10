@@ -250,8 +250,9 @@ A phase is not done when its tests pass. Before a phase may exit:
 
 ### 7.2 Current phase
 
-**Phase 1: reference condensed-history electron transport.** (Phase 0 — reference
-photon engine and interfaces — exited 2026-07-10 with all criteria met.)
+**Phase 1: reference condensed-history electron transport — exit criteria met
+2026-07-10.** (Phase 0 — reference photon engine and interfaces — exited the same
+day.)
 
 Secondary electrons, and positrons transported as electrons, get Class II
 condensed-history transport in the `ref` backend: Berger-Seltzer restricted collision
@@ -278,4 +279,9 @@ Exit criteria:
 - Fast tiers stay under 30 seconds.
 
 KERMA-mode transport remains available as an explicit engine option for photon-only
-physics tests. Do not begin Warp kernels or Dij scoring until Phase 1 exits.
+physics tests. The benchmark-PDD gamma gate in the validation tier stays a documented
+skip until the maintainer supplies trusted curves; it is data the exit criteria wait
+*for*, not *on*.
+
+Next is Phase 2 (Warp backend, CPU and CUDA from one source; see the README roadmap).
+Do not begin Warp kernels or Dij scoring without the maintainer's explicit go-ahead.

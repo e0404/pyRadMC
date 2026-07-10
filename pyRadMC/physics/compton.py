@@ -8,10 +8,12 @@ PCUT is 50 keV, where the error on the incoherent channel is a few percent).
 
 from __future__ import annotations
 
+import math
+
 from pyRadMC import ELECTRON_MASS_MEV
 from pyRadMC.rng import RNGState, uniform
 
-__all__ = ["compton_cos_theta", "sample_compton_energy_ratio"]
+__all__ = ["compton_cos_theta", "compton_electron_cos_theta", "sample_compton_energy_ratio"]
 
 
 def sample_compton_energy_ratio(energy: float, rng_state: RNGState) -> float:
@@ -83,3 +85,33 @@ def compton_cos_theta(energy: float, energy_ratio: float) -> float:
     alpha = energy / ELECTRON_MASS_MEV
     cos_theta = 1.0 + 1.0 / alpha - 1.0 / (alpha * energy_ratio)
     return min(1.0, max(-1.0, cos_theta))
+
+
+def compton_electron_cos_theta(energy: float, energy_ratio: float) -> float:
+    r"""Polar angle cosine of the Compton recoil electron.
+
+    Momentum conservation along the incident direction, with photon momenta equal to
+    their energies and the electron momentum :math:`p_e = \sqrt{T (T + 2 m_e c^2)}`
+    for the recoil kinetic energy :math:`T = E (1 - r)`:
+
+    .. math::
+
+        \cos\theta_e = \frac{E - E' \cos\theta_\gamma}{p_e}.
+
+    Exact free-electron kinematics; the transverse balance
+    :math:`p_e \sin\theta_e = E' \sin\theta_\gamma` is test-pinned. The electron
+    azimuth is opposite the photon azimuth. Undefined at r = 1 (no recoil): callers
+    only spawn an electron when T is above the production threshold.
+
+    Parameters
+    ----------
+    energy
+        Incident photon energy E in MeV.
+    energy_ratio
+        Scattered/incident energy ratio r = E'/E, strictly below 1.
+    """
+    recoil = energy * (1.0 - energy_ratio)
+    p_electron = math.sqrt(recoil * (recoil + 2.0 * ELECTRON_MASS_MEV))
+    cos_gamma = compton_cos_theta(energy, energy_ratio)
+    cos_electron = (energy - energy_ratio * energy * cos_gamma) / p_electron
+    return min(1.0, max(-1.0, cos_electron))

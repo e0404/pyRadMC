@@ -122,3 +122,31 @@ def test_mean_energy_ratio_matches_quadrature(energy: float) -> None:
     standard_error = float(np.std(r, ddof=1)) / np.sqrt(n)
     z = abs(float(np.mean(r)) - mean_exact) / standard_error
     assert z < 4.0, f"<r> = {np.mean(r):.6f} vs exact {mean_exact:.6f} at {energy} MeV: z = {z:.2f}"
+
+
+@pytest.mark.parametrize("energy", ENERGIES_MEV)
+def test_recoil_electron_angle_conserves_momentum(energy: float) -> None:
+    """Photon + electron momenta balance exactly in both components.
+
+    Longitudinal: E == E' cos(theta_gamma) + p_e cos(theta_e). Transverse:
+    E' sin(theta_gamma) == p_e sin(theta_e). Algebraic identities of the free-electron
+    kinematics; float tolerance only.
+    """
+    import math
+
+    from pyRadMC.physics.compton import compton_electron_cos_theta
+
+    for sampled in _samples(energy, 1_000, stream=4):
+        ratio = float(sampled)
+        if ratio > 0.999999:  # no recoil; the electron angle is undefined
+            continue
+        cos_g = compton_cos_theta(energy, ratio)
+        cos_e = compton_electron_cos_theta(energy, ratio)
+        recoil = energy * (1.0 - ratio)
+        p_e = math.sqrt(recoil * (recoil + 2.0 * ELECTRON_MASS_MEV))
+
+        longitudinal = ratio * energy * cos_g + p_e * cos_e
+        assert longitudinal == pytest.approx(energy, rel=1e-9)
+        transverse_gamma = ratio * energy * math.sqrt(max(0.0, 1.0 - cos_g * cos_g))
+        transverse_e = p_e * math.sqrt(max(0.0, 1.0 - cos_e * cos_e))
+        assert transverse_e == pytest.approx(transverse_gamma, rel=1e-6, abs=1e-9)

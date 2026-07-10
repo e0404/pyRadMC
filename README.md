@@ -2,10 +2,13 @@
 
 Fast photon Monte Carlo dose engine for radiotherapy treatment planning.
 
-> **Status: Phase 0 complete, pre-alpha.** The pure-NumPy reference engine transports
-> photons in voxelized water with analytic cross-sections; electrons are not yet
-> transported (KERMA approximation), so there is no electron buildup. Do not use for
-> anything clinical, now or later, without independent validation.
+> **Status: Phase 1 complete, pre-alpha.** The pure-NumPy reference engine transports
+> photons *and* secondary electrons (Class II condensed history: Berger-Seltzer
+> restricted stopping powers, discrete Moller events, Gaussian multiple-scattering
+> hinge, thin-target bremsstrahlung, positrons with at-rest annihilation) in
+> voxelized water with analytic cross-sections. Electron buildup is real; the
+> benchmark-PDD gamma gate awaits trusted reference curves. Do not use for anything
+> clinical, now or later, without independent validation.
 
 ## Why
 
@@ -54,6 +57,14 @@ hugs the same exponential, its scatter visible instead as the halo in the log-sc
 pip install -e ".[dev,examples]"
 python examples/phase0_reference_engine.py
 ```
+
+![Phase 1: electron buildup vs the KERMA approximation, and electron-beam depth doses](examples/phase1_electron_transport.png)
+
+Phase 1 added Class II condensed-history electron transport
+(`examples/phase1_electron_transport.py`): the left panel contrasts a 6 MeV photon
+beam with electrons transported against the same beam in the KERMA approximation —
+the buildup region is the difference — and the right panel shows electron-beam depth
+doses whose R50 tracks the CSDA range.
 
 The engine API in three lines:
 
@@ -108,11 +119,15 @@ repeating here because they are the ones people break:
 | Phase | Content |
 |---|---|
 | 0 ✅ | Reference photon transport (KERMA approximation), interfaces, test scaffold |
-| 1 | Reference condensed-history electron transport; PDD validation gate |
+| 1 ✅ | Reference condensed-history electron transport; PDD validation gate¹ |
 | 2 | Warp backend, CPU and CUDA from one source |
 | 3 | Beamlet tagging, batched Dij assembly, basic variance reduction |
 | 4 | Correlated sampling; study of per-beamlet noise vs. optimized-plan bias |
 | 5 | Tabulated data, phase-space source, pyRadPlan adapter |
+
+¹ The gamma-index PDD gate is scaffolded and skipped: it waits for trusted benchmark
+curves (see ``tests/validation/test_ranges_and_pdd.py``). Range and buildup gates
+anchored to NIST ESTAR run nightly.
 
 ## License
 

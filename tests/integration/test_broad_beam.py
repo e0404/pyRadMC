@@ -37,7 +37,13 @@ def depth_dose() -> tuple[np.ndarray, np.ndarray, float, np.ndarray]:
     xs = AnalyticCrossSections(geometry_densities=grid.max_density_by_material())
     source = ParallelBeamSource(energy=ENERGY_MEV, z=-1.0, x_range=(0.0, 16.0), y_range=(0.0, 16.0))
     engine = ReferenceEngine(grid=grid, cross_sections=xs, rng=HostRNG())
-    result = engine.run(source, n_histories=N_HISTORIES, n_batches=N_BATCHES, seed=SEED)
+    # KERMA mode, deliberately: this test's analytic expectation (D exp(mu z) growth
+    # from *scatter* alone) is a photon-only statement, and AGENTS.md 7.2 keeps KERMA
+    # as the explicit option for exactly this kind of test. Electron buildup has its
+    # own Phase 1 test on a fine grid.
+    result = engine.run(
+        source, n_histories=N_HISTORIES, n_batches=N_BATCHES, seed=SEED, transport_electrons=False
+    )
 
     mu = 1.0 * xs.mu_over_rho_total(ENERGY_MEV, WATER)
     depth = (np.arange(16) + 0.5) * 1.0

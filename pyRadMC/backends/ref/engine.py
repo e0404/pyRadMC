@@ -16,13 +16,14 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from pyRadMC import PCUT_MEV
+from pyRadMC import ECUT_MEV, PCUT_MEV
 from pyRadMC.data.interface import CrossSectionSource
 from pyRadMC.geometry.grid import VoxelGrid
 from pyRadMC.geometry.source import ParallelBeamSource, PencilBeamSource
 from pyRadMC.rng.interface import RNG
 from pyRadMC.scoring.dose import BatchedDoseScorer
-from pyRadMC.transport.photon import transport_photon
+from pyRadMC.transport.history import transport_history
+from pyRadMC.transport.particles import ELECTRON, PHOTON
 
 __all__ = ["ReferenceEngine", "TransportResult"]
 
@@ -61,13 +62,16 @@ class ReferenceEngine:
         n_batches: int,
         seed: int,
         pcut: float = PCUT_MEV,
+        ecut: float = ECUT_MEV,
+        transport_electrons: bool = True,
+        primary_kind: str = "photon",
     ) -> TransportResult:
         """Transport ``n_histories`` primaries in ``n_batches`` equal batches.
 
         Parameters
         ----------
         source
-            Primary photon source.
+            Primary source; its geometry is particle-agnostic (see ``primary_kind``).
         n_histories
             Total primaries; must be divisible by ``n_batches`` so every batch mean
             carries equal statistical weight.
@@ -76,10 +80,18 @@ class ReferenceEngine:
         seed
             Global seed; history ``i`` uses the stream ``(seed, i)``, so the result
             is bit-reproducible for a given target and seed regardless of batching.
-        pcut
-            Photon cutoff in MeV. Accuracy-defining (AGENTS.md section 2.8); the
-            default is the project-wide ``PCUT_MEV`` and changing it in a call is a
-            visible, greppable decision.
+        pcut, ecut
+            Photon and electron cutoffs in MeV. Accuracy-defining (AGENTS.md
+            section 2.8); the defaults are the project-wide values and changing one
+            in a call is a visible, greppable decision.
+        transport_electrons
+            False selects the Phase 0 KERMA approximation (charged secondaries
+            deposit at their creation voxel) — the explicit option AGENTS.md 7.2
+            keeps for photon-only physics tests.
+        primary_kind
+            ``"photon"`` (default) or ``"electron"``: what the source emits. The
+            electron option exists for validating electron transport against ranges;
+            electron *beams* as a clinical modality remain out of scope (AGENTS.md 6).
         """
         if n_histories < 1:
             raise ValueError(f"need at least one history, got {n_histories}")
@@ -88,6 +100,9 @@ class ReferenceEngine:
                 f"n_histories={n_histories} not divisible by n_batches={n_batches}; "
                 "unequal batches would weight batch means inconsistently"
             )
+        if primary_kind not in ("photon", "electron"):
+            raise ValueError(f"unknown primary_kind {primary_kind!r}")
+        kind = PHOTON if primary_kind == "photon" else ELECTRON
 
         scorer = BatchedDoseScorer(self.grid, n_batches)
         per_batch = n_histories // n_batches
@@ -101,7 +116,8 @@ class ReferenceEngine:
                 history += 1
                 primary = source.emit(state)
                 energy_emitted += primary.energy
-                energy_escaped += transport_photon(
+                energy_escaped += transport_history(
+                    kind,
                     primary.energy,
                     primary.x,
                     primary.y,
@@ -114,6 +130,8 @@ class ReferenceEngine:
                     state,
                     scorer.deposit,
                     pcut,
+                    ecut,
+                    transport_electrons,
                 )
             scorer.end_batch(per_batch)
 
