@@ -39,7 +39,9 @@ dev = [
     "ruff>=0.5",
 ]
 docs = ["mkdocs-material>=9.5"]
-all = ["pyRadMC[warp,numba,dev,docs]"]
+# Phase-exit examples only (AGENTS.md 7.1). matplotlib license: BSD-style, permissive.
+examples = ["matplotlib>=3.8"]
+all = ["pyRadMC[warp,numba,dev,docs,examples]"]
 
 [project.urls]
 Homepage = "https://github.com/CHANGEME/pyRadMC"
@@ -95,6 +97,7 @@ ignore = [
     "D203",  # conflicts with D211
     "D213",  # conflicts with D212
     "E741",  # single-letter names are idiomatic in transport physics (E, Z, A, w)
+    "N999",  # the package is deliberately named pyRadMC, capitals included
 ]
 
 [tool.ruff.lint.per-file-ignores]

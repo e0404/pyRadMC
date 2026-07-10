@@ -88,9 +88,7 @@ class CrossSectionSource(ABC):
     # -- electrons ----------------------------------------------------------
 
     @abstractmethod
-    def restricted_stopping_power(
-        self, energy: float, material: int, delta_cut: float
-    ) -> float:
+    def restricted_stopping_power(self, energy: float, material: int, delta_cut: float) -> float:
         """Restricted collision stopping power, in MeV cm^2/g.
 
         Energy losses above ``delta_cut`` are excluded, being handled explicitly as

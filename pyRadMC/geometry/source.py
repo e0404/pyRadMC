@@ -47,9 +47,7 @@ class PencilBeamSource:
         norm = math.sqrt(sum(c * c for c in self.direction))
         if norm == 0.0:
             raise ValueError("zero direction vector")
-        object.__setattr__(
-            self, "direction", tuple(c / norm for c in self.direction)
-        )
+        object.__setattr__(self, "direction", tuple(c / norm for c in self.direction))
 
     def emit(self, rng_state: RNGState) -> Primary:
         """Emit the (deterministic) primary; consumes no random numbers."""

@@ -10,7 +10,6 @@ from scipy import stats
 
 from pyRadMC.physics.direction import rotate_direction, sample_isotropic_direction
 from pyRadMC.rng.host import HostRNG
-
 from tests.conftest import SEED
 
 

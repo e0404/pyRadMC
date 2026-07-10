@@ -11,7 +11,7 @@ Lengths are in cm, densities in g/cm^3.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -44,9 +44,9 @@ class VoxelGrid:
 
     shape: tuple[int, int, int]
     spacing: tuple[float, float, float]
+    density: np.ndarray
+    material: np.ndarray
     origin: tuple[float, float, float] = (0.0, 0.0, 0.0)
-    density: np.ndarray = field(default=None)  # type: ignore[assignment]
-    material: np.ndarray = field(default=None)  # type: ignore[assignment]
 
     def __post_init__(self) -> None:
         """Validate array shapes, dtypes, and physical ranges."""
@@ -54,8 +54,6 @@ class VoxelGrid:
             raise ValueError(f"empty grid shape {self.shape}")
         if any(s <= 0.0 for s in self.spacing):
             raise ValueError(f"non-positive spacing {self.spacing}")
-        if self.density is None or self.material is None:
-            raise ValueError("density and material arrays are required")
         if self.density.shape != self.shape:
             raise ValueError(f"density shape {self.density.shape} != grid shape {self.shape}")
         if self.material.shape != self.shape:
@@ -72,7 +70,7 @@ class VoxelGrid:
         spacing: tuple[float, float, float],
         origin: tuple[float, float, float] = (0.0, 0.0, 0.0),
     ) -> VoxelGrid:
-        """A homogeneous unit-density water grid, the Phase 0 workhorse phantom."""
+        """Build a homogeneous unit-density water grid, the Phase 0 workhorse phantom."""
         return cls(
             shape=shape,
             spacing=spacing,
@@ -102,13 +100,49 @@ class VoxelGrid:
         check race — and is what the Warp kernels will compile to.
         """
         return (
-            int(math.floor((x - self.origin[0]) / self.spacing[0])),
-            int(math.floor((y - self.origin[1]) / self.spacing[1])),
-            int(math.floor((z - self.origin[2]) / self.spacing[2])),
+            math.floor((x - self.origin[0]) / self.spacing[0]),
+            math.floor((y - self.origin[1]) / self.spacing[1]),
+            math.floor((z - self.origin[2]) / self.spacing[2]),
         )
 
+    def distance_to_entry(
+        self, x: float, y: float, z: float, ux: float, uy: float, uz: float
+    ) -> float:
+        """Distance along (ux, uy, uz) to the grid surface; 0 inside; inf if missed.
+
+        Standard axis-aligned slab clipping. The region outside the grid is vacuum,
+        so a particle born outside flies this distance for free before Woodcock
+        tracking starts. The grid is convex: a straight flight that leaves it never
+        re-enters, so this is only ever needed once per particle.
+        """
+        if self.contains(x, y, z):
+            return 0.0
+
+        t_near = 0.0
+        t_far = math.inf
+        position = (x, y, z)
+        direction = (ux, uy, uz)
+        for axis in range(3):
+            lo = self.origin[axis]
+            hi = self.origin[axis] + self.shape[axis] * self.spacing[axis]
+            u = direction[axis]
+            p = position[axis]
+            if u == 0.0:
+                if not lo <= p < hi:
+                    return math.inf
+                continue
+            t1 = (lo - p) / u
+            t2 = (hi - p) / u
+            if t1 > t2:
+                t1, t2 = t2, t1
+            t_near = max(t_near, t1)
+            t_far = min(t_far, t2)
+        if t_near > t_far or t_far <= 0.0:
+            return math.inf
+        return t_near
+
     def max_density_by_material(self) -> tuple[tuple[int, float], ...]:
-        """The ``(material, max density)`` pairs present, for the Woodcock majorant.
+        """Collect the ``(material, max density)`` pairs, for the Woodcock majorant.
 
         Feeding anything less than the true per-material maximum into
         :meth:`pyRadMC.data.interface.CrossSectionSource.majorant` silently biases

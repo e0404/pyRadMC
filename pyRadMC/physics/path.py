@@ -13,11 +13,11 @@ __all__ = ["sample_path_length"]
 
 
 def sample_path_length(mu: float, rng_state: RNGState) -> float:
-    """Sample a free path from the exponential attenuation law.
+    r"""Sample a free path from the exponential attenuation law.
 
     .. math::
 
-        s = -\\frac{\\ln(1 - u)}{\\mu}, \\qquad u \\sim U[0, 1),
+        s = -\frac{\ln(1 - u)}{\mu}, \qquad u \sim U[0, 1),
 
     the inversion of :math:`P(S > s) = e^{-\\mu s}` (e.g. Salvat et al.,
     PENELOPE-2018, sec. 1.4.5; doi:10.1787/32da5043-en). ``log1p(-u)`` keeps full

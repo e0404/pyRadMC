@@ -2,7 +2,7 @@
 
 Pure scalar functions (AGENTS.md section 2.5). Directions are three floats, never an
 array: the tuple return maps onto ``wp.vec3`` when this source is compiled for the
-Warp targets (Phase 1).
+Warp targets (Phase 2).
 """
 
 from __future__ import annotations
@@ -35,16 +35,16 @@ def sample_isotropic_direction(rng_state: RNGState) -> tuple[float, float, float
 def rotate_direction(
     ux: float, uy: float, uz: float, cos_theta: float, phi: float
 ) -> tuple[float, float, float]:
-    """Deflect the unit vector (ux, uy, uz) by polar angle theta and azimuth phi.
+    r"""Deflect the unit vector (ux, uy, uz) by polar angle theta and azimuth phi.
 
     The standard direction-cosine update of Monte Carlo transport (e.g. Salvat et al.,
     PENELOPE-2018, eq. 1.131):
 
     .. math::
 
-        u_x' = u_x \\cos\\theta
-             + \\frac{\\sin\\theta}{\\sqrt{1 - u_z^2}}
-               (u_x u_z \\cos\\phi - u_y \\sin\\phi)
+        u_x' = u_x \cos\theta
+             + \frac{\sin\theta}{\sqrt{1 - u_z^2}}
+               (u_x u_z \cos\phi - u_y \sin\phi)
 
     and cyclic counterparts, with the polar singularity replaced by the exact
     axis-aligned rotation when the transverse magnitude underflows the pole floor.
@@ -52,7 +52,7 @@ def rotate_direction(
     :math:`1 - u_z^2` is evaluated as :math:`u_x^2 + u_y^2` — identical for a unit
     vector, but free of the catastrophic cancellation that costs the naive form half
     its digits near the pole (percent-level norm errors at
-    :math:`|u_z| \\approx 1 - 5 \\cdot 10^{-15}`, where the test tier checks it).
+    :math:`|u_z| \approx 1 - 5 \cdot 10^{-15}`, where the test tier checks it).
 
     Parameters
     ----------

@@ -84,19 +84,19 @@ _WATER_TOTAL_MU_OVER_RHO_ANCHORS: tuple[tuple[float, float], ...] = (
 
 
 def _klein_nishina_total_cm2(energy_mev: float) -> float:
-    """Total Klein-Nishina cross-section per free electron at rest, in cm^2.
+    r"""Total Klein-Nishina cross-section per free electron at rest, in cm^2.
 
     .. math::
 
-        \\sigma_{KN}(\\alpha) = 2 \\pi r_e^2 \\left[
-            \\frac{1+\\alpha}{\\alpha^2}\\left(
-                \\frac{2(1+\\alpha)}{1+2\\alpha} - \\frac{\\ln(1+2\\alpha)}{\\alpha}
-            \\right)
-            + \\frac{\\ln(1+2\\alpha)}{2\\alpha}
-            - \\frac{1+3\\alpha}{(1+2\\alpha)^2}
-        \\right]
+        \sigma_{KN}(\alpha) = 2 \pi r_e^2 \left[
+            \frac{1+\alpha}{\alpha^2}\left(
+                \frac{2(1+\alpha)}{1+2\alpha} - \frac{\ln(1+2\alpha)}{\alpha}
+            \right)
+            + \frac{\ln(1+2\alpha)}{2\alpha}
+            - \frac{1+3\alpha}{(1+2\alpha)^2}
+        \right]
 
-    with :math:`\\alpha = E / m_e c^2`. Klein & Nishina (1929),
+    with :math:`\alpha = E / m_e c^2`. Klein & Nishina (1929),
     doi:10.1007/BF01366453; the closed form is standard, e.g. Attix (1986) eq. 7.15.
     """
     alpha = energy_mev / ELECTRON_MASS_MEV
@@ -122,9 +122,7 @@ class AnalyticCrossSections(CrossSectionSource):
         biases the transport (see :meth:`majorant`).
     """
 
-    def __init__(
-        self, geometry_densities: tuple[tuple[int, float], ...] = ((WATER, 1.0),)
-    ) -> None:
+    def __init__(self, geometry_densities: tuple[tuple[int, float], ...] = ((WATER, 1.0),)) -> None:
         for material, density in geometry_densities:
             if not 0 <= material < len(MATERIALS):
                 raise ValueError(f"unknown material index {material}")
@@ -173,40 +171,35 @@ class AnalyticCrossSections(CrossSectionSource):
             for material, density in self._geometry_densities
         )
 
-    # -- electrons (Phase 2; electrons are not transported in Phase 0) -------
+    # -- electrons (Phase 1; electrons are not transported in Phase 0) -------
 
-    def restricted_stopping_power(
-        self, energy: float, material: int, delta_cut: float
-    ) -> float:
+    def restricted_stopping_power(self, energy: float, material: int, delta_cut: float) -> float:
         """Not implemented in Phase 0: electron energy is deposited locally (KERMA)."""
-        raise NotImplementedError("Phase 2: electron transport is not part of Phase 0")
+        raise NotImplementedError("Phase 1: electron transport is not part of Phase 0")
 
     def radiative_stopping_power(self, energy: float, material: int) -> float:
         """Not implemented in Phase 0: electron energy is deposited locally (KERMA)."""
-        raise NotImplementedError("Phase 2: electron transport is not part of Phase 0")
+        raise NotImplementedError("Phase 1: electron transport is not part of Phase 0")
 
     def csda_range(self, energy: float, material: int) -> float:
         """Not implemented in Phase 0: electron energy is deposited locally (KERMA)."""
-        raise NotImplementedError("Phase 2: electron transport is not part of Phase 0")
+        raise NotImplementedError("Phase 1: electron transport is not part of Phase 0")
 
     def scattering_power(self, energy: float, material: int) -> float:
         """Not implemented in Phase 0: electron energy is deposited locally (KERMA)."""
-        raise NotImplementedError("Phase 2: electron transport is not part of Phase 0")
+        raise NotImplementedError("Phase 1: electron transport is not part of Phase 0")
 
     # -- construction ---------------------------------------------------------
 
     def build_tables(self) -> object:
         """Not implemented in Phase 0: the reference backend uses the host API directly."""
-        raise NotImplementedError("Phase 1: kernel table flattening is not part of Phase 0")
+        raise NotImplementedError("Phase 2: kernel table flattening arrives with Warp")
 
     # -- internals ------------------------------------------------------------
 
     def _photoelectric(self, energy: float) -> float:
         """Photoelectric tau/rho for water, E^-3 anchored at 50 keV. See module docstring."""
-        return (
-            _PHOTOELECTRIC_ANCHOR_WATER
-            * (_PHOTOELECTRIC_ANCHOR_ENERGY_MEV / energy) ** 3
-        )
+        return _PHOTOELECTRIC_ANCHOR_WATER * (_PHOTOELECTRIC_ANCHOR_ENERGY_MEV / energy) ** 3
 
     def _pair(self, energy: float) -> float:
         """Pair kappa/rho for water: threshold shape times a calibrated log-polynomial."""

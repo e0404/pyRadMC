@@ -7,7 +7,6 @@ from scipy import stats
 
 from pyRadMC.physics.path import sample_path_length
 from pyRadMC.rng.host import HostRNG
-
 from tests.conftest import SEED
 
 
@@ -41,8 +40,7 @@ def test_path_lengths_are_exponential() -> None:
     observed, _ = np.histogram(s, bins=edges)
     chi2, p_value = stats.chisquare(observed)
     assert p_value > 0.01, (
-        f"free paths not Exp({mu}): chi2={chi2:.1f} on {len(observed) - 1} dof, "
-        f"p={p_value:.2e}"
+        f"free paths not Exp({mu}): chi2={chi2:.1f} on {len(observed) - 1} dof, p={p_value:.2e}"
     )
 
     standard_error = float(np.std(s, ddof=1)) / np.sqrt(n)

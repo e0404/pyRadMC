@@ -8,6 +8,8 @@ analytic Klein-Nishina pdf with the chi-squared detection oracle.
 
 from __future__ import annotations
 
+import itertools
+
 import numpy as np
 import pytest
 from scipy import integrate, stats
@@ -15,7 +17,6 @@ from scipy import integrate, stats
 from pyRadMC import ELECTRON_MASS_MEV
 from pyRadMC.physics.compton import compton_cos_theta, sample_compton_energy_ratio
 from pyRadMC.rng.host import HostRNG
-
 from tests.conftest import SEED
 
 ENERGIES_MEV = [0.2, 1.0, 6.0, 20.0]
@@ -80,14 +81,16 @@ def test_sampled_spectrum_matches_klein_nishina(energy: float) -> None:
     observed, _ = np.histogram(r, bins=edges)
 
     norm, _ = integrate.quad(lambda x: float(_kn_pdf_unnormalized(np.array(x), alpha)), r_min, 1.0)
-    expected = np.array(
-        [
-            integrate.quad(
-                lambda x: float(_kn_pdf_unnormalized(np.array(x), alpha)), lo, hi
-            )[0]
-            for lo, hi in zip(edges[:-1], edges[1:])
-        ]
-    ) / norm * n
+    expected = (
+        np.array(
+            [
+                integrate.quad(lambda x: float(_kn_pdf_unnormalized(np.array(x), alpha)), lo, hi)[0]
+                for lo, hi in itertools.pairwise(edges)
+            ]
+        )
+        / norm
+        * n
+    )
     # Guard the chi-squared approximation, not the physics.
     assert np.all(expected > 20.0), "bin layout leaves low-count bins; rebin"
 
@@ -118,6 +121,4 @@ def test_mean_energy_ratio_matches_quadrature(energy: float) -> None:
 
     standard_error = float(np.std(r, ddof=1)) / np.sqrt(n)
     z = abs(float(np.mean(r)) - mean_exact) / standard_error
-    assert z < 4.0, (
-        f"<r> = {np.mean(r):.6f} vs exact {mean_exact:.6f} at {energy} MeV: z = {z:.2f}"
-    )
+    assert z < 4.0, f"<r> = {np.mean(r):.6f} vs exact {mean_exact:.6f} at {energy} MeV: z = {z:.2f}"

@@ -1,4 +1,7 @@
-.PHONY: test test-all lint format types bench clean
+.PHONY: test test-all lint format types bench clean hooks
+
+hooks:
+	git config core.hooksPath .githooks
 
 test:
 	pytest

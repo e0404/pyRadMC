@@ -144,7 +144,7 @@ at the point of implementation, not buried in a design document.
 ## 3. Architecture
 
 ```
-src/pyRadMC/
+pyRadMC/
   physics/     pure scalar functions: sampling, kinematics, energy loss
   data/        CrossSectionSource interface; analytic and tabulated backends; materials
   geometry/    rectilinear voxel grid, Woodcock majorant, source models
@@ -230,17 +230,36 @@ This ordering was established empirically, not assumed. Do not reorder it withou
 
 ---
 
-## 7. Current phase
+## 7. Phases
 
-**Phase 0: reference engine and interfaces.**
+The phase sequence and content live in the README roadmap. This section defines how a
+phase ends and which one is active.
 
-Photon transport only, in the `ref` backend, with analytic cross-sections. Electrons are not
-transported; their energy is deposited locally (a KERMA approximation). This is deliberate.
+### 7.1 Exiting a phase
 
-Exit criteria:
+A phase is not done when its tests pass. Before a phase may exit:
+
+1. **A runnable example exists** under `examples/`, named after the phase, that
+   demonstrates what the phase built on a small but physically meaningful problem. It
+   must produce an intuitive visualization, saved beside the script, that a physicist
+   can sanity-check at a glance — a depth-dose curve reads; a printed array does not.
+   Examples run manually, not in CI; keep each under a minute on a laptop.
+2. **The documentation is updated to match what now exists**: the README status and
+   roadmap, this file's current-phase section, and any docstring, comment, or test
+   skip-reason whose phase reference the exit has made stale.
+
+### 7.2 Current phase
+
+**Phase 0: reference engine and interfaces — exit criteria met 2026-07-10.**
+
+Photon transport only, in the `ref` backend, with analytic cross-sections. Electrons are
+not transported; their energy is deposited locally (a KERMA approximation). This was
+deliberate. The exit criteria, all met:
 
 - Exponential attenuation and broad-beam buildup reproduce analytic expectations.
 - `CrossSectionSource` and `RNG` interfaces are stable and have contract tests.
 - The full test-tier scaffold exists and the fast tiers run in under 30 seconds.
 
-Do not begin electron transport, Warp kernels, or Dij scoring until Phase 0 exits.
+Next is Phase 1 (reference condensed-history electron transport; see the README
+roadmap). Do not begin electron transport, Warp kernels, or Dij scoring without the
+maintainer's explicit go-ahead.

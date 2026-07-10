@@ -15,15 +15,15 @@ __all__ = ["compton_cos_theta", "sample_compton_energy_ratio"]
 
 
 def sample_compton_energy_ratio(energy: float, rng_state: RNGState) -> float:
-    """Sample the scattered/incident photon energy ratio r = E'/E via Kahn rejection.
+    r"""Sample the scattered/incident photon energy ratio r = E'/E via Kahn rejection.
 
     Samples exactly from the Klein-Nishina differential cross-section
 
     .. math::
 
-        \\frac{d\\sigma}{dr} \\propto r + \\frac{1}{r} - \\sin^2\\theta(r),
-        \\qquad r \\in \\left[\\frac{1}{1 + 2\\alpha},\\, 1\\right],
-        \\quad \\alpha = E / m_e c^2,
+        \frac{d\sigma}{dr} \propto r + \frac{1}{r} - \sin^2\theta(r),
+        \qquad r \in \left[\frac{1}{1 + 2\alpha},\, 1\right],
+        \quad \alpha = E / m_e c^2,
 
     by Kahn's two-branch mixture in x = 1/r: with probability
     (1 + 2 alpha)/(9 + 2 alpha), x is drawn uniformly on [1, 1 + 2 alpha] and accepted
@@ -33,7 +33,7 @@ def sample_compton_energy_ratio(energy: float, rng_state: RNGState) -> float:
     Kahn (1956), RAND AECU-3259; see also Salvat et al., PENELOPE-2018, sec. 2.3
     (doi:10.1787/32da5043-en). Exact at all energies; the rejection *efficiency*
     degrades above a few MeV, where Koblinger's direct method is preferred — an
-    acceptable cost in the reference backend, revisit for the Warp kernels (Phase 1).
+    acceptable cost in the reference backend, revisit for the Warp kernels (Phase 2).
 
     Parameters
     ----------
@@ -62,12 +62,12 @@ def sample_compton_energy_ratio(energy: float, rng_state: RNGState) -> float:
 
 
 def compton_cos_theta(energy: float, energy_ratio: float) -> float:
-    """Polar scattering angle cosine from the Compton relation.
+    r"""Polar scattering angle cosine from the Compton relation.
 
     .. math::
 
-        \\cos\\theta = 1 + \\frac{1}{\\alpha} - \\frac{1}{\\alpha r},
-        \\qquad \\alpha = E / m_e c^2, \\quad r = E'/E.
+        \cos\theta = 1 + \frac{1}{\alpha} - \frac{1}{\alpha r},
+        \qquad \alpha = E / m_e c^2, \quad r = E'/E.
 
     Compton (1923), doi:10.1103/PhysRev.21.483. Clamped to [-1, 1] against float
     round-off at the kinematic endpoints.

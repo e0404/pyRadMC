@@ -137,6 +137,4 @@ def assert_chi2_consistent(
     dof = int(np.count_nonzero(mask))
     p_value = float(stats.chi2.sf(chi2, dof))
 
-    assert p_value > alpha, (
-        f"chi2={chi2:.1f} on {dof} dof, p={p_value:.2e} < alpha={alpha}"
-    )
+    assert p_value > alpha, f"chi2={chi2:.1f} on {dof} dof, p={p_value:.2e} < alpha={alpha}"

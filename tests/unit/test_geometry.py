@@ -62,6 +62,26 @@ class TestVoxelGrid:
                 material=np.full((2, 2, 2), WATER, dtype=np.int32),
             )
 
+    def test_distance_to_entry(self) -> None:
+        """Slab clipping: head-on entry, oblique entry, miss, pointing away, inside."""
+        import math
+
+        from pyRadMC.geometry.grid import VoxelGrid
+
+        grid = VoxelGrid.uniform_water(shape=(4, 4, 4), spacing=(1.0, 1.0, 1.0))
+
+        assert grid.distance_to_entry(2.0, 2.0, -3.0, 0.0, 0.0, 1.0) == pytest.approx(3.0)
+        assert grid.distance_to_entry(2.0, 2.0, 2.0, 1.0, 0.0, 0.0) == 0.0  # inside
+        # Oblique 45-degree approach in the x-z plane.
+        s = 1.0 / np.sqrt(2.0)
+        assert grid.distance_to_entry(-1.0, 2.0, -1.0, s, 0.0, s) == pytest.approx(np.sqrt(2.0))
+        # Pointing away.
+        assert grid.distance_to_entry(2.0, 2.0, -3.0, 0.0, 0.0, -1.0) == math.inf
+        # Parallel ray that never crosses the x-slab.
+        assert grid.distance_to_entry(5.0, 2.0, -3.0, 0.0, 0.0, 1.0) == math.inf
+        # Would cross the z-slab but misses the box transversely.
+        assert grid.distance_to_entry(10.0, 2.0, -3.0, 0.0, 0.0, 1.0) == math.inf
+
     def test_density_extrema_per_material(self) -> None:
         """The majorant declaration must see the *maximum* density in the grid."""
         from pyRadMC.data.materials import WATER
@@ -77,9 +97,7 @@ class TestSources:
         from pyRadMC.geometry.source import PencilBeamSource
         from pyRadMC.rng.host import HostRNG
 
-        source = PencilBeamSource(
-            energy=6.0, position=(1.0, 2.0, -0.5), direction=(0.0, 0.0, 1.0)
-        )
+        source = PencilBeamSource(energy=6.0, position=(1.0, 2.0, -0.5), direction=(0.0, 0.0, 1.0))
         state = HostRNG().init_state(SEED, 40)
         for _ in range(10):
             p = source.emit(state)
