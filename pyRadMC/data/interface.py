@@ -102,6 +102,21 @@ class CrossSectionSource(ABC):
         """Radiative (bremsstrahlung) stopping power, in MeV cm^2/g."""
 
     @abstractmethod
+    def moller_cross_section(self, energy: float, material: int, delta_cut: float) -> float:
+        """Restricted Moller cross-section per unit mass, in cm^2/g.
+
+        Total cross-section for a discrete knock-on collision transferring more than
+        ``delta_cut`` (MeV, kinetic) to a delta ray. Zero when ``energy`` is at or
+        below ``2 * delta_cut``: by indistinguishability the delta is the *lower*
+        energy outgoing electron, so it can carry at most half the kinetic energy.
+
+        Consistency contract (tested): the energy moment of the Moller differential
+        cross-section above ``delta_cut`` equals the difference between the
+        unrestricted and restricted collision stopping powers. Moller (1932),
+        doi:10.1002/andp.19324060506.
+        """
+
+    @abstractmethod
     def csda_range(self, energy: float, material: int) -> float:
         """Continuous-slowing-down-approximation range, in g/cm^2.
 

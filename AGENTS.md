@@ -250,16 +250,32 @@ A phase is not done when its tests pass. Before a phase may exit:
 
 ### 7.2 Current phase
 
-**Phase 0: reference engine and interfaces — exit criteria met 2026-07-10.**
+**Phase 1: reference condensed-history electron transport.** (Phase 0 — reference
+photon engine and interfaces — exited 2026-07-10 with all criteria met.)
 
-Photon transport only, in the `ref` backend, with analytic cross-sections. Electrons are
-not transported; their energy is deposited locally (a KERMA approximation). This was
-deliberate. The exit criteria, all met:
+Secondary electrons, and positrons transported as electrons, get Class II
+condensed-history transport in the `ref` backend: Berger-Seltzer restricted collision
+stopping power with the Sternheimer density effect, discrete Moller events above ECUT,
+a Gaussian multiple-scattering hinge, and discrete thin-target bremsstrahlung (1/k
+spectrum between PCUT and the electron energy, emission rate matched to the radiative
+stopping power). Approximations decided for this phase (maintainer-approved
+2026-07-10), each named where implemented: positrons reuse electron cross-sections (no
+Bhabha) and annihilate at rest; bremsstrahlung photons and photoelectrons are emitted
+forward; the pair-production energy split is sampled uniformly.
 
-- Exponential attenuation and broad-beam buildup reproduce analytic expectations.
-- `CrossSectionSource` and `RNG` interfaces are stable and have contract tests.
-- The full test-tier scaffold exists and the fast tiers run in under 30 seconds.
+Exit criteria:
 
-Next is Phase 1 (reference condensed-history electron transport; see the README
-roadmap). Do not begin electron transport, Warp kernels, or Dij scoring without the
-maintainer's explicit go-ahead.
+- Photon-beam depth dose shows electron buildup; surface-to-maximum ratio and buildup
+  depth agree with physics-derived expectations.
+- Electron-beam depth dose: R50 and practical range consistent with ESTAR CSDA ranges,
+  within tolerances stated in the tests.
+- Stopping powers and CSDA ranges pinned against transcribed NIST ESTAR anchors in the
+  unit tier; the restricted-vs-unrestricted Moller consistency identity is
+  contract-tested.
+- The validation tier gains ESTAR-anchored gates plus a documented slot for
+  maintainer-supplied benchmark PDD curves (the gamma-index gate lands with that data).
+- Energy conservation and within-target bit reproducibility remain exact.
+- Fast tiers stay under 30 seconds.
+
+KERMA-mode transport remains available as an explicit engine option for photon-only
+physics tests. Do not begin Warp kernels or Dij scoring until Phase 1 exits.

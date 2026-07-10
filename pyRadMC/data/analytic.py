@@ -110,6 +110,96 @@ def _klein_nishina_total_cm2(energy_mev: float) -> float:
     return 2.0 * math.pi * CLASSICAL_ELECTRON_RADIUS_CM**2 * bracket
 
 
+_TWO_PI_RE2_MC2: float = 2.0 * math.pi * CLASSICAL_ELECTRON_RADIUS_CM**2 * ELECTRON_MASS_MEV
+"""2 pi r_e^2 m_e c^2 in MeV cm^2: the Moller/Bethe prefactor per electron."""
+
+_WATER_MEAN_EXCITATION_MEV: float = 75.0e-6
+"""Mean excitation energy I of liquid water, 75 eV (ICRU Report 37, 1984)."""
+
+_HIGHLAND_CONSTANT_MEV: float = 14.1
+_WATER_RADIATION_LENGTH_G_CM2: float = 36.08
+
+# Sternheimer density-effect parameters for liquid water: a, m, x0, x1, Cbar, delta0.
+# Sternheimer, Berger & Seltzer, At. Data Nucl. Data Tables 30, 261 (1984),
+# doi:10.1016/0092-640X(84)90002-0.
+_STERNHEIMER_WATER: tuple[float, float, float, float, float, float] = (
+    0.09116,
+    3.4773,
+    0.2400,
+    2.8004,
+    3.5017,
+    0.097,
+)
+
+# Radiative stopping power anchors for water (MeV -> MeV cm^2/g), NIST ESTAR.
+# The log-quadratic fit below passes through them exactly; the unit test pins them.
+_RADIATIVE_ANCHORS: tuple[tuple[float, float], ...] = (
+    (1.0, 0.0128),
+    (10.0, 0.1813),
+    (20.0, 0.4008),
+)
+
+
+def _fit_radiative_coefficients() -> tuple[float, float, float]:
+    """Exact log-quadratic through the three ESTAR radiative anchors."""
+    log_e = np.log([e for e, _ in _RADIATIVE_ANCHORS])
+    log_s = np.log([s for _, s in _RADIATIVE_ANCHORS])
+    design = np.stack([np.ones_like(log_e), log_e, log_e**2], axis=1)
+    c = np.linalg.solve(design, log_s)
+    return float(c[0]), float(c[1]), float(c[2])
+
+
+_RADIATIVE_FIT_COEFFS: tuple[float, float, float] = _fit_radiative_coefficients()
+
+
+def _density_effect_water(tau: float) -> float:
+    """Sternheimer density-effect correction delta for liquid water.
+
+    Piecewise in x = log10(p / m_e c) = log10(sqrt(tau (tau + 2))): zero-ish below
+    x0 (insulator form with the small delta0 conduction term), the standard
+    a (x1 - x)^m interpolation between x0 and x1, and the asymptotic 4.6052 x - Cbar
+    above. Sternheimer, Berger & Seltzer (1984), doi:10.1016/0092-640X(84)90002-0.
+    """
+    a, m, x0, x1, cbar, delta0 = _STERNHEIMER_WATER
+    x = 0.5 * math.log10(tau * (tau + 2.0))
+    if x >= x1:
+        return 4.6052 * x - cbar
+    if x >= x0:
+        return 4.6052 * x - cbar + a * math.pow(x1 - x, m)
+    return delta0 * math.pow(10.0, 2.0 * (x - x0))
+
+
+def moller_dcs_per_electron(energy: float, energy_transfer: float) -> float:
+    r"""Moller differential cross-section per electron, in cm^2/MeV.
+
+    For primary kinetic energy T and delta kinetic energy W, with x = W/T:
+
+    .. math::
+
+        \frac{d\sigma}{dW} = \frac{2\pi r_e^2 mc^2}{\beta^2 T^2}
+            \left[ \frac{1}{x^2} + \frac{1}{(1-x)^2}
+                 + \left(\frac{\tau}{\tau+1}\right)^2
+                 - \frac{2\tau+1}{(\tau+1)^2}\,\frac{1}{x(1-x)} \right],
+        \qquad 0 < x \le \tfrac12.
+
+    Moller (1932), doi:10.1002/andp.19324060506; e.g. Salvat et al., PENELOPE-2018,
+    eq. (3.111). Zero outside the kinematic interval. Exposed at module level so
+    tests can integrate it independently of the closed forms that use it.
+    """
+    if energy_transfer <= 0.0 or energy_transfer > energy / 2.0:
+        return 0.0
+    tau = energy / ELECTRON_MASS_MEV
+    beta_sq = tau * (tau + 2.0) / (tau + 1.0) ** 2
+    x = energy_transfer / energy
+    f = (
+        1.0 / x**2
+        + 1.0 / (1.0 - x) ** 2
+        + (tau / (tau + 1.0)) ** 2
+        - (2.0 * tau + 1.0) / (tau + 1.0) ** 2 / (x * (1.0 - x))
+    )
+    return _TWO_PI_RE2_MC2 / (beta_sq * energy**2) * f
+
+
 class AnalyticCrossSections(CrossSectionSource):
     """Closed-form Phase 0 photon cross-sections; see the module docstring.
 
@@ -130,6 +220,7 @@ class AnalyticCrossSections(CrossSectionSource):
                 raise ValueError(f"non-positive density {density} for material {material}")
         self._geometry_densities = geometry_densities
         self._pair_coeffs = self._fit_pair_coefficients()
+        self._range_log_energies, self._range_values = self._build_range_table()
 
     # -- photons ------------------------------------------------------------
 
@@ -171,23 +262,143 @@ class AnalyticCrossSections(CrossSectionSource):
             for material, density in self._geometry_densities
         )
 
-    # -- electrons (Phase 1; electrons are not transported in Phase 0) -------
+    # -- electrons (Phase 1; water-only, like the photon channels) -----------
 
     def restricted_stopping_power(self, energy: float, material: int, delta_cut: float) -> float:
-        """Not implemented in Phase 0: electron energy is deposited locally (KERMA)."""
-        raise NotImplementedError("Phase 1: electron transport is not part of Phase 0")
+        r"""Restricted collision stopping power, Berger-Seltzer form, in MeV cm^2/g.
+
+        .. math::
+
+            S(T, \Delta)/\rho = \frac{2\pi r_e^2 m c^2 N_e}{\beta^2}
+                \left[ \ln\frac{\tau^2(\tau+2)}{2 (I/mc^2)^2}
+                       + G^-(\tau, w) - \delta \right],
+            \qquad w = \Delta/T,
+
+        with the electron term (ICRU Report 37 (1984); Salvat et al., PENELOPE-2018,
+        sec. 3.2.3, doi:10.1787/32da5043-en)
+
+        .. math::
+
+            G^-(\tau, w) = -1 - \beta^2 + \ln\bigl(4(1-w)w\bigr) + \frac{1}{1-w}
+                + \frac{(\tau w)^2/2 + (2\tau+1)\ln(1-w)}{(\tau+1)^2}
+
+        and the Sternheimer density effect :math:`\delta`. At ``delta_cut = T/2`` this
+        is the unrestricted collision stopping power (the ESTAR collision column);
+        that limit and the Moller consistency identity are both test-pinned.
+
+        Shell corrections are neglected — percent-level below ~50 keV in water, far
+        below ECUT's influence on dose at this engine's energies.
+        """
+        self._check_electron_args(energy, material)
+        tau = energy / ELECTRON_MASS_MEV
+        beta_sq = tau * (tau + 2.0) / (tau + 1.0) ** 2
+        w = min(delta_cut / energy, 0.5)
+        if w <= 0.0:
+            raise ValueError(f"non-positive delta_cut {delta_cut} MeV")
+
+        g_minus = (
+            -1.0
+            - beta_sq
+            + math.log(4.0 * (1.0 - w) * w)
+            + 1.0 / (1.0 - w)
+            + ((tau * w) ** 2 / 2.0 + (2.0 * tau + 1.0) * math.log(1.0 - w)) / (tau + 1.0) ** 2
+        )
+        log_term = math.log(
+            tau**2 * (tau + 2.0) / (2.0 * (_WATER_MEAN_EXCITATION_MEV / ELECTRON_MASS_MEV) ** 2)
+        )
+        electrons = MATERIALS[material].electrons_per_gram
+        prefactor = _TWO_PI_RE2_MC2 * electrons / beta_sq
+        return prefactor * (log_term + g_minus - _density_effect_water(tau))
 
     def radiative_stopping_power(self, energy: float, material: int) -> float:
-        """Not implemented in Phase 0: electron energy is deposited locally (KERMA)."""
-        raise NotImplementedError("Phase 1: electron transport is not part of Phase 0")
+        """Radiative stopping power, in MeV cm^2/g: a log-quadratic ESTAR fit.
+
+        Like the pair channel, this is a calibration, not a theory: an exact
+        log-quadratic through the transcribed NIST ESTAR water anchors at 1, 10 and
+        20 MeV (Berger & Seltzer's data behind ESTAR; ICRU Report 37 (1984)). Below
+        1 MeV it extrapolates smoothly; there the radiative share of the total
+        stopping power is under one percent, so the extrapolation error is
+        dosimetrically irrelevant.
+        """
+        self._check_electron_args(energy, material)
+        log_e = math.log(energy)
+        c0, c1, c2 = _RADIATIVE_FIT_COEFFS
+        return math.exp(c0 + c1 * log_e + c2 * log_e**2)
+
+    def moller_cross_section(self, energy: float, material: int, delta_cut: float) -> float:
+        r"""Restricted Moller cross-section per unit mass, in cm^2/g.
+
+        Closed-form integral of the Moller DCS (:func:`moller_dcs_per_electron`) from
+        ``delta_cut`` to ``T/2``:
+
+        .. math::
+
+            \sigma(T, \Delta) = \frac{2\pi r_e^2 mc^2 N_e}{\beta^2 T}
+                \left[ \left(\frac{\tau}{\tau+1}\right)^2\left(\tfrac12 - w\right)
+                + \frac{1}{w} - \frac{1}{1-w}
+                + \frac{2\tau+1}{(\tau+1)^2} \ln\frac{w}{1-w} \right]
+
+        Moller (1932), doi:10.1002/andp.19324060506. Zero at or below ``2 delta_cut``.
+        """
+        self._check_electron_args(energy, material)
+        if energy <= 2.0 * delta_cut:
+            return 0.0
+        tau = energy / ELECTRON_MASS_MEV
+        beta_sq = tau * (tau + 2.0) / (tau + 1.0) ** 2
+        w = delta_cut / energy
+
+        bracket = (
+            (tau / (tau + 1.0)) ** 2 * (0.5 - w)
+            + 1.0 / w
+            - 1.0 / (1.0 - w)
+            + (2.0 * tau + 1.0) / (tau + 1.0) ** 2 * math.log(w / (1.0 - w))
+        )
+        electrons = MATERIALS[material].electrons_per_gram
+        return _TWO_PI_RE2_MC2 * electrons / (beta_sq * energy) * bracket
 
     def csda_range(self, energy: float, material: int) -> float:
-        """Not implemented in Phase 0: electron energy is deposited locally (KERMA)."""
-        raise NotImplementedError("Phase 1: electron transport is not part of Phase 0")
+        """CSDA range in g/cm^2: the range integral of the total stopping power.
+
+        Precomputed at construction by trapezoidal integration of ``1/S_total`` on a
+        dense logarithmic grid from 1 keV, then interpolated in log energy. Errs on
+        the *under*-estimating side for range rejection (the grid starts above zero,
+        truncating the sub-keV tail) by well under 1e-4 g/cm^2 — the safe side is
+        documented in the interface as the *over*-estimate, so range rejection (when
+        it arrives) must add its own safety margin anyway; the truncation here is
+        orders of magnitude below any voxel dimension this engine will see.
+        """
+        self._check_electron_args(energy, material)
+        log_e = math.log(energy)
+        return float(np.interp(log_e, self._range_log_energies, self._range_values))
 
     def scattering_power(self, energy: float, material: int) -> float:
-        """Not implemented in Phase 0: electron energy is deposited locally (KERMA)."""
-        raise NotImplementedError("Phase 1: electron transport is not part of Phase 0")
+        r"""Mass angular scattering power, in rad^2 cm^2/g.
+
+        Rossi-Greisen form with the Highland constant:
+
+        .. math::
+
+            T/\rho = \left(\frac{14.1\,\mathrm{MeV}}{p v}\right)^2 \frac{1}{X_0},
+            \qquad X_0(\text{water}) = 36.08\ \mathrm{g/cm^2}.
+
+        Rossi & Greisen, Rev. Mod. Phys. 13, 240 (1941),
+        doi:10.1103/RevModPhys.13.240; Highland, NIM 129, 497 (1975),
+        doi:10.1016/0029-554X(75)90743-0. The step-length logarithmic correction of
+        Highland's formula is neglected — a stated approximation, adequate for
+        depth-dose observables; revisit before trusting penumbra shapes.
+        """
+        self._check_electron_args(energy, material)
+        tau = energy / ELECTRON_MASS_MEV
+        # p*v = p^2 c^2 / E_total, in MeV.
+        pv = ELECTRON_MASS_MEV * tau * (tau + 2.0) / (tau + 1.0)
+        return (_HIGHLAND_CONSTANT_MEV / pv) ** 2 / _WATER_RADIATION_LENGTH_G_CM2
+
+    def _check_electron_args(self, energy: float, material: int) -> None:
+        """Shared validation for the electron accessors."""
+        if energy <= 0.0:
+            raise ValueError(f"non-positive electron kinetic energy {energy} MeV")
+        if not 0 <= material < len(MATERIALS):
+            raise ValueError(f"unknown material index {material}")
 
     # -- construction ---------------------------------------------------------
 
@@ -232,3 +443,25 @@ class AnalyticCrossSections(CrossSectionSource):
         design = np.stack([np.ones_like(log_e), log_e, log_e**2], axis=1)
         coeffs, *_ = np.linalg.lstsq(design, target, rcond=None)
         return float(coeffs[0]), float(coeffs[1]), float(coeffs[2])
+
+    def _build_range_table(self) -> tuple[np.ndarray, np.ndarray]:
+        """Integrate 1/S_total on a dense log grid: the CSDA range lookup for water.
+
+        Trapezoidal cumulative integration from 1 keV; the truncated sub-keV tail is
+        below 1e-5 g/cm^2. 600 log-spaced points hold the interpolation error well
+        under the 3 percent test tolerance.
+        """
+        energies = np.geomspace(1.0e-3, 30.0, 600)
+        inverse_total = np.array(
+            [
+                1.0
+                / (
+                    self.restricted_stopping_power(float(e), WATER, delta_cut=float(e) / 2.0)
+                    + self.radiative_stopping_power(float(e), WATER)
+                )
+                for e in energies
+            ]
+        )
+        steps = np.diff(energies) * 0.5 * (inverse_total[1:] + inverse_total[:-1])
+        ranges = np.concatenate(([0.0], np.cumsum(steps)))
+        return np.log(energies), ranges
