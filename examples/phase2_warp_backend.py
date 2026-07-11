@@ -47,8 +47,8 @@ INK_SECONDARY = "#52514e"
 GRID_LINE = "#e5e4e0"
 SERIES = ["#2a78d6", "#1baf7a", "#eda100"]  # blue, aqua, yellow
 
-N_Z = 40
-SPACING_Z = 0.2
+N_Z = 512
+SPACING_Z = 0.1
 
 
 def _style(ax: Axes) -> None:
@@ -62,7 +62,7 @@ def _style(ax: Axes) -> None:
 
 
 def _problem() -> tuple[VoxelGrid, AnalyticCrossSections, ParallelBeamSource]:
-    grid = VoxelGrid.uniform_water(shape=(8, 8, N_Z), spacing=(2.0, 2.0, SPACING_Z))
+    grid = VoxelGrid.uniform_water(shape=(128, 128, N_Z), spacing=(0.2, 0.2, SPACING_Z))
     xs = AnalyticCrossSections(geometry_densities=grid.max_density_by_material())
     source = ParallelBeamSource(energy=6.0, z=-1.0, x_range=(0.0, 16.0), y_range=(0.0, 16.0))
     return grid, xs, source

@@ -266,55 +266,67 @@ A phase is not done when its tests pass. Before a phase may exit:
 
 ### 7.2 Current phase
 
-**Phase 2: Warp backend, CPU and CUDA from one source — exit criteria met
-2026-07-11** (pending one maintainer decision, below). Phases 0 and 1 exited
-2026-07-10; their exit records live in the git history of this section.
+**Phase 3: beamlet tagging, batched Dij assembly, basic variance reduction —
+exit criteria met 2026-07-11.** Phases 0 through 2 exited earlier; their exit
+records live in the git history of this section.
 
-What Phase 2 built:
+What Phase 3 built:
 
-- **Single-source compilation.** The unmodified physics sources (plus the table
-  lookups and the geometry point queries) are re-imported with `pyRadMC.rng`,
-  `math`, and the array-handle aliases shimmed, then wrapped in `@wp.func`
-  (`backends/warp/physics.py`). The files on disk are what compiles; reference and
-  kernels cannot drift.
-- **Kernels mirror the reference loops** (`backends/warp/kernels.py`): separate
-  photon and electron kernels with persistent particle queues, all data through
-  the flattened tables of `data/tables.py` (`CrossSectionSource.build_tables` is
-  now concrete and generic). Kernels are channel-complete per section 2.10 — the
-  coherent branch exists with a Thomson-limit angular sampler
-  (`physics/rayleigh.py`), unreachable while every data source keeps the coherent
-  column at zero.
-- **Deterministic scoring.** int64 fixed-point deposits (1e-9 MeV quanta) make one
-  device + one seed bit-reproducible even under CUDA atomics; per-particle RNG
-  streams derive from the parent's, so results are also invariant to chunking
-  (test-pinned). Cross-target remains statistical only, now enforced by an AST
-  meta-test over the test tree.
-- **The batched chi-squared oracle** (`assert_chi2_consistent_batched`): with
-  sigmas estimated from k batches, each voxel's z^2 is F(1, nu)-distributed and
-  E[chi2] inflates by nu/(nu-2); the exact-sigma null mis-rejects unbiased
-  backend-vs-backend comparisons. Use the batched variant whenever *both* sides
-  carry batch-estimated sigma; it reduces to the plain oracle as batches grow.
+- **Stratified beamlet decomposition.** `BeamletGridSource` tiles the field;
+  which beamlet a history feeds is a *deterministic function of the history
+  index* (never sampled), fixed once in `ReferenceEngine.run_dij` and followed
+  by every backend. Since streams are pure in (seed, history) and scoring is
+  associative, scheduling — beamlet grouping, chunking, batch merging — is
+  bit-inert, and a 1x1 lattice reproduces the open-field `run` bit for bit.
+  Both are test-pinned; treat them as the specification when touching the
+  engines.
+- **Tagged transport and grouped scoring.** Every queued particle carries the
+  group-local index of its ancestral beamlet; a history's whole family scores
+  into one column of a dense `(group, n_batches, n_voxels)` int64 device
+  buffer, read back once per group. Host side, `BatchedBeamletScorer` keeps
+  dose and dose-squared per batch per column (section 2.4) and `DijAssembler`
+  emits the sparse CSC `DijResult` with a per-entry sigma. The pipeline carries
+  a *fixed* host cost per (group, batch, voxel) block — benchmark it only at
+  planning statistics, never toy history counts.
+- **Truncation certified on DVH endpoints.** The default column truncation
+  (section 2.8) moves D2/D50/D98 by well under 0.5 percent, established
+  deterministically from bit-identical truncated/untruncated pairs.
+- **Statistical weights and Russian roulette.** Particles carry weights,
+  inherited by every secondary and scaling every deposit; photons below
+  `PHOTON_ROULETTE_MEV` (0.5 MeV — deliberately under the 511 keV line, so
+  annihilation stays analog) play a fair game at a Compton scatter or
+  bremsstrahlung birth, under a weight-window cap. The game's weight-energy
+  change books through the escaped-energy ledger with both signs, so
+  **energy conservation stays exact per run** — the invariant tightened, it did
+  not become statistical. Unbiasedness is chi-squared-pinned against a
+  roulette-free instrument run (threshold monkeypatched to zero — the sanctioned
+  test-instrument pattern of section 2.10; roulette itself is always on, one
+  configuration).
 
-Exit criteria, measured:
+Exit criteria, measured (laptop RTX 4070, performance power profile):
 
-- Both Warp devices reproduce `ref` under the chi-squared detection oracle (the
-  section 4 primary; stronger than the z-score oracle the plan named) for KERMA,
-  full coupled transport, and electron beams.
-- GPU throughput: ~1.6e7 histories/s (6 MeV broad beam in water, coupled
-  transport, laptop RTX 4070) against the 1e6/s criterion; Warp-CPU ~4e5/s
-  single-threaded. Perf tier records baselines; the 1e6/s floor is asserted.
-- Energy conservation holds at 1e-4 relative on the Warp backend (float32
-  transport plus scoring quanta; exact on `ref` as before). Within-device bit
-  reproducibility is exact and asserted. Fast tiers stay under 30 seconds with a
-  warm kernel cache.
-
-**Resolved at exit (maintainer decision, 2026-07-11):** of the plan's "Warp-CPU
-within 2x of numba-CPU, or the numba backend is dropped", the never-built numba
-backend was dropped — subpackage and extra deleted. The Taichi note in the plan
-remains the fallback if Warp-CPU ever becomes the constraint.
+- Every Dij column is chi-squared-consistent with the reference oracle under
+  full coupled transport — the test that actually exercises tag inheritance
+  through the photon-electron queues. Scheduling bit-inertness and the
+  1x1-lattice anchor asserted as above.
+- **Wall-clock target, set from the measured Phase 2 throughput per the plan:**
+  a 100-beamlet 6 MeV field on a 64^3 water phantom to 2-3 percent per-beamlet
+  high-dose sigma in **under 10 seconds**. Measured: ~1.1e7 histories/s
+  end-to-end at planning statistics (4e5 histories/beamlet, 3.9 percent sigma,
+  3.5 s; sigma scales as 1/sqrt(N)). The perf tier asserts a 2e6 histories/s
+  floor at planning statistics.
+- Energy balance including the roulette ledger holds exactly on `ref` and at
+  1e-4 relative on Warp; the EGSnrc PDD gamma gates and ESTAR range checks pass
+  with roulette active.
 
 Standing items carried forward:
 
+- **Roulette efficiency is neutral on the GPU as configured** (a warp retires
+  with its longest thread, and electron transport dominates), and its CPU cost
+  is unmeasured under controlled conditions. The maintainer may retire or retune
+  the roulette *sites*, or pair them with Compton splitting so the culling earns
+  its keep; the weight infrastructure itself stays regardless — correlated
+  sampling (Phase 4) and weighted phase-space sources (Phase 5) are built on it.
 - **Pair-refit warning for whoever enables Rayleigh (Phase 5)**: the analytic pair
   channel is calibrated against water totals that *include* coherent scattering.
   Turning on a real coherent channel without recalibrating pair against
@@ -330,7 +342,6 @@ Standing items carried forward:
   over the full depth range at 2 percent / 2 mm — replace the data layer, never
   loosen this gate.**
 
-Next is Phase 3 (beamlet tagging, batched Dij assembly, basic variance reduction;
-see the README roadmap). Do not begin Dij scoring without the maintainer's
-explicit go-ahead. Phase 3 must set its wall-clock target from the measured Phase
-2 throughput, per the plan.
+Next is Phase 4 (correlated sampling; the study of per-beamlet noise vs.
+optimized-plan bias — see the README roadmap). Do not begin it without the
+maintainer's explicit go-ahead.

@@ -2,15 +2,21 @@
 
 Fast photon Monte Carlo dose engine for radiotherapy treatment planning.
 
-> **Status: Phase 2 complete, pre-alpha.** The production Warp backend runs the full
-> coupled photon-electron physics on CPU and CUDA **from the same physics source**
-> the pure-NumPy reference interprets, validated against that reference with the
-> chi-squared detection oracle on both devices. Scoring is fixed-point, so one
-> device + one seed is bit-reproducible even on CUDA. Measured throughput for a
-> 6 MeV broad beam in water with coupled transport: ~1.6e7 histories/s on a laptop
-> RTX 4070 (the 1e6/s exit criterion with an order of magnitude to spare) and
-> ~4e5/s single-threaded on Warp-CPU. No Dij yet (Phase 3). Do not use for
-> anything clinical, now or later, without independent validation.
+> **Status: Phase 3 complete, pre-alpha.** The engine now produces its primary
+> product: a **beamlet-resolved dose influence matrix (Dij)** — sparse CSC columns
+> with a per-entry statistical uncertainty, computed on CPU and CUDA by tagging
+> every history's whole secondary family with its beamlet of origin. Because RNG
+> streams are pure functions of (seed, history) and scoring is associative
+> fixed-point, *how* beamlets are scheduled (grouping, chunking, batch merging)
+> cannot change the matrix by one bit — test-pinned, along with per-column
+> statistical equivalence to the reference oracle and a DVH-endpoint
+> certification of the default column truncation. Measured end-to-end on a
+> laptop RTX 4070 at planning statistics: ~1.1e7 histories/s, i.e. a 100-beamlet
+> 6 MeV field at 2–3 % per-beamlet sigma in single-digit seconds. Particles
+> carry statistical weights (soft photons play an unbiased Russian roulette; the
+> EGSnrc validation gates pass with it active). No correlated sampling yet
+> (Phase 4). Do not use for anything clinical, now or later, without independent
+> validation.
 
 ## Why
 
@@ -75,6 +81,15 @@ same 6 MeV beam computed by the reference interpreter and by the Warp compilatio
 the *identical* physics source on CPU and CUDA. The depth-dose curves agree within
 their error bands; the bars show why the backend exists.
 
+![Phase 3: one Dij column, the fluence-sum identity, and a wedge plan recombined from the matrix](examples/phase3_dij.png)
+
+Phase 3 shipped the Dij itself (`examples/phase3_dij.py`): one beamlet's dose column
+with the truncated tail visible (left), the open field recombined from the columns at
+unit weights against an independently simulated open field (middle — columns
+partition the field exactly), and the point of the whole exercise (right): a wedge
+plan is `Dij @ weights`, no re-simulation, which is the loop a treatment-plan
+optimizer runs thousands of times.
+
 The engine API in three lines (swap in `WarpEngine(grid=..., cross_sections=...,
 device="cuda:0")` for the production backend — the `run` signatures are identical):
 
@@ -130,7 +145,7 @@ repeating here because they are the ones people break:
 | 0 ✅ | Reference photon transport (KERMA approximation), interfaces, test scaffold |
 | 1 ✅ | Reference condensed-history electron transport; PDD validation gate¹ |
 | 2 ✅ | Warp backend, CPU and CUDA from one source² |
-| 3 | Beamlet tagging, batched Dij assembly, basic variance reduction |
+| 3 ✅ | Beamlet tagging, batched Dij assembly, basic variance reduction³ |
 | 4 | Correlated sampling; study of per-beamlet noise vs. optimized-plan bias |
 | 5 | Tabulated data, phase-space source, pyRadPlan adapter |
 
@@ -145,6 +160,23 @@ RTX 4070. The third exit criterion offered "Warp-CPU within 2x of numba-CPU, or 
 numba backend is dropped"; the maintainer dropped the (never-built) numba backend at
 exit. The plan's Taichi note remains the fallback if Warp-CPU ever becomes the
 bottleneck.
+
+³ Exit measured on the same hardware: a 1x1-beamlet Dij column reproduces the
+open-field run bit for bit per device; every Dij column is chi-squared-consistent
+with the reference under full coupled transport; beamlet grouping, chunking and
+batch merging are bit-inert (scheduling cannot change the matrix); the default
+column truncation (1e-3 of the column maximum) moves the DVH endpoints D2/D50/D98
+by well under 0.5 percent — certified against DVH endpoints, never a matrix norm.
+Pipeline throughput at planning statistics: ~1.1e7 histories/s end-to-end (the
+perf tier asserts a 2e6 floor; the pipeline carries a fixed host-side cost, so it
+is only meaningful to benchmark at realistic history counts). Basic variance
+reduction shipped as the statistical-weight infrastructure plus Russian roulette
+of sub-0.5-MeV photons (annihilation photons sit just above and stay analog) —
+unbiasedness is test-pinned and the validation gates
+pass with it active; measured efficiency on the GPU is neutral (kill savings
+disappear under warp divergence), and the weight machinery is kept because
+correlated sampling (Phase 4) and weighted phase-space sources (Phase 5) are
+built on it.
 
 ## License
 
