@@ -52,6 +52,7 @@ _KERNEL_MODULES: dict[str, tuple[str, ...] | None] = {
     "pyRadMC.physics.moller": None,
     "pyRadMC.physics.msc": None,
     "pyRadMC.physics.brems": None,
+    "pyRadMC.physics.rayleigh": None,
     "pyRadMC.data.tables": ("lookup_loglinear_1d", "lookup_loglinear_2d"),
 }
 

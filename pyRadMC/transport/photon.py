@@ -23,7 +23,10 @@ Stated approximations, named here because this is where they are implemented:
 - **Pair energy split sampled uniformly** between the electron and positron
   (maintainer-approved), both emitted **forward**; the positron annihilates at rest
   (see :mod:`pyRadMC.transport.particles`).
-- **No Rayleigh by default** (see :mod:`pyRadMC.data.analytic`).
+- **No Rayleigh by default** is a property of the *data*, not of this loop: the loop
+  is channel-complete (AGENTS.md 2.10) and samples the coherent channel whenever the
+  data source reports it nonzero (see :mod:`pyRadMC.physics.rayleigh` for the angular
+  model). The analytic source keeps the coherent column at zero.
 
 Photons at or below ``pcut`` deposit their energy locally and terminate.
 """
@@ -43,6 +46,7 @@ from pyRadMC.physics.compton import (
 )
 from pyRadMC.physics.direction import rotate_direction
 from pyRadMC.physics.path import sample_path_length
+from pyRadMC.physics.rayleigh import sample_rayleigh_cos_theta
 from pyRadMC.rng import RNGState, uniform
 from pyRadMC.transport.particles import (
     ELECTRON,
@@ -119,7 +123,8 @@ def photon_steps(
         mu_compton = rho * cross_sections.mu_over_rho(e, material, PhotonProcess.COMPTON)
         mu_photo = rho * cross_sections.mu_over_rho(e, material, PhotonProcess.PHOTOELECTRIC)
         mu_pair = rho * cross_sections.mu_over_rho(e, material, PhotonProcess.PAIR)
-        mu_real = mu_compton + mu_photo + mu_pair
+        mu_rayleigh = rho * cross_sections.mu_over_rho(e, material, PhotonProcess.RAYLEIGH)
+        mu_real = mu_compton + mu_photo + mu_pair + mu_rayleigh
         if mu_real > mu_majorant * (1.0 + _MAJORANT_TOLERANCE):
             raise RuntimeError(
                 f"Woodcock majorant violated: mu_real={mu_real:.6e} > "
@@ -132,9 +137,15 @@ def photon_steps(
         if uniform(rng_state) * mu_majorant >= mu_real:
             continue
 
-        process = select_photon_process(mu_compton, mu_photo, mu_pair, rng_state)
+        process = select_photon_process(mu_compton, mu_photo, mu_pair, mu_rayleigh, rng_state)
 
-        if process == PhotonProcess.COMPTON:
+        if process == PhotonProcess.RAYLEIGH:
+            # Coherent: direction changes, energy does not. Unreachable with the
+            # analytic data source (zero coherent column); see physics.rayleigh.
+            cos_coherent = sample_rayleigh_cos_theta(rng_state)
+            phi = 2.0 * math.pi * uniform(rng_state)
+            ux, uy, uz = rotate_direction(ux, uy, uz, cos_coherent, phi)
+        elif process == PhotonProcess.COMPTON:
             ratio = sample_compton_energy_ratio(e, rng_state)
             recoil = e * (1.0 - ratio)
             phi = 2.0 * math.pi * uniform(rng_state)

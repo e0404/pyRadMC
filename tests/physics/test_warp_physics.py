@@ -41,9 +41,10 @@ HINGE_MSQ = 0.01
 BREMS_ENERGY = 2.0
 BREMS_PCUT = 0.05
 PATH_MU = 0.05
-CHANNEL_MU_COMPTON = 0.6
-CHANNEL_MU_PHOTO = 0.3
-CHANNEL_MU_PAIR = 0.1
+CHANNEL_MU_COMPTON = 0.55
+CHANNEL_MU_PHOTO = 0.25
+CHANNEL_MU_PAIR = 0.12
+CHANNEL_MU_RAYLEIGH = 0.08
 
 
 @pytest.fixture(scope="module", params=DEVICES)
@@ -70,6 +71,7 @@ def device_samples(request):
     hinge = p.sample_hinge_cos_theta
     brems_params = p.bremsstrahlung_step_parameters
     brems_energy = p.sample_bremsstrahlung_energy
+    rayleigh_cos = p.sample_rayleigh_cos_theta
 
     @wp.kernel
     def sample_all(seed: int, slots: wp.array(dtype=wp.uint32), out: wp.array2d(dtype=float)):
@@ -81,7 +83,9 @@ def device_samples(request):
 
         out[tid, 0] = sample_path(PATH_MU, state)
         out[tid, 1] = float(
-            select_process(CHANNEL_MU_COMPTON, CHANNEL_MU_PHOTO, CHANNEL_MU_PAIR, state)
+            select_process(
+                CHANNEL_MU_COMPTON, CHANNEL_MU_PHOTO, CHANNEL_MU_PAIR, CHANNEL_MU_RAYLEIGH, state
+            )
         )
 
         r = compton_ratio(COMPTON_ENERGY, state)
@@ -107,9 +111,10 @@ def device_samples(request):
         out[tid, 13] = prob
         out[tid, 14] = local
         out[tid, 15] = brems_energy(BREMS_ENERGY, BREMS_PCUT, state)
+        out[tid, 16] = rayleigh_cos(state)
 
     slots = wp.zeros(N, dtype=wp.uint32, device=device)
-    out = wp.zeros((N, 16), dtype=float, device=device)
+    out = wp.zeros((N, 17), dtype=float, device=device)
     wp.launch(sample_all, dim=N, inputs=[SEED, slots], outputs=[out], device=device)
     wp.synchronize_device(device)
     return out.numpy()
@@ -183,8 +188,8 @@ class TestSampledDistributions:
 
     def test_channel_selection_frequencies(self, device_samples: np.ndarray) -> None:
         c = device_samples[:, 1].astype(int)
-        observed = np.bincount(c, minlength=3)
-        mu = np.array([CHANNEL_MU_COMPTON, CHANNEL_MU_PHOTO, CHANNEL_MU_PAIR])
+        observed = np.bincount(c, minlength=4)
+        mu = np.array([CHANNEL_MU_COMPTON, CHANNEL_MU_PHOTO, CHANNEL_MU_PAIR, CHANNEL_MU_RAYLEIGH])
         expected = mu / mu.sum() * c.size
         _chi2, p_value = stats.chisquare(observed, expected)
         assert p_value > 0.01, f"channel frequencies {observed / c.size} vs {mu / mu.sum()}"
@@ -228,6 +233,11 @@ class TestSampledDistributions:
         u = np.log(k / BREMS_PCUT) / np.log(BREMS_ENERGY / BREMS_PCUT)
         ks = stats.kstest(u, "uniform")
         assert ks.pvalue > 0.01, f"KS p={ks.pvalue:.2e}"
+
+    def test_rayleigh_cosine_matches_thomson(self, device_samples: np.ndarray) -> None:
+        mu = device_samples[:, 16]
+        assert np.all(np.abs(mu) <= 1.0)
+        _assert_histogram_matches_pdf(mu, lambda x: 1.0 + x * x, -1.0, 1.0)
 
     def test_isotropic_direction_is_unit_and_uniform(self, device_samples: np.ndarray) -> None:
         norm_sq = device_samples[:, 6]

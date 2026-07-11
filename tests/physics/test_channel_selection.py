@@ -1,4 +1,8 @@
-"""Interaction channel selection: branching ratios and degenerate cases."""
+"""Interaction channel selection: branching ratios and degenerate cases.
+
+Selection is channel-complete (AGENTS.md 2.10): all four ``PhotonProcess`` channels
+are always offered, and a disabled channel is a zero coefficient — data, not a flag.
+"""
 
 from __future__ import annotations
 
@@ -14,13 +18,15 @@ from tests.conftest import SEED
 def test_channel_frequencies_match_branching_ratios() -> None:
     """Selection frequencies reproduce mu_i / mu_total (chi-squared, fixed seed).
 
-    Water-at-4-MeV-like numbers: Compton-dominated with a real pair fraction, so all
-    three branches are exercised.
+    Water-at-4-MeV-like numbers: Compton-dominated with a real pair fraction, plus
+    a coherent coefficient of the size a tabulated source would report, so all four
+    branches are exercised.
     """
     mu = {
         PhotonProcess.COMPTON: 0.0303,
         PhotonProcess.PHOTOELECTRIC: 0.0002,
         PhotonProcess.PAIR: 0.0035,
+        PhotonProcess.RAYLEIGH: 0.0004,
     }
     n = 50_000
     state = HostRNG().init_state(SEED, 30)
@@ -30,6 +36,7 @@ def test_channel_frequencies_match_branching_ratios() -> None:
             mu[PhotonProcess.COMPTON],
             mu[PhotonProcess.PHOTOELECTRIC],
             mu[PhotonProcess.PAIR],
+            mu[PhotonProcess.RAYLEIGH],
             state,
         )
         counts[process] += 1
@@ -45,25 +52,35 @@ def test_zero_channels_are_never_selected() -> None:
     """A channel with zero cross-section must have exactly zero probability.
 
     Guards the cumulative-sum edge: u drawn exactly at a bin boundary must not fall
-    into an empty channel.
+    into an empty channel. The all-but-one cases cover both ends of the cumulative
+    ordering, including the new final (Rayleigh) position.
     """
     state = HostRNG().init_state(SEED, 31)
     for _ in range(10_000):
-        process = select_photon_process(0.05, 0.0, 0.0, state)
+        process = select_photon_process(0.05, 0.0, 0.0, 0.0, state)
         assert process == PhotonProcess.COMPTON
 
     for _ in range(10_000):
-        process = select_photon_process(0.0, 0.0, 0.004, state)
+        process = select_photon_process(0.0, 0.0, 0.004, 0.0, state)
         assert process == PhotonProcess.PAIR
+
+    for _ in range(10_000):
+        process = select_photon_process(0.0, 0.0, 0.0, 0.002, state)
+        assert process == PhotonProcess.RAYLEIGH
 
 
 def test_selection_covers_all_channels_and_nothing_else() -> None:
-    """Every draw lands in one of the three enabled processes."""
+    """Every draw lands in one of the four enabled processes."""
     state = HostRNG().init_state(SEED, 32)
-    valid = {PhotonProcess.COMPTON, PhotonProcess.PHOTOELECTRIC, PhotonProcess.PAIR}
+    valid = {
+        PhotonProcess.COMPTON,
+        PhotonProcess.PHOTOELECTRIC,
+        PhotonProcess.PAIR,
+        PhotonProcess.RAYLEIGH,
+    }
     seen = set()
     for _ in range(20_000):
-        process = select_photon_process(0.02, 0.01, 0.01, state)
+        process = select_photon_process(0.02, 0.01, 0.01, 0.01, state)
         assert process in valid
         seen.add(process)
     assert seen == valid

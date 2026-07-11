@@ -18,6 +18,7 @@ def select_photon_process(
     mu_compton: float,
     mu_photoelectric: float,
     mu_pair: float,
+    mu_rayleigh: float,
     rng_state: RNGState,
 ) -> int:
     """Select the interaction channel with probability mu_i / mu_total.
@@ -26,12 +27,16 @@ def select_photon_process(
     partial sums. Because u < 1 (RNG contract), a channel with zero coefficient can
     never be selected, including at the bin boundaries.
 
+    Channel-complete (AGENTS.md section 2.10): all four ``PhotonProcess`` channels
+    are offered unconditionally; a disabled channel is a zero coefficient supplied
+    by the data source, never a missing branch. With the default (analytic) data
+    the coherent coefficient is exactly zero and Rayleigh is unreachable.
+
     Parameters
     ----------
-    mu_compton, mu_photoelectric, mu_pair
+    mu_compton, mu_photoelectric, mu_pair, mu_rayleigh
         Per-channel macroscopic attenuation coefficients, in consistent units (their
-        ratios are all that matters). Rayleigh is absent: no Rayleigh by default
-        (AGENTS.md section 2.9).
+        ratios are all that matters).
     rng_state
         Per-history RNG state; consumes one uniform.
 
@@ -40,9 +45,11 @@ def select_photon_process(
     int
         One of the :class:`pyRadMC.data.interface.PhotonProcess` constants.
     """
-    threshold = uniform(rng_state) * (mu_compton + mu_photoelectric + mu_pair)
+    threshold = uniform(rng_state) * (mu_compton + mu_photoelectric + mu_pair + mu_rayleigh)
     if threshold < mu_compton:
         return PhotonProcess.COMPTON
     if threshold < mu_compton + mu_photoelectric:
         return PhotonProcess.PHOTOELECTRIC
-    return PhotonProcess.PAIR
+    if threshold < mu_compton + mu_photoelectric + mu_pair:
+        return PhotonProcess.PAIR
+    return PhotonProcess.RAYLEIGH
