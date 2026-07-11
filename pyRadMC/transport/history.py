@@ -60,8 +60,17 @@ def transport_history(
     """
     stack: list[StackEntry] = [(kind, energy, 1.0, x, y, z, ux, uy, uz)]
     escaped = 0.0
+    first = True
     while stack:
         particle_kind, e, w, px, py, pz, dx, dy, dz = stack.pop()
+        # Only the source photon is primary — the one particle that may split at
+        # its first Compton (transport.photon). It is the initial stack entry,
+        # popped first; everything after descends from an interaction. A charged
+        # primary (electron-beam tests) is never primary in this sense, and its
+        # bremsstrahlung photons must not split, so the flag is consumed here on
+        # the first pop regardless of kind.
+        is_primary = first and particle_kind == PHOTON
+        first = False
         if particle_kind == PHOTON:
             escaped += photon_steps(
                 e,
@@ -80,6 +89,7 @@ def transport_history(
                 pcut,
                 ecut,
                 transport_electrons,
+                is_primary=is_primary,
             )
         else:
             escaped += electron_steps(

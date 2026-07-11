@@ -45,6 +45,7 @@ from pyRadMC import (
     PHOTON_ROULETTE_MEV,
     PHOTON_ROULETTE_SURVIVAL,
     PHOTON_ROULETTE_WEIGHT_CAP,
+    PHOTON_SPLIT_N,
 )
 from pyRadMC.backends.warp.physics import warp_physics
 from pyRadMC.data.interface import PhotonProcess
@@ -156,10 +157,15 @@ class Queue:
     primary this particle descends from. Secondaries inherit it unchanged, so a
     history's whole family scores into one Dij column. Plain dose runs leave it
     at zero everywhere, which makes them the one-column degenerate case.
+
+    ``primary`` is 1 for a source photon and 0 for every secondary. Only a
+    primary splits at its first Compton scatter (Compton splitting, Phase 4);
+    the generators set it, ``_queue_push`` always pushes 0.
     """
 
     kind: wp.array(dtype=wp.int32)
     beamlet: wp.array(dtype=wp.int32)
+    primary: wp.array(dtype=wp.int32)
     energy: wp.array(dtype=float)
     weight: wp.array(dtype=float)
     x: wp.array(dtype=float)
@@ -192,6 +198,7 @@ def _queue_push(
     if idx < q.capacity:
         q.kind[idx] = kind
         q.beamlet[idx] = beamlet
+        q.primary[idx] = 0  # every queued particle is a secondary, never a source
         q.energy[idx] = energy
         q.weight[idx] = weight
         q.x[idx] = x
@@ -342,6 +349,7 @@ def photon_kernel(
     beamlet = q_in.beamlet[tid]
     base = beamlet * gi.n_voxels
     w = q_in.weight[tid]
+    primary = q_in.primary[tid]
     x = q_in.x[tid]
     y = q_in.y[tid]
     z = q_in.z[tid]
@@ -411,6 +419,74 @@ def photon_kernel(
             phi = 2.0 * math.pi * uniform(state)
             ux, uy, uz = rotate_direction(ux, uy, uz, cos_coherent, phi)
         elif process == PhotonProcess.COMPTON:
+            if primary != 0:
+                # Compton splitting (Phase 4): the source photon samples
+                # PHOTON_SPLIT_N independent final states, each copy (scattered
+                # photon + recoil electron) weighted w/N and pushed as a
+                # non-primary photon; the primary's thread ends here. Only the
+                # primary splits, so the population is bounded and every later
+                # scatter continues in-thread below (no per-scatter re-queue).
+                # Copies get child streams (spawn_stream), the warp counterpart
+                # of the reference's sequential draws; each copy conserves energy
+                # (scattered + recoil = e), so the balance stays exact.
+                split_w = w / float(PHOTON_SPLIT_N)
+                for _ in range(PHOTON_SPLIT_N):
+                    ratio = sample_compton_energy_ratio(e, state)
+                    recoil = e * (1.0 - ratio)
+                    phi = 2.0 * math.pi * uniform(state)
+                    if transport_electrons != 0 and recoil > ecut:
+                        cos_electron = compton_electron_cos_theta(e, ratio)
+                        ex, ey, ez = rotate_direction(ux, uy, uz, cos_electron, phi + math.pi)
+                        _queue_push(
+                            q_electron,
+                            ELECTRON,
+                            beamlet,
+                            recoil,
+                            split_w,
+                            x,
+                            y,
+                            z,
+                            ex,
+                            ey,
+                            ez,
+                            spawn_stream(state),
+                        )
+                    else:
+                        _deposit(edep, gi, base, ix, iy, iz, split_w * recoil)
+                    cos_gamma = compton_cos_theta(e, ratio)
+                    gx, gy, gz = rotate_direction(ux, uy, uz, cos_gamma, phi)
+                    e_scatter = e * ratio
+                    if e_scatter <= pcut:
+                        _deposit(edep, gi, base, ix, iy, iz, split_w * e_scatter)
+                    else:
+                        copy_w = split_w
+                        keep = True
+                        if e_scatter < PHOTON_ROULETTE_MEV and copy_w < PHOTON_ROULETTE_WEIGHT_CAP:
+                            new_w = roulette_weight(copy_w, PHOTON_ROULETTE_SURVIVAL, state)
+                            _escape(escaped, (copy_w - new_w) * e_scatter)
+                            if new_w == 0.0:
+                                keep = False
+                            else:
+                                copy_w = new_w
+                        if keep:
+                            _queue_push(
+                                q_photon_out,
+                                PHOTON,
+                                beamlet,
+                                e_scatter,
+                                copy_w,
+                                x,
+                                y,
+                                z,
+                                gx,
+                                gy,
+                                gz,
+                                spawn_stream(state),
+                            )
+                return
+            # Non-primary photon: single scatter, continue in-thread — the bulk
+            # of the cascade. Only the source photon's first Compton re-queues
+            # (splitting, above); everything here mirrors the reference loop.
             ratio = sample_compton_energy_ratio(e, state)
             recoil = e * (1.0 - ratio)
             phi = 2.0 * math.pi * uniform(state)
@@ -745,6 +821,7 @@ def generate_pencil_beam(
     tid = wp.tid()
     q.kind[tid] = kind
     q.beamlet[tid] = 0
+    q.primary[tid] = 1  # source particle: the only one that may split
     q.energy[tid] = energy
     q.weight[tid] = 1.0
     q.x[tid] = px
@@ -780,6 +857,7 @@ def generate_parallel_beam(
     y = y0 + y_extent * uniform(state)
     q.kind[tid] = kind
     q.beamlet[tid] = 0
+    q.primary[tid] = 1  # source particle: the only one that may split
     q.energy[tid] = energy
     q.weight[tid] = 1.0
     q.x[tid] = x
@@ -849,6 +927,7 @@ def generate_beamlet_lattice(
     y = y_lo[local] + y_extent[local] * uniform(state)
     q.kind[tid] = PHOTON
     q.beamlet[tid] = local * n_batches + batch
+    q.primary[tid] = 1  # source photon: the only one that may split
     q.energy[tid] = energy
     q.weight[tid] = 1.0
     q.x[tid] = x

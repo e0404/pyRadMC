@@ -51,6 +51,32 @@ Caps the boost cascade at two consecutive survivals (1 -> 2 -> 4), bounding the
 graininess a single high-weight deposit can leave in the low-dose tail.
 """
 
+PHOTON_SPLIT_N: int = 2
+"""Compton splitting multiplicity at a *primary* photon's first Compton scatter.
+
+The primary's Compton final state is sampled ``PHOTON_SPLIT_N`` times, each copy
+(scattered photon + recoil electron) carrying weight ``1 / PHOTON_SPLIT_N``: N
+independent samples of the dominant scatter source, averaged, so the scattered
+dose variance falls while the expectation is exactly preserved and energy is
+conserved per realization. Only the primary splits, so the photon population is
+bounded (at most N first-generation scattered photons per source photon, and
+the transport cost grows about linearly in N); the soft-photon roulette above
+then culls the degraded copies, so the splitting and the culling are paired —
+the roulette earns its keep (AGENTS.md 7.2).
+
+Like the roulette parameters this is a variance-reduction efficiency knob, not
+accuracy-defining: it changes realizations and cost, never expectations.
+Unbiasedness is test-pinned against a split-free instrument (N = 1). It is a
+fixed project-wide value, one configuration (AGENTS.md 2.10).
+
+The default is deliberately conservative: N = 2 is the minimal genuine split
+(it doubles the scattered-photon statistics and pairs with the roulette) at
+roughly double the reference-transport cost. The variance-reduction *efficiency*
+— the figure of merit ``1 / (sigma^2 * time)`` as a function of N — is settled
+by the Phase 4 efficiency measurement; raise N only on that evidence, with the
+measurement rerun.
+"""
+
 # --- physical constants --------------------------------------------------------
 
 ELECTRON_MASS_MEV: float = 0.510_998_950_69
@@ -64,5 +90,6 @@ __all__ = [
     "PHOTON_ROULETTE_MEV",
     "PHOTON_ROULETTE_SURVIVAL",
     "PHOTON_ROULETTE_WEIGHT_CAP",
+    "PHOTON_SPLIT_N",
     "__version__",
 ]

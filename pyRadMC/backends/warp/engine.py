@@ -50,6 +50,7 @@ def _upload_queue(capacity: int, device: str) -> Queue:
     q = Queue()
     q.kind = wp.zeros(capacity, dtype=wp.int32, device=device)
     q.beamlet = wp.zeros(capacity, dtype=wp.int32, device=device)
+    q.primary = wp.zeros(capacity, dtype=wp.int32, device=device)
     q.energy = wp.zeros(capacity, dtype=float, device=device)
     q.weight = wp.zeros(capacity, dtype=float, device=device)
     q.x = wp.zeros(capacity, dtype=float, device=device)

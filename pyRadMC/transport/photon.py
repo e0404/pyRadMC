@@ -30,12 +30,23 @@ Stated approximations, named here because this is where they are implemented:
 
 Photons at or below ``pcut`` deposit their energy locally and terminate.
 
-**Variance reduction (Phase 3)**: a Compton-scattered photon dropping below
-``PHOTON_ROULETTE_MEV`` plays Russian roulette (:mod:`pyRadMC.physics.roulette`)
-while its weight is under ``PHOTON_ROULETTE_WEIGHT_CAP``. The game is exactly
-fair, and its weight-energy change is booked through the escaped-energy ledger,
-so the per-run energy balance stays exact. Always on — one configuration
-(AGENTS.md 2.10); tests instrument it away by zeroing the threshold constant.
+**Variance reduction**: two paired techniques, both always on — one
+configuration (AGENTS.md 2.10), each with a test instrument that turns it off.
+
+- *Compton splitting (Phase 4).* At a **primary** photon's first Compton
+  scatter the final state is sampled ``PHOTON_SPLIT_N`` times, each copy
+  (scattered photon + recoil electron) carrying weight ``1 / PHOTON_SPLIT_N``:
+  N independent samples of the dominant scatter source. Only the primary
+  splits, so the population is bounded. Energy is conserved per realization
+  (each copy's photon and electron sum to ``w/N`` of the incident
+  weight-energy). Instrument: set ``PHOTON_SPLIT_N`` to 1.
+- *Russian roulette (Phase 3).* A Compton-scattered photon dropping below
+  ``PHOTON_ROULETTE_MEV`` plays Russian roulette
+  (:mod:`pyRadMC.physics.roulette`) while its weight is under
+  ``PHOTON_ROULETTE_WEIGHT_CAP``, culling the degraded split copies so the
+  splitting earns its keep. The game is exactly fair, and its weight-energy
+  change is booked through the escaped-energy ledger, so the per-run energy
+  balance stays exact. Instrument: zero the threshold constant.
 """
 
 from __future__ import annotations
@@ -47,6 +58,7 @@ from pyRadMC import (
     PHOTON_ROULETTE_MEV,
     PHOTON_ROULETTE_SURVIVAL,
     PHOTON_ROULETTE_WEIGHT_CAP,
+    PHOTON_SPLIT_N,
 )
 from pyRadMC.data.interface import CrossSectionSource, PhotonProcess
 from pyRadMC.geometry.grid import VoxelGrid
@@ -100,12 +112,23 @@ def photon_steps(
     pcut: float,
     ecut: float,
     transport_electrons: bool,
+    is_primary: bool,
 ) -> float:
     """Transport one photon; secondaries go to ``spawn``. Returns removed energy.
 
     With ``transport_electrons`` false, charged secondaries deposit locally (KERMA);
     annihilation photons are spawned in either mode. Charged secondaries at or below
     ``ecut`` deposit locally in either mode (production threshold).
+
+    ``is_primary`` marks a source photon, the only one that splits at its first
+    Compton scatter (module docstring). Every spawned photon — scattered copy,
+    bremsstrahlung, annihilation — is non-primary, so the caller passes True only
+    for the source photon of a history and False for everything popped from the
+    stack. A scattered copy that survives to keep travelling is spawned as a
+    non-primary track rather than continued in-loop, so this call returns after a
+    Compton scatter; for the unsplit case (``PHOTON_SPLIT_N`` == 1 or a
+    non-primary photon) that is bit-for-bit the same transport as continuing the
+    single scattered photon here, only reordered onto the stack.
 
     ``weight`` scales every deposit and every ledger entry. The return value is the
     weight-energy removed from the transported population without being deposited:
@@ -167,29 +190,41 @@ def photon_steps(
             phi = 2.0 * math.pi * uniform(rng_state)
             ux, uy, uz = rotate_direction(ux, uy, uz, cos_coherent, phi)
         elif process == PhotonProcess.COMPTON:
-            ratio = sample_compton_energy_ratio(e, rng_state)
-            recoil = e * (1.0 - ratio)
-            phi = 2.0 * math.pi * uniform(rng_state)
-            if transport_electrons and recoil > ecut:
-                cos_electron = compton_electron_cos_theta(e, ratio)
-                edir = rotate_direction(ux, uy, uz, cos_electron, phi + math.pi)
-                spawn((ELECTRON, recoil, w, x, y, z, *edir))
-            else:
-                deposit(ix, iy, iz, w * recoil)
-            cos_gamma = compton_cos_theta(e, ratio)
-            ux, uy, uz = rotate_direction(ux, uy, uz, cos_gamma, phi)
-            e *= ratio
-            if e <= pcut:
-                deposit(ix, iy, iz, w * e)
-                return escaped
-            if e < PHOTON_ROULETTE_MEV and w < PHOTON_ROULETTE_WEIGHT_CAP:
-                # Basic VR: roulette the softened scattered photon; the ledger
-                # entry keeps the run's energy balance exact (module docstring).
-                new_w = roulette_weight(w, PHOTON_ROULETTE_SURVIVAL, rng_state)
-                escaped += (w - new_w) * e
-                if new_w == 0.0:
-                    return escaped
-                w = new_w
+            # Compton splitting: a primary samples N independent final states,
+            # each copy weighted w/N; a non-primary photon takes one. Every
+            # surviving scattered copy is spawned as a non-primary track and the
+            # loop returns — the primary's job ends at its first Compton. Each
+            # copy conserves energy exactly (scattered + recoil = e), so the
+            # split leaves the per-run balance exact (module docstring).
+            n_split = PHOTON_SPLIT_N if is_primary else 1
+            split_w = w / float(n_split)
+            for _ in range(n_split):
+                ratio = sample_compton_energy_ratio(e, rng_state)
+                recoil = e * (1.0 - ratio)
+                phi = 2.0 * math.pi * uniform(rng_state)
+                if transport_electrons and recoil > ecut:
+                    cos_electron = compton_electron_cos_theta(e, ratio)
+                    edir = rotate_direction(ux, uy, uz, cos_electron, phi + math.pi)
+                    spawn((ELECTRON, recoil, split_w, x, y, z, *edir))
+                else:
+                    deposit(ix, iy, iz, split_w * recoil)
+                cos_gamma = compton_cos_theta(e, ratio)
+                gx, gy, gz = rotate_direction(ux, uy, uz, cos_gamma, phi)
+                e_scatter = e * ratio
+                if e_scatter <= pcut:
+                    deposit(ix, iy, iz, split_w * e_scatter)
+                    continue
+                copy_w = split_w
+                if e_scatter < PHOTON_ROULETTE_MEV and copy_w < PHOTON_ROULETTE_WEIGHT_CAP:
+                    # Roulette the softened copy; the ledger entry keeps the
+                    # run's energy balance exact (module docstring).
+                    new_w = roulette_weight(copy_w, PHOTON_ROULETTE_SURVIVAL, rng_state)
+                    escaped += (copy_w - new_w) * e_scatter
+                    if new_w == 0.0:
+                        continue
+                    copy_w = new_w
+                spawn((PHOTON, e_scatter, copy_w, x, y, z, gx, gy, gz))
+            return escaped
         elif process == PhotonProcess.PHOTOELECTRIC:
             if transport_electrons and e > ecut:
                 spawn((ELECTRON, e, w, x, y, z, ux, uy, uz))  # forward, no fluorescence
@@ -255,6 +290,7 @@ def transport_photon(
         pcut,
         ecut=math.inf,  # unused in KERMA mode: every charged secondary deposits
         transport_electrons=False,
+        is_primary=True,  # the source photon, the only one that may split
     )
     while stack:
         kind, e, w, px, py, pz, dx, dy, dz = stack.pop()
@@ -276,5 +312,6 @@ def transport_photon(
             pcut,
             ecut=math.inf,
             transport_electrons=False,
+            is_primary=False,  # scattered copies off the stack never re-split
         )
     return escaped
