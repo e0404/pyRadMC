@@ -212,12 +212,14 @@ class WarpEngine:
         ecut: float = ECUT_MEV,
         transport_electrons: bool = True,
         truncation: float = DIJ_TRUNCATION_RELATIVE,
+        correlated: bool = False,
         beamlet_group_size: int = 32,
     ) -> DijResult:
         """Compute the Dij over the lattice; same contract as the reference engine.
 
         See :meth:`pyRadMC.backends.ref.engine.ReferenceEngine.run_dij` for the
-        history-to-beamlet mapping and parameter semantics — the signatures are
+        history-to-beamlet mapping and parameter semantics, ``correlated``
+        (the Phase 4 experiment instrument) included — the signatures are
         deliberately identical up to the one scheduling knob:
 
         Parameters
@@ -258,6 +260,7 @@ class WarpEngine:
             n_histories_per_beamlet=n_histories_per_beamlet,
             n_batches=n_batches,
             truncation=truncation,
+            correlated=correlated,
         )
         # Energy books in exact integer quanta (Python ints, unbounded), converted
         # to MeV once at the end: float accumulation order would otherwise make
@@ -304,6 +307,7 @@ class WarpEngine:
                         per_batch,
                         n_batches,
                         t,
+                        1 if correlated else 0,
                         source.energy,
                         source.z,
                         x_lo,

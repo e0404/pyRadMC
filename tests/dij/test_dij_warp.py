@@ -203,6 +203,86 @@ class TestBookkeeping:
             )
 
 
+class TestCorrelatedSampling:
+    """The Phase 4 stream remap on the kernel path.
+
+    The mapping specification lives in ``ReferenceEngine.run_dij`` and is
+    pinned in ``test_dij_correlated.py``; here only what the kernel adds needs
+    pinning: the remap keys slots on the within-beamlet index, scheduling
+    stays bit-inert under it, and the correlated columns remain statistically
+    equivalent to the reference's correlated columns. Electronless where
+    statistics suffice — the remap changes stream keys only, and coupled
+    transport is exercised by ``TestStatisticalEquivalenceWithReference``.
+    """
+
+    def test_beamlet_zero_is_bitwise_invariant_and_others_move(self, device: str) -> None:
+        """For beamlet 0 the remap is the identity; for others it must not be."""
+        engine = _warp_engine(device)
+        kwargs = dict(n_histories_per_beamlet=800, n_batches=4, seed=SEED, truncation=0.0)
+        ind = engine.run_dij(_lattice(2, 1), **kwargs)
+        corr = engine.run_dij(_lattice(2, 1), correlated=True, **kwargs)
+        assert corr.correlated is True
+        assert ind.correlated is False
+        np.testing.assert_array_equal(corr.column_dense(0), ind.column_dense(0))
+        np.testing.assert_array_equal(corr.sigma_dense(0), ind.sigma_dense(0))
+        # Non-vacuity: column 1 draws different streams under the remap, so it
+        # must actually move — a kernel that ignores the flag would pass above.
+        assert not np.array_equal(corr.column_dense(1), ind.column_dense(1))
+
+    def test_scheduling_stays_bit_inert_under_correlation(self, device: str) -> None:
+        """Grouping touches neither h nor the within-beamlet index; pin it."""
+        results = [
+            _warp_engine(device).run_dij(
+                _lattice(2, 2),
+                n_histories_per_beamlet=800,
+                n_batches=4,
+                seed=SEED,
+                beamlet_group_size=group,
+                correlated=True,
+            )
+            for group in (1, 3, 4)
+        ]
+        for other in results[1:]:
+            np.testing.assert_array_equal(results[0].indptr, other.indptr)
+            np.testing.assert_array_equal(results[0].indices, other.indices)
+            np.testing.assert_array_equal(results[0].dose, other.dose)
+            np.testing.assert_array_equal(results[0].sigma, other.sigma)
+
+    def test_correlated_columns_match_reference_correlated_columns(self, device: str) -> None:
+        """Cross-target, per-column chi-squared: the remap keys the same histories."""
+        grid = _grid()
+        ref_engine = ReferenceEngine(grid=grid, cross_sections=_xs(grid), rng=HostRNG())
+        kwargs = dict(
+            n_batches=8,
+            seed=SEED,
+            transport_electrons=False,
+            truncation=0.0,
+            correlated=True,
+        )
+        ref = ref_engine.run_dij(_lattice(2, 1), n_histories_per_beamlet=800, **kwargs)
+        result = _warp_engine(device).run_dij(
+            _lattice(2, 1), n_histories_per_beamlet=1_600, **kwargs
+        )
+        # Geometric beamlet footprints on the 2 cm voxels: x 2..8 and 8..14 cm.
+        footprints = {0: (slice(1, 4)), 1: (slice(4, 7))}
+        for j in range(2):
+            ref_dose, ref_sigma = ref.column_dense(j), ref.sigma_dense(j)
+            warp_dose, warp_sigma = result.column_dense(j), result.sigma_dense(j)
+            mask = np.zeros(ref_dose.shape, dtype=bool)
+            mask[footprints[j], 1:7, :] = True
+            mask &= (ref_sigma > 0.0) & (warp_sigma > 0.0)
+            assert np.count_nonzero(mask) > 50, f"column {j}: mask too small"
+            assert_chi2_consistent_batched(
+                ref_dose,
+                ref_sigma,
+                ref.n_batches,
+                warp_dose,
+                warp_sigma,
+                result.n_batches,
+                mask=mask,
+            )
+
+
 class TestTruncationAgainstDVH:
     """AGENTS.md 2.8: the truncation threshold is tested on DVH endpoints.
 

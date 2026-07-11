@@ -799,6 +799,7 @@ def generate_beamlet_lattice(
     per_batch: int,
     n_batches: int,
     t_offset: int,
+    correlated: int,
     energy: float,
     z0: float,
     x_lo: wp.array(dtype=float),
@@ -820,6 +821,11 @@ def generate_beamlet_lattice(
     batch-resolved slot ``local * n_batches + batch``: batches stay separable for
     the sigma estimate without per-batch launches.
 
+    Correlated sampling (Phase 4) keys the stream on ``r`` instead of ``h`` —
+    see ``ReferenceEngine.run_dij`` for the mapping's definition and caveats.
+    Neither ``r`` nor ``h`` depends on the grouping or chunking, so the
+    scheduling bit-inertness above holds in both modes (test-pinned).
+
     The bounds arrays are per group-local beamlet, precomputed on the host by
     ``BeamletGridSource.beamlet_bounds`` — the lattice geometry has exactly one
     definition. Two uniforms per primary (x, then y), the same arithmetic as
@@ -832,7 +838,10 @@ def generate_beamlet_lattice(
     r = t - local * n_histories_per_beamlet
     batch = r // per_batch
     h = (group_start + local) * n_histories_per_beamlet + r
-    slots[tid] = init_slot(seed, h)
+    key = h
+    if correlated != 0:
+        key = r
+    slots[tid] = init_slot(seed, key)
     state = WarpRNGState()
     state.slots = slots
     state.idx = tid
