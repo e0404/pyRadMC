@@ -51,6 +51,8 @@ def test_cuda_throughput_meets_phase2_exit_criterion(benchmark) -> None:
         rounds=3,
         iterations=1,
     )
+    if benchmark.stats is None:
+        pytest.skip("benchmarking disabled; the throughput floor needs timing data")
     throughput = n / benchmark.stats["mean"]
     assert throughput >= GPU_EXIT_CRITERION_HISTORIES_PER_S, (
         f"{throughput:.3e} histories/s is below the Phase 2 exit criterion"
@@ -60,8 +62,8 @@ def test_cuda_throughput_meets_phase2_exit_criterion(benchmark) -> None:
 def test_warp_cpu_throughput(benchmark) -> None:
     """CPU baseline for regression tracking; no threshold.
 
-    Also the measurement feeding the plan's numba guard rail (IMPLEMENTATION_PLAN
-    section 0): if a numba backend ever exists, Warp-CPU must be within ~2x of it.
+    The numba cross-check backend was dropped at Phase 2 exit (maintainer decision,
+    2026-07-11), so this baseline is the only CPU performance record.
     """
     engine = _engine("cpu")
     engine.run(_source(), n_histories=2_000, n_batches=1, seed=SEED)  # compile+warm

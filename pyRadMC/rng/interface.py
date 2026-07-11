@@ -8,9 +8,8 @@ This matters because the per-target RNG APIs are genuinely incompatible:
 ``ref``
     NumPy ``Generator``, one per history, seeded from a counter.
 ``warp`` (cpu and cuda)
-    ``wp.rand_init`` / ``wp.randf``, per-thread state.
-``numba`` (cuda)
-    ``numba.cuda.random`` xoroshiro128p device state arrays.
+    ``wp.rand_init`` / ``wp.randf``, per-thread state, slot-wrapped by
+    :mod:`pyRadMC.rng.warp_shim`.
 
 Reproducibility contract, restated from AGENTS.md section 2.3:
 

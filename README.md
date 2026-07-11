@@ -93,7 +93,6 @@ result = ReferenceEngine(grid=grid, cross_sections=xs, rng=HostRNG()).run(
 |---|---|---|
 | `ref` | correctness oracle; never optimized | CPU (NumPy) |
 | `warp` | production | CPU, CUDA |
-| `numba` | optional CPU cross-check — never built; drop/keep decision pending² | CPU |
 
 Warp is CUDA-only for GPU. If vendor-neutral GPU becomes a requirement, the physics
 layer is framework-agnostic and a Taichi backend is a port, not a rewrite.
@@ -142,11 +141,10 @@ data at 2%/2mm over the full depth range).
 
 ² Both Warp devices reproduce the reference within the chi-squared detection
 oracle; GPU throughput cleared the 1e6 histories/s criterion at ~1.6e7 on a laptop
-RTX 4070. The third exit criterion ("Warp-CPU within 2x of numba-CPU, or the numba
-backend is dropped") is a maintainer decision: no numba backend was ever built, and
-building one solely to lose to it would be the tail wagging the dog — the
-recommendation on record is to drop it and keep the plan's Taichi note as the
-fallback if Warp-CPU ever becomes the bottleneck.
+RTX 4070. The third exit criterion offered "Warp-CPU within 2x of numba-CPU, or the
+numba backend is dropped"; the maintainer dropped the (never-built) numba backend at
+exit. The plan's Taichi note remains the fallback if Warp-CPU ever becomes the
+bottleneck.
 
 ## License
 

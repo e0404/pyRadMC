@@ -110,8 +110,8 @@ No physics routine ever hardcodes a cross-section formula. The analytic backend 
 implementation of `CrossSectionSource`; the tabulated backend is another. This is what makes
 the analytic-now, tabulated-later plan work without a rewrite.
 
-No physics routine ever sees the difference between `numba.cuda.random`, `wp.randf`, and a host
-generator. It calls `uniform(state)` and nothing else.
+No physics routine ever sees the difference between `wp.randf` and a host generator.
+It calls `uniform(state)` and nothing else.
 
 ### 2.7 Tabulated data: integrate products, not bin means
 
@@ -171,7 +171,6 @@ pyRadMC/
   backends/
     ref/       pure NumPy oracle; never optimized
     warp/      production; targets cpu and cuda from one source
-    numba/     optional CPU cross-check; delete if it diverges from warp/ physics
 ```
 
 Backend code contains **launch and memory management only**. Physics lives in `physics/`.
@@ -309,11 +308,10 @@ Exit criteria, measured:
   reproducibility is exact and asserted. Fast tiers stay under 30 seconds with a
   warm kernel cache.
 
-**Open maintainer decision:** the plan's third exit criterion offers "Warp-CPU
-within 2x of numba-CPU, or the numba backend is dropped". No numba backend was
-ever built. Recommendation on record: drop it (delete the placeholder subpackage
-and the `numba` extra); the Taichi note in the plan remains the fallback if
-Warp-CPU ever becomes the constraint.
+**Resolved at exit (maintainer decision, 2026-07-11):** of the plan's "Warp-CPU
+within 2x of numba-CPU, or the numba backend is dropped", the never-built numba
+backend was dropped — subpackage and extra deleted. The Taichi note in the plan
+remains the fallback if Warp-CPU ever becomes the constraint.
 
 Standing items carried forward:
 

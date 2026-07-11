@@ -29,8 +29,6 @@ dependencies = [
 [project.optional-dependencies]
 # Production backend. Apache-2.0. CUDA GPU and CPU from one source.
 warp = ["warp-lang>=1.12"]
-# Optional CPU cross-check only. See AGENTS.md 3: delete if it diverges.
-numba = ["numba>=0.59"]
 dev = [
     "pytest>=8.0",
     "pytest-benchmark>=4.0",
@@ -41,7 +39,7 @@ dev = [
 docs = ["mkdocs-material>=9.5"]
 # Phase-exit examples only (AGENTS.md 7.1). matplotlib license: BSD-style, permissive.
 examples = ["matplotlib>=3.8"]
-all = ["pyRadMC[warp,numba,dev,docs,examples]"]
+all = ["pyRadMC[warp,dev,docs,examples]"]
 
 [project.urls]
 Homepage = "https://github.com/CHANGEME/pyRadMC"
@@ -63,7 +61,6 @@ markers = [
     "perf: benchmarks; alerts on regression, not pass/fail",
     "gpu: requires a CUDA device",
     "warp: requires the warp-lang optional dependency",
-    "numba: requires the numba optional dependency",
 ]
 filterwarnings = ["error"]
 
@@ -78,11 +75,11 @@ plugins = []
 
 [[tool.mypy.overrides]]
 # rng.warp_shim is Warp kernel code (AGENTS.md 5: kernels are exempt, marked).
-module = ["pyRadMC.backends.warp.*", "pyRadMC.backends.numba.*", "pyRadMC.rng.warp_shim"]
+module = ["pyRadMC.backends.warp.*", "pyRadMC.rng.warp_shim"]
 ignore_errors = true
 
 [[tool.mypy.overrides]]
-module = ["warp.*", "numba.*", "scipy.*"]
+module = ["warp.*", "scipy.*"]
 ignore_missing_imports = true
 
 # ---------------------------------------------------------------------------
