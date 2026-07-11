@@ -74,6 +74,16 @@ class TestFluenceSum:
 
         Different stratification means different histories, so the comparison is
         statistical (chi-squared, batched sigmas on both sides) — never bitwise.
+
+        ``correlated=False`` is load-bearing here, not incidental: the sigma of
+        the column mean below combines the per-column sigmas in quadrature,
+        which is valid only when the columns are statistically independent. The
+        shipped default is correlated (Phase 4), whose columns share streams; a
+        quadrature sigma would then understate the variance and the chi-squared
+        would false-fail. The independent mapping is the sanctioned test
+        instrument for exactly this (AGENTS.md 2.10). The identity under test —
+        that columns partition the open field — holds in expectation regardless
+        of the mapping.
         """
         engine = _engine()
         n_x, n_y = 2, 2
@@ -84,6 +94,7 @@ class TestFluenceSum:
             seed=SEED,
             transport_electrons=False,
             truncation=0.0,
+            correlated=False,
         )
         run = engine.run(
             _open_field(),
@@ -173,10 +184,15 @@ class TestBookkeeping:
         assert dij.energy_emitted == pytest.approx(600 * ENERGY, rel=1.0e-12)
 
     def test_default_truncation_sparsifies_but_keeps_the_high_dose_region(self) -> None:
+        # Runs under the shipped correlated default: truncation logic is
+        # mapping-independent, so it is certified where it lives. The scatter
+        # tail the non-vacuity guard needs is realization-dependent, though,
+        # and the correlated mapping's compact low-statistics realization has
+        # none at 400 histories/beamlet; 800 populates it reliably.
         engine = _engine()
         kwargs = dict(
             source=_lattice(2, 2),
-            n_histories_per_beamlet=400,
+            n_histories_per_beamlet=800,
             n_batches=2,
             seed=SEED,
             transport_electrons=False,

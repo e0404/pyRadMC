@@ -212,15 +212,16 @@ class WarpEngine:
         ecut: float = ECUT_MEV,
         transport_electrons: bool = True,
         truncation: float = DIJ_TRUNCATION_RELATIVE,
-        correlated: bool = False,
+        correlated: bool = True,
         beamlet_group_size: int = 32,
     ) -> DijResult:
         """Compute the Dij over the lattice; same contract as the reference engine.
 
         See :meth:`pyRadMC.backends.ref.engine.ReferenceEngine.run_dij` for the
         history-to-beamlet mapping and parameter semantics, ``correlated``
-        (the Phase 4 experiment instrument) included — the signatures are
-        deliberately identical up to the one scheduling knob:
+        (the shipped sampling configuration, default True; ``False`` is the
+        test instrument) included — the signatures are deliberately identical
+        up to the one scheduling knob:
 
         Parameters
         ----------

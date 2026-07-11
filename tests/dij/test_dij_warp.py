@@ -215,12 +215,17 @@ class TestCorrelatedSampling:
     transport is exercised by ``TestStatisticalEquivalenceWithReference``.
     """
 
-    def test_beamlet_zero_is_bitwise_invariant_and_others_move(self, device: str) -> None:
-        """For beamlet 0 the remap is the identity; for others it must not be."""
+    def test_default_is_correlated_and_beamlet_zero_is_mode_invariant(self, device: str) -> None:
+        """Default run_dij is correlated; for beamlet 0 the remap is the identity.
+
+        The shipped configuration keys on the within-beamlet index (Phase 4
+        exit); ``correlated=False`` is the test instrument. On beamlet 0 the
+        two mappings coincide (rw == h), and column 1 must actually move.
+        """
         engine = _warp_engine(device)
         kwargs = dict(n_histories_per_beamlet=800, n_batches=4, seed=SEED, truncation=0.0)
-        ind = engine.run_dij(_lattice(2, 1), **kwargs)
-        corr = engine.run_dij(_lattice(2, 1), correlated=True, **kwargs)
+        corr = engine.run_dij(_lattice(2, 1), **kwargs)  # default
+        ind = engine.run_dij(_lattice(2, 1), correlated=False, **kwargs)
         assert corr.correlated is True
         assert ind.correlated is False
         np.testing.assert_array_equal(corr.column_dense(0), ind.column_dense(0))

@@ -94,8 +94,15 @@ class TestStreamMapping:
         assert rng.keys == [0, 1, 0, 1, 2, 3, 2, 3]
         assert dij.correlated is True
 
-    def test_default_mapping_is_unchanged_and_marked_independent(self) -> None:
-        """The Phase 3 mapping h = j * n_per + rw stays the default, bit for bit."""
+    def test_default_run_dij_is_correlated(self) -> None:
+        """Correlated sampling is the shipped configuration (Phase 4 exit).
+
+        The noise/bias study (``examples/phase4_noise_bias_study.py``) settled
+        the default in correlated's favour, so ``run_dij`` without the flag
+        keys streams on the within-beamlet index. One configuration ships
+        (AGENTS.md 2.10); ``correlated=False`` survives only as the test
+        instrument exercised below.
+        """
         rng = RecordingRNG()
         dij = _engine(rng).run_dij(
             _lattice(2, 1),
@@ -103,6 +110,25 @@ class TestStreamMapping:
             n_batches=2,
             seed=SEED,
             transport_electrons=False,
+        )
+        assert rng.keys == [0, 1, 0, 1, 2, 3, 2, 3]
+        assert dij.correlated is True
+
+    def test_independent_instrument_keys_on_the_global_index(self) -> None:
+        """``correlated=False`` is the test instrument: the Phase 3 h-mapping.
+
+        Its one remaining job is to isolate column independence for the
+        fluence-sum identity, whose quadrature sigma requires it
+        (``tests/dij/test_dij_ref.py``).
+        """
+        rng = RecordingRNG()
+        dij = _engine(rng).run_dij(
+            _lattice(2, 1),
+            n_histories_per_beamlet=4,
+            n_batches=2,
+            seed=SEED,
+            transport_electrons=False,
+            correlated=False,
         )
         assert rng.keys == [0, 1, 4, 5, 2, 3, 6, 7]
         assert dij.correlated is False

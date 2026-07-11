@@ -16,8 +16,12 @@ Fast photon Monte Carlo dose engine for radiotherapy treatment planning.
 > 6 MeV field at 2–3 % per-beamlet sigma in single-digit seconds. Particles
 > carry statistical weights (soft photons play an unbiased Russian roulette; the
 > EGSnrc validation gates pass with it active). Correlated sampling across
-> beamlets is being built now (Phase 4). Do not use for anything clinical, now
-> or later, without independent validation.
+> beamlets is now the shipped configuration (Phase 4): keying each beamlet's
+> histories on the same random streams roughly halves the renormalized
+> plan-dose error at a given per-beamlet uncertainty, established by a
+> recalculation-and-renormalize study over optimized toy plans in water and
+> through a heterogeneity. Do not use for anything clinical, now or later,
+> without independent validation.
 
 ## Why
 

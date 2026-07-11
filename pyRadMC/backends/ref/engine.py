@@ -138,7 +138,7 @@ class ReferenceEngine:
         ecut: float = ECUT_MEV,
         transport_electrons: bool = True,
         truncation: float = DIJ_TRUNCATION_RELATIVE,
-        correlated: bool = False,
+        correlated: bool = True,
     ) -> DijResult:
         """Compute the beamlet-resolved dose influence matrix over the lattice.
 
@@ -178,12 +178,18 @@ class ReferenceEngine:
             and a different value in a call is a visible, greppable decision.
         correlated
             Key streams on the within-beamlet index so columns share random
-            sequences (correlated sampling). **Phase 4 experiment instrument**
-            (the sanctioned-toggle pattern of AGENTS.md 2.10): the shipped
-            default is decided from the noise/bias study at phase exit. A
-            correlated Dij's columns are statistically dependent — per-column
-            sigmas stay valid, but never combine sigmas across columns in
-            quadrature. The result records the mode in ``DijResult.correlated``.
+            sequences (correlated sampling). **This is the shipped
+            configuration** (default True): the Phase 4 noise/bias study
+            (``examples/phase4_noise_bias_study.py``) found it halves the
+            renormalized plan-dose error at matched per-beamlet sigma, in water
+            and through a heterogeneity, and never worse on raw plan quality.
+            ``correlated=False`` selects the independent mapping and exists
+            only as a **test instrument** (AGENTS.md 2.10): it isolates the
+            column independence the fluence-sum identity's quadrature sigma
+            needs. A correlated Dij's columns are statistically dependent —
+            per-column sigmas stay valid, but never combine sigmas across
+            columns in quadrature. The result records the mode in
+            ``DijResult.correlated``.
         """
         if n_histories_per_beamlet < 1:
             raise ValueError(

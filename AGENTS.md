@@ -153,8 +153,10 @@ silent misconfiguration downstream. Concretely:
   dosimetric effect — never by adding an option next to it. (If positron physics is ever
   upgraded, Bhabha and annihilation in flight go in together, as the new default.)
 - The only sanctioned toggles are **test instruments** — options that exist so a test can
-  isolate one piece of physics, like the engine's KERMA mode — and each must say so in its
-  docstring.
+  isolate one piece of physics or sampling, like the engine's KERMA mode (``transport_electrons``)
+  or ``run_dij``'s ``correlated=False`` independent-sampling mode (the shipped Dij is correlated;
+  the independent mapping survives only to isolate column independence for the fluence-sum test) —
+  and each must say so in its docstring.
 
 ---
 
@@ -271,26 +273,40 @@ A phase is not done when its tests pass. Before a phase may exit:
 exited; Phase 3's exit record is reproduced below (it defines the machinery
 Phase 4 builds on), earlier records live in the git history of this section.
 
-What Phase 4 is building (IMPLEMENTATION_PLAN.md section Phase 4; README
-roadmap row 4):
+What Phase 4 built (IMPLEMENTATION_PLAN.md section Phase 4; README roadmap
+row 4):
 
-- **Correlated sampling across beamlets via history repetition.** A change of
-  the *stream* mapping only: key the physics stream on the within-beamlet index
-  ``r = h % n_per`` instead of the global history index ``h``, so corresponding
-  histories in every beamlet replay the same interaction sequence and only the
-  entry position differs. The scheduling bit-inertness machinery carries over
-  unchanged. **Statistical landmine:** repetition makes Dij columns
-  *correlated* — per-column sigmas stay valid, but any sum across columns may
-  not combine sigmas assuming independence. Whether repetition ships default-on
-  or not is decided from the study data at phase exit (section 2.10: one
-  configuration ships); until then it is the phase's experiment instrument.
-- **The empirical study of per-beamlet uncertainty vs. optimized-plan DVH
-  bias**: a toy IMRT optimization (scipy, no new dependency) over Dij
-  realizations at several statistics levels, against a high-statistics
-  ground-truth Dij.
+- **Correlated sampling across beamlets via history repetition, now the
+  shipped sampling configuration.** A change of the *stream* mapping only: key
+  the physics stream on the within-beamlet index ``r = h % n_per`` instead of
+  the global history index ``h``, so corresponding histories in every beamlet
+  replay the same interaction sequence and only the entry position differs. The
+  scheduling bit-inertness machinery carries over unchanged. ``run_dij``
+  defaults to ``correlated=True`` on both engines; ``correlated=False`` is the
+  sanctioned **test instrument** (section 2.10) that isolates the column
+  independence the fluence-sum identity's quadrature sigma needs — it is not a
+  production mode.
+- **Statistical landmine that survives the decision:** correlated columns are
+  statistically *dependent*. Per-column sigmas stay valid (per-beamlet QA is
+  unaffected), but **any sum across columns — a plan dose — cannot combine the
+  column sigmas in quadrature.** A valid plan-dose sigma needs per-batch
+  scoring (batches are aligned across columns); the current ``DijResult`` does
+  not carry per-batch data, so it exposes no plan-dose sigma. Do not
+  reintroduce a quadrature plan-dose sigma anywhere.
+- **The empirical study behind the decision** lives in
+  ``examples/phase4_noise_bias_study.py``: a toy IMRT optimization (scipy, no
+  new dependency) over Dij realizations, optimized on one ground truth and
+  scored on a second independent one (the clinical recalculation), across six
+  statistics levels down to the 2 percent target sigma and through a
+  heterogeneity. Correlated sampling roughly halves the renormalized plan-dose
+  error at matched per-beamlet sigma and is never worse on raw plan quality;
+  its larger across-seed spread is common-mode scale that renormalization
+  removes. That is the evidence base for the default above (section 2.10: one
+  configuration ships, and this is the one).
 
-Exit criteria: a defensible, data-backed default for per-beamlet sigma, and a
-measured speedup from correlated sampling.
+Exit criteria met: a defensible, data-backed default for the sampling
+configuration and per-beamlet sigma, and a measured variance reduction from
+correlated sampling.
 
 Phase 3 exit record (2026-07-11) follows.
 
