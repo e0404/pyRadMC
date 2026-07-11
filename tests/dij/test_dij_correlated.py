@@ -11,11 +11,12 @@ The mapping pinned here on the reference engine is the specification every
 backend follows, exactly like the Phase 3 ``h`` mapping fixed in
 ``ReferenceEngine.run_dij``.
 
-The ``correlated`` flag is the Phase 4 experiment instrument (AGENTS.md 2.10);
-the shipped default is decided from the noise/bias study at phase exit. A
-correlated Dij's columns are *not* statistically independent: per-column sigmas
-stay valid, but sigmas must never be combined across columns in quadrature.
-The result carries ``correlated`` so downstream code can tell.
+``correlated=True`` is the shipped Dij configuration (decided at Phase 4 exit
+from the noise/bias study); ``correlated=False`` is the sanctioned test
+instrument (AGENTS.md 2.10) that the fluence-sum identity needs. A correlated
+Dij's columns are *not* statistically independent: per-column sigmas stay valid,
+but sigmas must never be combined across columns in quadrature. The result
+carries ``correlated`` so downstream code can tell.
 """
 
 from __future__ import annotations

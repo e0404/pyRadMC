@@ -30,23 +30,23 @@ Stated approximations, named here because this is where they are implemented:
 
 Photons at or below ``pcut`` deposit their energy locally and terminate.
 
-**Variance reduction**: two paired techniques, both always on — one
-configuration (AGENTS.md 2.10), each with a test instrument that turns it off.
+**Variance reduction** (one configuration, AGENTS.md 2.10):
 
-- *Compton splitting (Phase 4).* At a **primary** photon's first Compton
-  scatter the final state is sampled ``PHOTON_SPLIT_N`` times, each copy
-  (scattered photon + recoil electron) carrying weight ``1 / PHOTON_SPLIT_N``:
-  N independent samples of the dominant scatter source. Only the primary
-  splits, so the population is bounded. Energy is conserved per realization
-  (each copy's photon and electron sum to ``w/N`` of the incident
-  weight-energy). Instrument: set ``PHOTON_SPLIT_N`` to 1.
-- *Russian roulette (Phase 3).* A Compton-scattered photon dropping below
-  ``PHOTON_ROULETTE_MEV`` plays Russian roulette
+- *Russian roulette (Phase 3), always on.* A Compton-scattered photon dropping
+  below ``PHOTON_ROULETTE_MEV`` plays Russian roulette
   (:mod:`pyRadMC.physics.roulette`) while its weight is under
-  ``PHOTON_ROULETTE_WEIGHT_CAP``, culling the degraded split copies so the
-  splitting earns its keep. The game is exactly fair, and its weight-energy
-  change is booked through the escaped-energy ledger, so the per-run energy
-  balance stays exact. Instrument: zero the threshold constant.
+  ``PHOTON_ROULETTE_WEIGHT_CAP``. The game is exactly fair, and its
+  weight-energy change is booked through the escaped-energy ledger, so the
+  per-run energy balance stays exact. Instrument: zero the threshold constant.
+- *Compton splitting (Phase 4), shipped off.* The mechanism is here but
+  ``PHOTON_SPLIT_N`` ships at 1 (analog: a primary Comptons into one full-weight
+  copy) — the Phase 4 efficiency measurement found it does not earn its keep for
+  the analytic-water Dij and does not help the low-dose tail (see the constant's
+  docstring). For ``N > 1`` a **primary** photon's first Compton samples the
+  final state N times, each copy weighted ``1/N`` and energy-conserving per
+  realization; only the primary splits, so the population is bounded and the
+  roulette culls the degraded copies. Retained for Phase 5 phase-space sources;
+  test-pinned with N = 2 as the instrument so the path stays validated.
 """
 
 from __future__ import annotations

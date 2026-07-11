@@ -423,7 +423,9 @@ def photon_kernel(
                 # Compton splitting (Phase 4): the source photon samples
                 # PHOTON_SPLIT_N independent final states, each copy (scattered
                 # photon + recoil electron) weighted w/N and pushed as a
-                # non-primary photon; the primary's thread ends here. Only the
+                # non-primary photon; the primary's thread ends here. Ships at
+                # PHOTON_SPLIT_N=1 (analog: one full-weight copy) — see the
+                # constant's docstring for why it is off. Only the
                 # primary splits, so the population is bounded and every later
                 # scatter continues in-thread below (no per-scatter re-queue).
                 # Copies get child streams (spawn_stream), the warp counterpart

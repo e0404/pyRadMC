@@ -268,10 +268,16 @@ A phase is not done when its tests pass. Before a phase may exit:
 
 ### 7.2 Current phase
 
-**Phase 4: correlated sampling and the noise/optimization study — begun
-2026-07-11 with the maintainer's explicit go-ahead.** Phases 0 through 3 have
-exited; Phase 3's exit record is reproduced below (it defines the machinery
-Phase 4 builds on), earlier records live in the git history of this section.
+**Phase 5: tabulated data, phase space, pyRadPlan adapter — NOT STARTED.**
+Gated on the maintainer's explicit go-ahead; this exit record is not that
+go-ahead. Phases 0 through 4 have exited. Phase 4's exit record is reproduced
+below — it defines the machinery Phase 5 builds on and carries the warnings
+that target Phase 5; earlier records live in the git history of this section.
+
+---
+
+**Phase 4 exit record: correlated sampling and the noise/optimization study —
+begun 2026-07-11, exited 2026-07-12.**
 
 What Phase 4 built (IMPLEMENTATION_PLAN.md section Phase 4; README roadmap
 row 4):
@@ -303,85 +309,64 @@ row 4):
   its larger across-seed spread is common-mode scale that renormalization
   removes. That is the evidence base for the default above (section 2.10: one
   configuration ships, and this is the one).
+- **Compton splitting: mechanism built, shipped OFF.** A primary photon's
+  first Compton can split ``PHOTON_SPLIT_N`` ways (each copy weighted 1/N,
+  unbiased, energy-conserving per realization), on ref and warp; only the
+  primary splits so the population is bounded and the soft-photon roulette culls
+  the copies. But ``PHOTON_SPLIT_N`` ships at **1 (off)**: the efficiency
+  measurement found it does not earn its keep for the analytic-water Dij (FOM
+  ``1/(sigma^2*time)`` < 1 on the reference CPU, ~neutral on the GPU) and,
+  decisively, it does **not** help the low-dose tail — the Dij's NTCP/LET region
+  — because that tail is fed by rare wide-angle multiple scatters uniform
+  primary splitting cannot target (splitting deeper only worsens the FOM;
+  measured). The machinery is retained because splitting a phase-space source
+  particle (Phase 5) is efficient by construction; the ``N > 1`` path is
+  test-pinned with N = 2 as the instrument so it stays validated while dormant.
+  The soft-photon roulette (Phase 3) stays always-on regardless.
 
 Exit criteria met: a defensible, data-backed default for the sampling
-configuration and per-beamlet sigma, and a measured variance reduction from
-correlated sampling.
+configuration and per-beamlet sigma (correlated sampling), and a measured
+variance-reduction result — including the negative one that keeps Compton
+splitting off until Phase 5 justifies it. The runnable phase example
+(``examples/phase4_noise_bias_study.py``, with committed figure and CSV) and
+the documentation (README, this section) are updated per section 7.1.
 
-Phase 3 exit record (2026-07-11) follows.
+Standing items carried forward (Phase 5 targets marked). These outlive the
+records they came from; the Phase 0-3 exit records themselves are in git
+history.
 
-What Phase 3 built:
-
-- **Stratified beamlet decomposition.** `BeamletGridSource` tiles the field;
-  which beamlet a history feeds is a *deterministic function of the history
-  index* (never sampled), fixed once in `ReferenceEngine.run_dij` and followed
-  by every backend. Since streams are pure in (seed, history) and scoring is
-  associative, scheduling — beamlet grouping, chunking, batch merging — is
-  bit-inert, and a 1x1 lattice reproduces the open-field `run` bit for bit.
-  Both are test-pinned; treat them as the specification when touching the
-  engines.
-- **Tagged transport and grouped scoring.** Every queued particle carries the
-  group-local index of its ancestral beamlet; a history's whole family scores
-  into one column of a dense `(group, n_batches, n_voxels)` int64 device
-  buffer, read back once per group. Host side, `BatchedBeamletScorer` keeps
-  dose and dose-squared per batch per column (section 2.4) and `DijAssembler`
-  emits the sparse CSC `DijResult` with a per-entry sigma. The pipeline carries
-  a *fixed* host cost per (group, batch, voxel) block — benchmark it only at
-  planning statistics, never toy history counts.
-- **Truncation certified on DVH endpoints.** The default column truncation
-  (section 2.8) moves D2/D50/D98 by well under 0.5 percent, established
-  deterministically from bit-identical truncated/untruncated pairs.
-- **Statistical weights and Russian roulette.** Particles carry weights,
-  inherited by every secondary and scaling every deposit; photons below
-  `PHOTON_ROULETTE_MEV` (0.5 MeV — deliberately under the 511 keV line, so
-  annihilation stays analog) play a fair game at a Compton scatter or
-  bremsstrahlung birth, under a weight-window cap. The game's weight-energy
-  change books through the escaped-energy ledger with both signs, so
-  **energy conservation stays exact per run** — the invariant tightened, it did
-  not become statistical. Unbiasedness is chi-squared-pinned against a
-  roulette-free instrument run (threshold monkeypatched to zero — the sanctioned
-  test-instrument pattern of section 2.10; roulette itself is always on, one
-  configuration).
-
-Exit criteria, measured (laptop RTX 4070, performance power profile):
-
-- Every Dij column is chi-squared-consistent with the reference oracle under
-  full coupled transport — the test that actually exercises tag inheritance
-  through the photon-electron queues. Scheduling bit-inertness and the
-  1x1-lattice anchor asserted as above.
-- **Wall-clock target, set from the measured Phase 2 throughput per the plan:**
-  a 100-beamlet 6 MeV field on a 64^3 water phantom to 2-3 percent per-beamlet
-  high-dose sigma in **under 10 seconds**. Measured: ~1.1e7 histories/s
-  end-to-end at planning statistics (4e5 histories/beamlet, 3.9 percent sigma,
-  3.5 s; sigma scales as 1/sqrt(N)). The perf tier asserts a 2e6 histories/s
-  floor at planning statistics.
-- Energy balance including the roulette ledger holds exactly on `ref` and at
-  1e-4 relative on Warp; the EGSnrc PDD gamma gates and ESTAR range checks pass
-  with roulette active.
-
-Standing items carried forward:
-
-- **Roulette efficiency is neutral on the GPU as configured** (a warp retires
-  with its longest thread, and electron transport dominates), and its CPU cost
-  is unmeasured under controlled conditions. The maintainer may retire or retune
-  the roulette *sites*, or pair them with Compton splitting so the culling earns
-  its keep; the weight infrastructure itself stays regardless — correlated
-  sampling (Phase 4) and weighted phase-space sources (Phase 5) are built on it.
-- **Pair-refit warning for whoever enables Rayleigh (Phase 5)**: the analytic pair
-  channel is calibrated against water totals that *include* coherent scattering.
-  Turning on a real coherent channel without recalibrating pair against
-  coherent-free totals double-counts attenuation; the tabulated backend must take
-  its channels from one consistent decomposition of the same library — and must
-  replace the Thomson-limit coherent angular model with form-factor sampling in
-  the same change.
+- **Plan-dose sigma under correlated sampling — Phase 5.** Correlated columns
+  are statistically *dependent*: per-column sigmas stay valid (per-beamlet QA
+  is unaffected) but a sum across columns — a plan dose — must **not** combine
+  the column sigmas in quadrature. A valid plan-dose sigma needs per-batch
+  scoring (batches are aligned across columns); ``DijResult`` carries no
+  per-batch data, so it exposes none. Build it with the pyRadPlan adapter that
+  consumes it; never reintroduce a quadrature plan-dose sigma anywhere.
+- **Compton splitting is retained but OFF — turn it on in Phase 5.**
+  ``PHOTON_SPLIT_N`` ships at 1 (analog); the ``N > 1`` path is test-pinned via
+  the N = 2 instrument but dormant, because uniform primary splitting does not
+  earn its keep for the analytic-water Dij and cannot reach the low-dose tail
+  (measured). Splitting a phase-space source particle *is* efficient by
+  construction — enable it there (``N > 1``) and rerun the efficiency figure of
+  merit ``1/(sigma^2*time)`` to set the value. The soft-photon roulette stays
+  always-on regardless.
+- **VR CPU cost is still unmeasured under controlled conditions.** This laptop's
+  power state drifts 4-6x, so only the interleaved-median *ratio* (split cost)
+  is trustworthy here; GPU cost is neutral (a warp retires with its longest
+  thread). Absolute roulette/split CPU efficiency needs stable-power hardware.
+- **Pair-refit warning for whoever enables Rayleigh (Phase 5).** The analytic
+  pair channel is calibrated against water totals that *include* coherent
+  scattering. Turning on a real coherent channel without recalibrating pair
+  against coherent-free totals double-counts attenuation; the tabulated backend
+  must take its channels from one consistent decomposition of the same library —
+  and must replace the Thomson-limit coherent angular model with form-factor
+  sampling in the same change.
+- **The benchmark-PDD gamma gate** (validation tier, EGSnrc curves at 5%/3mm)
+  is data-limited by the analytic cross-sections. **Phase 5 must pass the same
+  file over the full depth range at 2 percent / 2 mm — replace the data layer,
+  never loosen this gate.**
 - **Positrons stay Moller-approximated** (no Bhabha, annihilation at rest). If
   ever upgraded, Bhabha and annihilation in flight land together as the new
   default per section 2.10, with a test showing the dosimetric effect.
-- The benchmark-PDD gamma gate (validation tier, EGSnrc curves at 5%/3mm) is
-  data-limited by the analytic cross-sections. **Phase 5 must pass the same file
-  over the full depth range at 2 percent / 2 mm — replace the data layer, never
-  loosen this gate.**
 
-Next after this phase is Phase 5 (tabulated data, phase space, pyRadPlan
-adapter — see the README roadmap). Do not begin it without the maintainer's
-explicit go-ahead.
+Do not begin Phase 5 without the maintainer's explicit go-ahead.

@@ -51,30 +51,35 @@ Caps the boost cascade at two consecutive survivals (1 -> 2 -> 4), bounding the
 graininess a single high-weight deposit can leave in the low-dose tail.
 """
 
-PHOTON_SPLIT_N: int = 2
+PHOTON_SPLIT_N: int = 1
 """Compton splitting multiplicity at a *primary* photon's first Compton scatter.
 
-The primary's Compton final state is sampled ``PHOTON_SPLIT_N`` times, each copy
-(scattered photon + recoil electron) carrying weight ``1 / PHOTON_SPLIT_N``: N
-independent samples of the dominant scatter source, averaged, so the scattered
-dose variance falls while the expectation is exactly preserved and energy is
-conserved per realization. Only the primary splits, so the photon population is
-bounded (at most N first-generation scattered photons per source photon, and
-the transport cost grows about linearly in N); the soft-photon roulette above
-then culls the degraded copies, so the splitting and the culling are paired —
-the roulette earns its keep (AGENTS.md 7.2).
+``N = 1`` is **splitting off — the shipped configuration.** At N == 1 the
+primary Comptons into a single full-weight copy, i.e. exactly analog transport.
+For ``N > 1`` the primary's Compton final state is sampled N times, each copy
+(scattered photon + recoil electron) carrying weight ``1 / N``: N independent
+samples of the dominant scatter source, exactly unbiased and energy-conserving
+per realization, with cost growing about linearly in N. Only the primary
+splits, so the population is bounded and the soft-photon roulette culls the
+degraded copies.
 
-Like the roulette parameters this is a variance-reduction efficiency knob, not
-accuracy-defining: it changes realizations and cost, never expectations.
-Unbiasedness is test-pinned against a split-free instrument (N = 1). It is a
-fixed project-wide value, one configuration (AGENTS.md 2.10).
+This is a variance-reduction efficiency knob, not accuracy-defining: it changes
+realizations and cost, never expectations. Correctness of the ``N > 1`` path
+(unbiasedness, energy books, N-fold fair copies, variance reduction) is
+test-pinned with N = 2 as the instrument, so the mechanism stays validated
+though it is dormant.
 
-The default is deliberately conservative: N = 2 is the minimal genuine split
-(it doubles the scattered-photon statistics and pairs with the roulette) at
-roughly double the reference-transport cost. The variance-reduction *efficiency*
-— the figure of merit ``1 / (sigma^2 * time)`` as a function of N — is settled
-by the Phase 4 efficiency measurement; raise N only on that evidence, with the
-measurement rerun.
+**Why it ships off (Phase 4 efficiency measurement).** For the analytic-water
+Dij, splitting does not earn its keep: the figure of merit ``1/(sigma^2*time)``
+is < 1 on the reference CPU (variance falls to ~0.67 in the high/mid-dose
+region but cost rises ~1.7x) and roughly neutral on the GPU (a warp retires
+with its longest thread). Worse, it does **not** help the low-dose tail — the
+Dij's NTCP/LET region — because that tail is fed by rare wide-angle multiple
+scatters that uniform primary splitting cannot target; splitting deeper only
+degrades the FOM further (measured). The machinery is retained because
+splitting a **phase-space source particle** (Phase 5) is efficient by
+construction and is the natural place to turn this on (N > 1), rerunning the
+measurement to set the value.
 """
 
 # --- physical constants --------------------------------------------------------

@@ -2,8 +2,8 @@
 
 Fast photon Monte Carlo dose engine for radiotherapy treatment planning.
 
-> **Status: Phase 4 underway (correlated sampling and the noise/optimization
-> study), pre-alpha.** The engine produces its primary
+> **Status: Phase 4 complete, pre-alpha; Phase 5 (tabulated data, phase-space
+> source, pyRadPlan adapter) is next and gated.** The engine produces its primary
 > product: a **beamlet-resolved dose influence matrix (Dij)** — sparse CSC columns
 > with a per-entry statistical uncertainty, computed on CPU and CUDA by tagging
 > every history's whole secondary family with its beamlet of origin. Because RNG
@@ -20,8 +20,11 @@ Fast photon Monte Carlo dose engine for radiotherapy treatment planning.
 > histories on the same random streams roughly halves the renormalized
 > plan-dose error at a given per-beamlet uncertainty, established by a
 > recalculation-and-renormalize study over optimized toy plans in water and
-> through a heterogeneity. Do not use for anything clinical, now or later,
-> without independent validation.
+> through a heterogeneity. Compton splitting was built and measured but ships
+> off: it does not earn its keep for the analytic-water Dij and cannot reach the
+> low-dose tail, so the mechanism is retained (tested) for Phase 5 phase-space
+> sources. Do not use for anything clinical, now or later, without independent
+> validation.
 
 ## Why
 
@@ -151,7 +154,7 @@ repeating here because they are the ones people break:
 | 1 ✅ | Reference condensed-history electron transport; PDD validation gate¹ |
 | 2 ✅ | Warp backend, CPU and CUDA from one source² |
 | 3 ✅ | Beamlet tagging, batched Dij assembly, basic variance reduction³ |
-| 4 🚧 | Correlated sampling; study of per-beamlet noise vs. optimized-plan bias |
+| 4 ✅ | Correlated sampling; study of per-beamlet noise vs. optimized-plan bias⁴ |
 | 5 | Tabulated data, phase-space source, pyRadPlan adapter |
 
 ¹ The nightly validation tier gates against NIST ESTAR ranges and against
@@ -182,6 +185,22 @@ pass with it active; measured efficiency on the GPU is neutral (kill savings
 disappear under warp divergence), and the weight machinery is kept because
 correlated sampling (Phase 4) and weighted phase-space sources (Phase 5) are
 built on it.
+
+⁴ Correlated sampling across beamlets (keying each beamlet's histories on the
+same within-beamlet stream index) ships as the default Dij configuration, with
+the independent mapping demoted to a test instrument. The decision rests on a
+recalculation-and-renormalize study (`examples/phase4_noise_bias_study.py`,
+using the toy fluence optimizer in `pyRadMC.study`): optimizing on a noisy Dij
+and scoring on a second independent ground truth, across six statistics levels
+to the 2% target sigma in water and a heterogeneity, correlated sampling roughly
+halves the renormalized plan-dose error at matched per-beamlet sigma. Compton
+splitting at primary sites was implemented on both backends and measured, then
+shipped **off** (`PHOTON_SPLIT_N = 1`): its variance-reduction figure of merit
+is below 1 on the reference CPU and neutral on the GPU, and it does not reach the
+low-dose tail, so the tested mechanism is retained for the Phase 5 phase-space
+source rather than run now. Roulette stays always-on. Carried into Phase 5: a
+per-batch plan-dose sigma (correlated columns forbid a quadrature one), built
+with the adapter that consumes it.
 
 ## License
 

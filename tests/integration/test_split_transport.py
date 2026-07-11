@@ -1,13 +1,18 @@
-"""Compton splitting in the transport loop: unbiased, active, exactly booked.
+"""Compton splitting in the transport loop: unbiased, exactly booked, dormant.
 
 Splitting samples a *primary* photon's first Compton final state
 ``PHOTON_SPLIT_N`` times, each copy (scattered photon + recoil electron)
-carrying weight ``1 / PHOTON_SPLIT_N``. It is always on (one configuration,
-AGENTS.md 2.10); the split-free comparison runs exist only as a test
-instrument, produced by pointing the transport module's multiplicity constant
-at one via monkeypatching. The oracle for unbiasedness is the batched
-chi-squared detection test of AGENTS.md 4, on the reference backend, where any
-bias would be a physics bug and not a float32 artifact.
+carrying weight ``1 / PHOTON_SPLIT_N``. It **ships off** (``PHOTON_SPLIT_N`` ==
+1, exactly analog transport): the Phase 4 efficiency measurement found it does
+not earn its keep for the analytic-water Dij (see the constant's docstring).
+The mechanism is retained for Phase 5 phase-space sources, so these tests
+enable it with the sanctioned instrument — pointing the transport module's
+multiplicity constant at 2 via monkeypatching (AGENTS.md 2.10) — to keep the
+``N > 1`` path validated though it is dormant.
+
+The oracle for unbiasedness is the batched chi-squared detection test of
+AGENTS.md 4, on the reference backend, where any bias would be a physics bug
+and not a float32 artifact.
 
 Energy is conserved *per realization*, not just in expectation: each copy
 carries ``w/N`` of both the scattered photon and its recoil electron, which sum
@@ -21,7 +26,7 @@ import numpy as np
 import pytest
 
 import pyRadMC.transport.photon as photon_mod
-from pyRadMC import PCUT_MEV, PHOTON_SPLIT_N
+from pyRadMC import PCUT_MEV
 from pyRadMC.backends.ref.engine import ReferenceEngine
 from pyRadMC.data.analytic import AnalyticCrossSections
 from pyRadMC.geometry.grid import VoxelGrid
@@ -29,6 +34,10 @@ from pyRadMC.geometry.source import ParallelBeamSource
 from pyRadMC.rng.host import HostRNG
 from pyRadMC.transport.photon import photon_steps
 from tests.conftest import SEED, assert_chi2_consistent_batched
+
+# The instrument multiplicity: these tests turn the dormant split path on to N
+# copies so it stays validated for Phase 5. Not the shipped value (which is 1).
+SPLIT_N = 2
 
 
 def _engine() -> ReferenceEngine:
@@ -41,18 +50,18 @@ def _source() -> ParallelBeamSource:
     return ParallelBeamSource(energy=6.0, z=-1.0, x_range=(2.0, 14.0), y_range=(2.0, 14.0))
 
 
-def _disable_splitting(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Test instrument: multiplicity one means no photon ever splits."""
-    monkeypatch.setattr(photon_mod, "PHOTON_SPLIT_N", 1)
+def _enable_splitting(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test instrument: turn the dormant split path on to multiplicity ``SPLIT_N``."""
+    monkeypatch.setattr(photon_mod, "PHOTON_SPLIT_N", SPLIT_N)
 
 
 class TestUnbiasedness:
     def test_dose_matches_split_free_transport(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Splitting on vs off, independent seeds: chi-squared consistent."""
+        """Splitting on (instrument) vs off (shipped), independent seeds: chi-squared consistent."""
         engine = _engine()
-        with_split = engine.run(_source(), n_histories=2_400, n_batches=8, seed=SEED)
-        _disable_splitting(monkeypatch)
         without_split = engine.run(_source(), n_histories=2_400, n_batches=8, seed=SEED + 1)
+        _enable_splitting(monkeypatch)
+        with_split = engine.run(_source(), n_histories=2_400, n_batches=8, seed=SEED)
         mask = without_split.dose > 0.1 * without_split.dose.max()
         mask &= (with_split.dose_sigma > 0.0) & (without_split.dose_sigma > 0.0)
         assert np.count_nonzero(mask) > 200
@@ -67,12 +76,12 @@ class TestUnbiasedness:
         )
 
     def test_splitting_actually_fires(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Same seed, splitting on vs off, must diverge — else the test above
-        certifies nothing."""
+        """Same seed, splitting on (instrument) vs off (shipped), must diverge —
+        else the test above certifies nothing."""
         engine = _engine()
-        with_split = engine.run(_source(), n_histories=400, n_batches=1, seed=SEED)
-        _disable_splitting(monkeypatch)
         without_split = engine.run(_source(), n_histories=400, n_batches=1, seed=SEED)
+        _enable_splitting(monkeypatch)
+        with_split = engine.run(_source(), n_histories=400, n_batches=1, seed=SEED)
         assert not np.array_equal(with_split.dose, without_split.dose)
 
 
@@ -91,9 +100,9 @@ class TestVarianceReduction:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         engine = _engine()
-        split = engine.run(_source(), n_histories=2_400, n_batches=8, seed=SEED)
-        _disable_splitting(monkeypatch)
         unsplit = engine.run(_source(), n_histories=2_400, n_batches=8, seed=SEED)
+        _enable_splitting(monkeypatch)
+        split = engine.run(_source(), n_histories=2_400, n_batches=8, seed=SEED)
         high = unsplit.dose > 0.3 * unsplit.dose.max()
         assert np.count_nonzero(high) > 200
         var_ratio = (split.dose_sigma[high] ** 2).mean() / (unsplit.dose_sigma[high] ** 2).mean()
@@ -106,8 +115,11 @@ class TestVarianceReduction:
 
 class TestExactBooks:
     @pytest.mark.parametrize("transport_electrons", [False, True])
-    def test_emitted_equals_deposited_plus_escaped(self, transport_electrons: bool) -> None:
+    def test_emitted_equals_deposited_plus_escaped(
+        self, transport_electrons: bool, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """The ledger identity survives splitting exactly (float64 reference)."""
+        _enable_splitting(monkeypatch)
         result = _engine().run(
             _source(),
             n_histories=600,
@@ -157,18 +169,23 @@ class TestFairCopies:
         )
         return spawned, deposits, escaped
 
-    def test_primary_splits_into_n_fair_copies_conserving_energy(self) -> None:
-        seed = _PRIMARY_COMPTON_SEED
-        spawned, deposits, escaped = self._transport_one(seed, is_primary=True)
+    def test_primary_splits_into_n_fair_copies_conserving_energy(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _enable_splitting(monkeypatch)
+        spawned, deposits, escaped = self._transport_one(_PRIMARY_COMPTON_SEED, is_primary=True)
         photons = [s for s in spawned if s[0] == photon_mod.PHOTON]
-        assert len(photons) == PHOTON_SPLIT_N
+        assert len(photons) == SPLIT_N
         for copy in photons:
-            assert copy[2] == pytest.approx(1.0 / PHOTON_SPLIT_N, rel=1.0e-12)
+            assert copy[2] == pytest.approx(1.0 / SPLIT_N, rel=1.0e-12)
         total = sum(p[1] * p[2] for p in spawned) + sum(deposits) + escaped
         assert total == pytest.approx(1.0, rel=1.0e-12)
 
-    def test_same_photon_as_non_primary_does_not_split(self) -> None:
+    def test_same_photon_as_non_primary_does_not_split(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """The identical stream, marked non-primary, yields one scattered photon."""
+        _enable_splitting(monkeypatch)
         spawned, _, _ = self._transport_one(_PRIMARY_COMPTON_SEED, is_primary=False)
         photons = [s for s in spawned if s[0] == photon_mod.PHOTON]
         assert len(photons) == 1
