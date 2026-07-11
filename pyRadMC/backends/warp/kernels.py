@@ -53,6 +53,7 @@ __all__ = [
     "Queue",
     "Tables",
     "electron_kernel",
+    "generate_beamlet_lattice",
     "generate_parallel_beam",
     "generate_pencil_beam",
     "photon_kernel",
@@ -112,6 +113,7 @@ class GridInfo:
     sz: float
     ny: int
     nz: int
+    n_voxels: int
     min_spacing: float
 
 
@@ -143,9 +145,15 @@ class Queue:
     Overflow does not write (the slot does not exist) but the counter keeps
     counting, so the engine detects ``count > capacity`` after the launch and
     raises — secondaries are never silently dropped.
+
+    ``beamlet`` is the Dij tag: the group-local index of the beamlet whose
+    primary this particle descends from. Secondaries inherit it unchanged, so a
+    history's whole family scores into one Dij column. Plain dose runs leave it
+    at zero everywhere, which makes them the one-column degenerate case.
     """
 
     kind: wp.array(dtype=wp.int32)
+    beamlet: wp.array(dtype=wp.int32)
     energy: wp.array(dtype=float)
     x: wp.array(dtype=float)
     y: wp.array(dtype=float)
@@ -162,6 +170,7 @@ class Queue:
 def _queue_push(
     q: Queue,
     kind: int,
+    beamlet: int,
     energy: float,
     x: float,
     y: float,
@@ -174,6 +183,7 @@ def _queue_push(
     idx = wp.atomic_add(q.count, 0, 1)
     if idx < q.capacity:
         q.kind[idx] = kind
+        q.beamlet[idx] = beamlet
         q.energy[idx] = energy
         q.x[idx] = x
         q.y[idx] = y
@@ -186,11 +196,22 @@ def _queue_push(
 
 @wp.func
 def _deposit(
-    edep: wp.array(dtype=wp.int64), gi: GridInfo, ix: int, iy: int, iz: int, energy: float
+    edep: wp.array(dtype=wp.int64),
+    gi: GridInfo,
+    base: int,
+    ix: int,
+    iy: int,
+    iz: int,
+    energy: float,
 ):
-    """Round-to-nearest fixed-point deposit; float64 scaling keeps it exact."""
+    """Round-to-nearest fixed-point deposit; float64 scaling keeps it exact.
+
+    ``base`` is the flat offset of this particle's beamlet column
+    (``beamlet * gi.n_voxels``); zero for plain dose runs, whose ``edep`` is a
+    single column.
+    """
     quanta = wp.int64(wp.float64(energy) * wp.float64(_INV_QUANTUM) + wp.float64(0.5))
-    wp.atomic_add(edep, (ix * gi.ny + iy) * gi.nz + iz, quanta)
+    wp.atomic_add(edep, base + (ix * gi.ny + iy) * gi.nz + iz, quanta)
 
 
 @wp.func
@@ -204,6 +225,7 @@ def _deposit_or_escape(
     edep: wp.array(dtype=wp.int64),
     escaped: wp.array(dtype=wp.int64),
     gi: GridInfo,
+    base: int,
     x: float,
     y: float,
     z: float,
@@ -216,7 +238,7 @@ def _deposit_or_escape(
         ix = point_axis_index(x, gi.x_lo, gi.sx)
         iy = point_axis_index(y, gi.y_lo, gi.sy)
         iz = point_axis_index(z, gi.z_lo, gi.sz)
-        _deposit(edep, gi, ix, iy, iz, amount)
+        _deposit(edep, gi, base, ix, iy, iz, amount)
     else:
         _escape(escaped, amount)
 
@@ -231,21 +253,28 @@ def _annihilate_at_rest(
     q_photon: Queue,
     edep: wp.array(dtype=wp.int64),
     pcut: float,
+    beamlet: int,
+    base: int,
 ):
     """Positron annihilation at rest; mirror of transport.particles.annihilate_at_rest.
 
     Called only for positions inside the grid. Each annihilation photon gets its
-    own child stream, since the pair are transported by independent threads.
+    own child stream, since the pair are transported by independent threads; both
+    inherit the positron's beamlet tag.
     """
     if pcut >= ELECTRON_MASS_MEV:
         ix = point_axis_index(x, gi.x_lo, gi.sx)
         iy = point_axis_index(y, gi.y_lo, gi.sy)
         iz = point_axis_index(z, gi.z_lo, gi.sz)
-        _deposit(edep, gi, ix, iy, iz, 2.0 * ELECTRON_MASS_MEV)
+        _deposit(edep, gi, base, ix, iy, iz, 2.0 * ELECTRON_MASS_MEV)
         return
     ax, ay, az = sample_isotropic_direction(state)
-    _queue_push(q_photon, PHOTON, ELECTRON_MASS_MEV, x, y, z, ax, ay, az, spawn_stream(state))
-    _queue_push(q_photon, PHOTON, ELECTRON_MASS_MEV, x, y, z, -ax, -ay, -az, spawn_stream(state))
+    _queue_push(
+        q_photon, PHOTON, beamlet, ELECTRON_MASS_MEV, x, y, z, ax, ay, az, spawn_stream(state)
+    )
+    _queue_push(
+        q_photon, PHOTON, beamlet, ELECTRON_MASS_MEV, x, y, z, -ax, -ay, -az, spawn_stream(state)
+    )
 
 
 @wp.kernel
@@ -272,6 +301,8 @@ def photon_kernel(
     """
     tid = wp.tid()
     e = q_in.energy[tid]
+    beamlet = q_in.beamlet[tid]
+    base = beamlet * gi.n_voxels
     x = q_in.x[tid]
     y = q_in.y[tid]
     z = q_in.z[tid]
@@ -347,20 +378,24 @@ def photon_kernel(
             if transport_electrons != 0 and recoil > ecut:
                 cos_electron = compton_electron_cos_theta(e, ratio)
                 ex, ey, ez = rotate_direction(ux, uy, uz, cos_electron, phi + math.pi)
-                _queue_push(q_electron, ELECTRON, recoil, x, y, z, ex, ey, ez, spawn_stream(state))
+                _queue_push(
+                    q_electron, ELECTRON, beamlet, recoil, x, y, z, ex, ey, ez, spawn_stream(state)
+                )
             else:
-                _deposit(edep, gi, ix, iy, iz, recoil)
+                _deposit(edep, gi, base, ix, iy, iz, recoil)
             cos_gamma = compton_cos_theta(e, ratio)
             ux, uy, uz = rotate_direction(ux, uy, uz, cos_gamma, phi)
             e *= ratio
             if e <= pcut:
-                _deposit(edep, gi, ix, iy, iz, e)
+                _deposit(edep, gi, base, ix, iy, iz, e)
                 return
         elif process == PhotonProcess.PHOTOELECTRIC:
             if transport_electrons != 0 and e > ecut:
-                _queue_push(q_electron, ELECTRON, e, x, y, z, ux, uy, uz, spawn_stream(state))
+                _queue_push(
+                    q_electron, ELECTRON, beamlet, e, x, y, z, ux, uy, uz, spawn_stream(state)
+                )
             else:
-                _deposit(edep, gi, ix, iy, iz, e)
+                _deposit(edep, gi, base, ix, iy, iz, e)
             return
         else:  # pair production
             kinetic = e - 2.0 * ELECTRON_MASS_MEV
@@ -370,20 +405,40 @@ def photon_kernel(
                 share_p = (1.0 - fraction) * kinetic
                 if share_e > ecut:
                     _queue_push(
-                        q_electron, ELECTRON, share_e, x, y, z, ux, uy, uz, spawn_stream(state)
+                        q_electron,
+                        ELECTRON,
+                        beamlet,
+                        share_e,
+                        x,
+                        y,
+                        z,
+                        ux,
+                        uy,
+                        uz,
+                        spawn_stream(state),
                     )
                 else:
-                    _deposit(edep, gi, ix, iy, iz, share_e)
+                    _deposit(edep, gi, base, ix, iy, iz, share_e)
                 if share_p > ecut:
                     _queue_push(
-                        q_electron, POSITRON, share_p, x, y, z, ux, uy, uz, spawn_stream(state)
+                        q_electron,
+                        POSITRON,
+                        beamlet,
+                        share_p,
+                        x,
+                        y,
+                        z,
+                        ux,
+                        uy,
+                        uz,
+                        spawn_stream(state),
                     )
                 else:
-                    _deposit(edep, gi, ix, iy, iz, share_p)
-                    _annihilate_at_rest(x, y, z, gi, state, q_photon_out, edep, pcut)
+                    _deposit(edep, gi, base, ix, iy, iz, share_p)
+                    _annihilate_at_rest(x, y, z, gi, state, q_photon_out, edep, pcut, beamlet, base)
             else:
-                _deposit(edep, gi, ix, iy, iz, kinetic)
-                _annihilate_at_rest(x, y, z, gi, state, q_photon_out, edep, pcut)
+                _deposit(edep, gi, base, ix, iy, iz, kinetic)
+                _annihilate_at_rest(x, y, z, gi, state, q_photon_out, edep, pcut, beamlet, base)
             return
 
 
@@ -411,6 +466,8 @@ def electron_kernel(
     tid = wp.tid()
     is_positron = q_in.kind[tid] == POSITRON
     e = q_in.energy[tid]
+    beamlet = q_in.beamlet[tid]
+    base = beamlet * gi.n_voxels
     x = q_in.x[tid]
     y = q_in.y[tid]
     z = q_in.z[tid]
@@ -446,9 +503,9 @@ def electron_kernel(
             ix = point_axis_index(x, gi.x_lo, gi.sx)
             iy = point_axis_index(y, gi.y_lo, gi.sy)
             iz = point_axis_index(z, gi.z_lo, gi.sz)
-            _deposit(edep, gi, ix, iy, iz, e)
+            _deposit(edep, gi, base, ix, iy, iz, e)
             if is_positron:
-                _annihilate_at_rest(x, y, z, gi, state, q_photon, edep, pcut)
+                _annihilate_at_rest(x, y, z, gi, state, q_photon, edep, pcut, beamlet, base)
             return
 
         ix = point_axis_index(x, gi.x_lo, gi.sx)
@@ -506,7 +563,7 @@ def electron_kernel(
         d2 = continuous - d1
 
         _deposit_or_escape(
-            edep, escaped, gi, x + ux * s1 / 2.0, y + uy * s1 / 2.0, z + uz * s1 / 2.0, d1
+            edep, escaped, gi, base, x + ux * s1 / 2.0, y + uy * s1 / 2.0, z + uz * s1 / 2.0, d1
         )
         e -= d1
         x += ux * s1
@@ -529,13 +586,13 @@ def electron_kernel(
             k = sample_bremsstrahlung_energy(e, pcut, state)
             k = min(k, e - d2)
             if k > pcut:
-                _queue_push(q_photon, PHOTON, k, x, y, z, ux, uy, uz, spawn_stream(state))
+                _queue_push(q_photon, PHOTON, beamlet, k, x, y, z, ux, uy, uz, spawn_stream(state))
             else:
-                _deposit_or_escape(edep, escaped, gi, x, y, z, k)
+                _deposit_or_escape(edep, escaped, gi, base, x, y, z, k)
             e -= k
 
         _deposit_or_escape(
-            edep, escaped, gi, x + ux * s2 / 2.0, y + uy * s2 / 2.0, z + uz * s2 / 2.0, d2
+            edep, escaped, gi, base, x + ux * s2 / 2.0, y + uy * s2 / 2.0, z + uz * s2 / 2.0, d2
         )
         e -= d2
         x += ux * s2
@@ -552,7 +609,17 @@ def electron_kernel(
             phi = 2.0 * math.pi * uniform(state)
             dx, dy, dz = rotate_direction(ux, uy, uz, cos_delta, phi)
             _queue_push(
-                q_electron_out, ELECTRON, delta_energy, x, y, z, dx, dy, dz, spawn_stream(state)
+                q_electron_out,
+                ELECTRON,
+                beamlet,
+                delta_energy,
+                x,
+                y,
+                z,
+                dx,
+                dy,
+                dz,
+                spawn_stream(state),
             )
             ux, uy, uz = rotate_direction(ux, uy, uz, cos_primary, phi + math.pi)
             e -= delta_energy
@@ -579,6 +646,7 @@ def generate_pencil_beam(
     """
     tid = wp.tid()
     q.kind[tid] = kind
+    q.beamlet[tid] = 0
     q.energy[tid] = energy
     q.x[tid] = px
     q.y[tid] = py
@@ -612,6 +680,66 @@ def generate_parallel_beam(
     x = x0 + x_extent * uniform(state)
     y = y0 + y_extent * uniform(state)
     q.kind[tid] = kind
+    q.beamlet[tid] = 0
+    q.energy[tid] = energy
+    q.x[tid] = x
+    q.y[tid] = y
+    q.z[tid] = z0
+    q.ux[tid] = 0.0
+    q.uy[tid] = 0.0
+    q.uz[tid] = 1.0
+    q.rng[tid] = slots[tid]
+
+
+@wp.kernel
+def generate_beamlet_lattice(
+    seed: int,
+    group_start: int,
+    n_histories_per_beamlet: int,
+    per_batch: int,
+    n_batches: int,
+    t_offset: int,
+    energy: float,
+    z0: float,
+    x_lo: wp.array(dtype=float),
+    x_extent: wp.array(dtype=float),
+    y_lo: wp.array(dtype=float),
+    y_extent: wp.array(dtype=float),
+    slots: wp.array(dtype=wp.uint32),
+    q: Queue,
+):
+    """Primaries for one chunk of a beamlet group, tagged with a (beamlet, batch) slot.
+
+    Thread ``tid`` handles flat index ``t = t_offset + tid`` of the group's whole
+    history block (all batches at once — one drain sequence and one readback per
+    group): group-local beamlet ``t // n_per``, within-beamlet index
+    ``r = t % n_per``, batch ``r // per_batch``. The global history index follows
+    the project-wide mapping fixed by ``ReferenceEngine.run_dij`` —
+    ``h = j * n_per + r`` — so streams, and with them the whole Dij, are invariant
+    to grouping, batch merging, and chunking (test-pinned). The column tag is the
+    batch-resolved slot ``local * n_batches + batch``: batches stay separable for
+    the sigma estimate without per-batch launches.
+
+    The bounds arrays are per group-local beamlet, precomputed on the host by
+    ``BeamletGridSource.beamlet_bounds`` — the lattice geometry has exactly one
+    definition. Two uniforms per primary (x, then y), the same arithmetic as
+    ``generate_parallel_beam``, so a 1x1 lattice is bit-identical to the open
+    field on this device.
+    """
+    tid = wp.tid()
+    t = t_offset + tid
+    local = t // n_histories_per_beamlet
+    r = t - local * n_histories_per_beamlet
+    batch = r // per_batch
+    h = (group_start + local) * n_histories_per_beamlet + r
+    slots[tid] = init_slot(seed, h)
+    state = WarpRNGState()
+    state.slots = slots
+    state.idx = tid
+    x = x_lo[local] + x_extent[local] * uniform(state)
+    y = y_lo[local] + y_extent[local] * uniform(state)
+    q.kind[tid] = PHOTON
+    q.beamlet[tid] = local * n_batches + batch
     q.energy[tid] = energy
     q.x[tid] = x
     q.y[tid] = y

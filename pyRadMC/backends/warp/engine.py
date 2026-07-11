@@ -30,13 +30,14 @@ from dataclasses import dataclass
 import numpy as np
 import warp as wp
 
-from pyRadMC import ECUT_MEV, PCUT_MEV
+from pyRadMC import DIJ_TRUNCATION_RELATIVE, ECUT_MEV, PCUT_MEV
 from pyRadMC.backends.results import TransportResult
 from pyRadMC.backends.warp import kernels
 from pyRadMC.backends.warp.kernels import ENERGY_QUANTUM_MEV, GridInfo, Queue, Tables
 from pyRadMC.data.interface import CrossSectionSource
 from pyRadMC.geometry.grid import VoxelGrid
-from pyRadMC.geometry.source import ParallelBeamSource, PencilBeamSource
+from pyRadMC.geometry.source import BeamletGridSource, ParallelBeamSource, PencilBeamSource
+from pyRadMC.scoring.dij import BatchedBeamletScorer, DijAssembler, DijResult
 from pyRadMC.scoring.dose import BatchedDoseScorer
 from pyRadMC.transport.particles import ELECTRON, PHOTON
 
@@ -48,6 +49,7 @@ _E_MAX_MARGIN = 1.0 + 1.0e-6  # table upper edge strictly above the primary ener
 def _upload_queue(capacity: int, device: str) -> Queue:
     q = Queue()
     q.kind = wp.zeros(capacity, dtype=wp.int32, device=device)
+    q.beamlet = wp.zeros(capacity, dtype=wp.int32, device=device)
     q.energy = wp.zeros(capacity, dtype=float, device=device)
     q.x = wp.zeros(capacity, dtype=float, device=device)
     q.y = wp.zeros(capacity, dtype=float, device=device)
@@ -199,6 +201,164 @@ class WarpEngine:
             n_batches=n_batches,
         )
 
+    def run_dij(
+        self,
+        source: BeamletGridSource,
+        n_histories_per_beamlet: int,
+        n_batches: int,
+        seed: int,
+        pcut: float = PCUT_MEV,
+        ecut: float = ECUT_MEV,
+        transport_electrons: bool = True,
+        truncation: float = DIJ_TRUNCATION_RELATIVE,
+        beamlet_group_size: int = 32,
+    ) -> DijResult:
+        """Compute the Dij over the lattice; same contract as the reference engine.
+
+        See :meth:`pyRadMC.backends.ref.engine.ReferenceEngine.run_dij` for the
+        history-to-beamlet mapping and parameter semantics — the signatures are
+        deliberately identical up to the one scheduling knob:
+
+        Parameters
+        ----------
+        beamlet_group_size
+            Beamlets scored concurrently into one dense device buffer of
+            ``group * n_batches * n_voxels`` int64 quanta (the batch axis lives
+            on the device too, so a group needs only one queue-drain sequence
+            and one readback). Purely a memory/occupancy trade-off: streams are
+            pure functions of ``(seed, history)`` and scoring is associative, so
+            the result is bit-identical for any value (test-pinned), exactly
+            like ``chunk_size``.
+        """
+        if n_histories_per_beamlet < 1:
+            raise ValueError(
+                f"need at least one history per beamlet, got {n_histories_per_beamlet}"
+            )
+        if n_histories_per_beamlet % n_batches != 0:
+            raise ValueError(
+                f"n_histories_per_beamlet={n_histories_per_beamlet} not divisible by "
+                f"n_batches={n_batches}; unequal batches would weight batch means inconsistently"
+            )
+        if beamlet_group_size < 1:
+            raise ValueError(f"need a positive beamlet group size, got {beamlet_group_size}")
+
+        device = self.device
+        gi, density, material = self._upload_grid(device)
+        tab = self._upload_tables(source.energy, pcut, ecut, device)
+        n_beamlets = source.n_beamlets
+        per_batch = n_histories_per_beamlet // n_batches
+        n_voxels = int(np.prod(self.grid.shape))
+
+        escaped = wp.zeros(1, dtype=wp.int64, device=device)
+        violations = wp.zeros(1, dtype=wp.int32, device=device)
+        assembler = DijAssembler(
+            grid_shape=self.grid.shape,
+            n_beamlets=n_beamlets,
+            n_histories_per_beamlet=n_histories_per_beamlet,
+            n_batches=n_batches,
+            truncation=truncation,
+        )
+        # Energy books in exact integer quanta (Python ints, unbounded), converted
+        # to MeV once at the end: float accumulation order would otherwise make
+        # the tallies — unlike the matrix — depend on the group size.
+        deposited_quanta = 0
+        escaped_quanta = 0
+
+        for group_start in range(0, n_beamlets, beamlet_group_size):
+            group = min(beamlet_group_size, n_beamlets - group_start)
+            bounds = np.array(
+                [source.beamlet_bounds(group_start + k) for k in range(group)],
+                dtype=np.float64,
+            )
+            x_lo = wp.array(bounds[:, 0].astype(np.float32), dtype=float, device=device)
+            x_extent = wp.array(
+                (bounds[:, 1] - bounds[:, 0]).astype(np.float32), dtype=float, device=device
+            )
+            y_lo = wp.array(bounds[:, 2].astype(np.float32), dtype=float, device=device)
+            y_extent = wp.array(
+                (bounds[:, 3] - bounds[:, 2]).astype(np.float32), dtype=float, device=device
+            )
+
+            block_histories = group * n_histories_per_beamlet  # all batches at once
+            chunk = min(self.chunk_size, block_histories)
+            capacity = chunk * self.queue_factor
+            queues = [_upload_queue(capacity, device) for _ in range(4)]
+            slots = wp.zeros(capacity, dtype=wp.uint32, device=device)
+            edep = wp.zeros(group * n_batches * n_voxels, dtype=wp.int64, device=device)
+            scorer = BatchedBeamletScorer(self.grid, n_batches, group)
+
+            escaped.zero_()
+            t = 0
+            while t < block_histories:
+                n_chunk = min(chunk, block_histories - t)
+                for q in queues:
+                    _reset_count(q, device)
+                wp.launch(
+                    kernels.generate_beamlet_lattice,
+                    dim=n_chunk,
+                    inputs=[
+                        seed,
+                        group_start,
+                        n_histories_per_beamlet,
+                        per_batch,
+                        n_batches,
+                        t,
+                        source.energy,
+                        source.z,
+                        x_lo,
+                        x_extent,
+                        y_lo,
+                        y_extent,
+                        slots,
+                        queues[0],
+                    ],
+                    device=device,
+                )
+                _set_count(queues[0], n_chunk, device)
+                self._drain_queues(
+                    queues[0],
+                    queues[1],
+                    queues[2],
+                    queues[3],
+                    gi,
+                    density,
+                    material,
+                    tab,
+                    slots,
+                    edep,
+                    escaped,
+                    violations,
+                    pcut,
+                    ecut,
+                    transport_electrons,
+                    device,
+                )
+                t += n_chunk
+            wp.synchronize_device(device)
+            if int(violations.numpy()[0]) != 0:
+                raise RuntimeError(
+                    "Woodcock majorant violated in the kernel despite table headroom. "
+                    "The geometry contains material or density the majorant "
+                    "declaration did not cover."
+                )
+            group_quanta = edep.numpy()
+            deposited_quanta += int(group_quanta.sum())
+            escaped_quanta += int(escaped.numpy()[0])
+            group_energy = group_quanta.astype(np.float64) * ENERGY_QUANTUM_MEV
+            group_energy = group_energy.reshape(group, n_batches, n_voxels)
+            for batch in range(n_batches):
+                scorer.deposit_block(group_energy[:, batch, :])
+                scorer.end_batch(per_batch)
+
+            block = scorer.finalize()
+            assembler.add_block(group_start, block.dose, block.sigma)
+
+        return assembler.finalize(
+            energy_emitted=n_beamlets * n_histories_per_beamlet * source.energy,
+            energy_deposited=deposited_quanta * ENERGY_QUANTUM_MEV,
+            energy_escaped=escaped_quanta * ENERGY_QUANTUM_MEV,
+        )
+
     # -- internals --------------------------------------------------------------
 
     def _transport_chunk(
@@ -239,6 +399,45 @@ class WarpEngine:
         self._generate(source, kind, seed, history_offset, n_chunk, target, slots, device)
         _set_count(target, n_chunk, device)
 
+        self._drain_queues(
+            q_photon,
+            q_photon_alt,
+            q_electron,
+            q_electron_alt,
+            gi,
+            density,
+            material,
+            tab,
+            slots,
+            edep,
+            escaped,
+            violations,
+            pcut,
+            ecut,
+            transport_electrons,
+            device,
+        )
+
+    def _drain_queues(
+        self,
+        q_photon,
+        q_photon_alt,
+        q_electron,
+        q_electron_alt,
+        gi,
+        density,
+        material,
+        tab,
+        slots,
+        edep,
+        escaped,
+        violations,
+        pcut,
+        ecut,
+        transport_electrons,
+        device,
+    ) -> None:
+        """Ping-pong the photon and electron kernels until every queue is empty."""
         while True:
             n_photon = _queue_count(q_photon)
             if n_photon > 0:
@@ -342,6 +541,7 @@ class WarpEngine:
         gi.sx, gi.sy, gi.sz = self.grid.spacing
         gi.ny = self.grid.shape[1]
         gi.nz = self.grid.shape[2]
+        gi.n_voxels = int(np.prod(self.grid.shape))
         gi.min_spacing = min(self.grid.spacing)
         density = wp.array(self.grid.density.astype(np.float32), dtype=float, device=device)
         material = wp.array(self.grid.material.astype(np.int32), dtype=wp.int32, device=device)

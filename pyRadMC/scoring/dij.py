@@ -218,7 +218,6 @@ class DijAssembler:
     n_batches: int
     truncation: float
     _next_beamlet: int = 0
-    _energy_deposited: float = 0.0
     _indices: list[np.ndarray] = field(default_factory=list)
     _dose: list[np.ndarray] = field(default_factory=list)
     _sigma: list[np.ndarray] = field(default_factory=list)
@@ -229,9 +228,7 @@ class DijAssembler:
         if self.truncation < 0.0:
             raise ValueError(f"negative truncation {self.truncation}")
 
-    def add_block(
-        self, start: int, dose: np.ndarray, sigma: np.ndarray, energy_deposited: float
-    ) -> None:
+    def add_block(self, start: int, dose: np.ndarray, sigma: np.ndarray) -> None:
         """Truncate and append a dense block whose first beamlet is column ``start``."""
         if start != self._next_beamlet:
             raise RuntimeError(f"block starts at {start}, expected {self._next_beamlet}")
@@ -247,10 +244,16 @@ class DijAssembler:
             self._sigma.append(row_sigma[idx])
             self._counts.append(int(idx.size))
         self._next_beamlet += dose.shape[0]
-        self._energy_deposited += energy_deposited
 
-    def finalize(self, energy_emitted: float, energy_escaped: float) -> DijResult:
-        """Concatenate the columns into CSC arrays and close the books."""
+    def finalize(
+        self, energy_emitted: float, energy_deposited: float, energy_escaped: float
+    ) -> DijResult:
+        """Concatenate the columns into CSC arrays and close the books.
+
+        The energy tallies are the *engine's* to close, not the assembler's: a
+        kernel backend keeps them in exact integer quanta so that the books, like
+        the matrix, are invariant to how beamlets were grouped into blocks.
+        """
         if self._next_beamlet != self.n_beamlets:
             raise RuntimeError(f"assembled {self._next_beamlet}/{self.n_beamlets} beamlet columns")
         indptr = np.zeros(self.n_beamlets + 1, dtype=np.int64)
@@ -269,6 +272,6 @@ class DijAssembler:
             dose=np.concatenate(self._dose) if self._dose else empty,
             sigma=np.concatenate(self._sigma) if self._sigma else empty,
             energy_emitted=energy_emitted,
-            energy_deposited=self._energy_deposited,
+            energy_deposited=energy_deposited,
             energy_escaped=energy_escaped,
         )

@@ -103,8 +103,10 @@ class TestDijAssembler:
             n_batches=2,
             truncation=truncation,
         )
-        asm.add_block(0, dose, sigma, energy_deposited=float(dose.sum()))
-        return asm.finalize(energy_emitted=1.0, energy_escaped=0.0)
+        asm.add_block(0, dose, sigma)
+        return asm.finalize(
+            energy_emitted=1.0, energy_deposited=float(dose.sum()), energy_escaped=0.0
+        )
 
     def test_truncation_drops_below_relative_column_max(self) -> None:
         dose = np.zeros((1, N_VOX))
@@ -148,9 +150,9 @@ class TestDijAssembler:
             truncation=0.0,
         )
         dose = np.arange(3 * N_VOX, dtype=float).reshape(3, N_VOX) + 1.0
-        asm.add_block(0, dose[:2], np.zeros((2, N_VOX)), energy_deposited=0.0)
-        asm.add_block(2, dose[2:], np.zeros((1, N_VOX)), energy_deposited=0.0)
-        dij = asm.finalize(energy_emitted=1.0, energy_escaped=0.0)
+        asm.add_block(0, dose[:2], np.zeros((2, N_VOX)))
+        asm.add_block(2, dose[2:], np.zeros((1, N_VOX)))
+        dij = asm.finalize(energy_emitted=1.0, energy_deposited=0.0, energy_escaped=0.0)
         weights = np.array([1.0, 0.0, 2.0])
         expected = (weights[:, None] * dose).sum(axis=0).reshape(2, 2, 2)
         np.testing.assert_allclose(dij.dose_for_weights(weights), expected)
@@ -163,9 +165,9 @@ class TestDijAssembler:
             n_batches=2,
             truncation=0.0,
         )
-        asm.add_block(0, np.zeros((1, N_VOX)), np.zeros((1, N_VOX)), energy_deposited=0.0)
+        asm.add_block(0, np.zeros((1, N_VOX)), np.zeros((1, N_VOX)))
         with pytest.raises(RuntimeError):
-            asm.finalize(energy_emitted=1.0, energy_escaped=0.0)
+            asm.finalize(energy_emitted=1.0, energy_deposited=0.0, energy_escaped=0.0)
 
     def test_csc_export_matches_dense_columns(self) -> None:
         rng = np.random.default_rng(3)
@@ -187,5 +189,5 @@ class TestDijAssembler:
             n_batches=2,
             truncation=0.0,
         )
-        asm.add_block(0, dose, np.zeros_like(dose), energy_deposited=0.0)
-        return asm.finalize(energy_emitted=1.0, energy_escaped=0.0)
+        asm.add_block(0, dose, np.zeros_like(dose))
+        return asm.finalize(energy_emitted=1.0, energy_deposited=0.0, energy_escaped=0.0)

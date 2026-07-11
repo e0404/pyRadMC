@@ -217,5 +217,9 @@ class ReferenceEngine:
             n_batches=n_batches,
             truncation=truncation,
         )
-        assembler.add_block(0, block.dose, block.sigma, block.energy_deposited)
-        return assembler.finalize(energy_emitted=energy_emitted, energy_escaped=energy_escaped)
+        assembler.add_block(0, block.dose, block.sigma)
+        return assembler.finalize(
+            energy_emitted=energy_emitted,
+            energy_deposited=block.energy_deposited,
+            energy_escaped=energy_escaped,
+        )
