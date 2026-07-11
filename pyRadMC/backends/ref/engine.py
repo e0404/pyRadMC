@@ -13,13 +13,15 @@ itself (launch and memory management only, AGENTS.md section 3).
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import partial
 
-from pyRadMC import ECUT_MEV, PCUT_MEV
+from pyRadMC import DIJ_TRUNCATION_RELATIVE, ECUT_MEV, PCUT_MEV
 from pyRadMC.backends.results import TransportResult
 from pyRadMC.data.interface import CrossSectionSource
 from pyRadMC.geometry.grid import VoxelGrid
-from pyRadMC.geometry.source import ParallelBeamSource, PencilBeamSource
+from pyRadMC.geometry.source import BeamletGridSource, ParallelBeamSource, PencilBeamSource
 from pyRadMC.rng.interface import RNG
+from pyRadMC.scoring.dij import BatchedBeamletScorer, DijAssembler, DijResult
 from pyRadMC.scoring.dose import BatchedDoseScorer
 from pyRadMC.transport.history import transport_history
 from pyRadMC.transport.particles import ELECTRON, PHOTON
@@ -125,3 +127,95 @@ class ReferenceEngine:
             n_histories=n_histories,
             n_batches=n_batches,
         )
+
+    def run_dij(
+        self,
+        source: BeamletGridSource,
+        n_histories_per_beamlet: int,
+        n_batches: int,
+        seed: int,
+        pcut: float = PCUT_MEV,
+        ecut: float = ECUT_MEV,
+        transport_electrons: bool = True,
+        truncation: float = DIJ_TRUNCATION_RELATIVE,
+    ) -> DijResult:
+        """Compute the beamlet-resolved dose influence matrix over the lattice.
+
+        History-to-beamlet mapping — the project-wide convention every backend
+        follows: history ``h`` feeds beamlet ``j = h // n_histories_per_beamlet``,
+        and within a beamlet, batch ``b`` owns the contiguous slice of
+        ``n_histories_per_beamlet / n_batches`` histories starting at
+        ``j * n_histories_per_beamlet + b * (that slice length)``. Streams are pure
+        functions of ``(seed, h)``, so the Dij is bit-reproducible on one target
+        regardless of how a backend schedules the transport, and a 1x1 lattice
+        reproduces the open-field :meth:`run` bit for bit (test-pinned).
+
+        Every deposit of a history's whole secondary family scores into its
+        beamlet's column: the columns partition the open-field dose exactly.
+        Column doses are per emitted history *of that beamlet*, MeV/g.
+
+        Parameters mirror :meth:`run`; the two Dij-specific ones:
+
+        Parameters
+        ----------
+        n_histories_per_beamlet
+            Histories per beamlet (equal by design — stratified, not sampled);
+            must be divisible by ``n_batches``.
+        truncation
+            Per-column relative truncation threshold. Accuracy-defining
+            (AGENTS.md 2.8): the default is :data:`pyRadMC.DIJ_TRUNCATION_RELATIVE`
+            and a different value in a call is a visible, greppable decision.
+        """
+        if n_histories_per_beamlet < 1:
+            raise ValueError(
+                f"need at least one history per beamlet, got {n_histories_per_beamlet}"
+            )
+        if n_histories_per_beamlet % n_batches != 0:
+            raise ValueError(
+                f"n_histories_per_beamlet={n_histories_per_beamlet} not divisible by "
+                f"n_batches={n_batches}; unequal batches would weight batch means inconsistently"
+            )
+
+        n_beamlets = source.n_beamlets
+        per_batch = n_histories_per_beamlet // n_batches
+        scorer = BatchedBeamletScorer(self.grid, n_batches, n_beamlets)
+        energy_emitted = 0.0
+        energy_escaped = 0.0
+
+        for batch in range(n_batches):
+            for beamlet in range(n_beamlets):
+                deposit = partial(scorer.deposit, beamlet)
+                for r in range(per_batch):
+                    h = beamlet * n_histories_per_beamlet + batch * per_batch + r
+                    state = self.rng.init_state(seed, h)
+                    primary = source.emit(beamlet, state)
+                    energy_emitted += primary.energy
+                    energy_escaped += transport_history(
+                        PHOTON,
+                        primary.energy,
+                        primary.x,
+                        primary.y,
+                        primary.z,
+                        primary.ux,
+                        primary.uy,
+                        primary.uz,
+                        self.grid,
+                        self.cross_sections,
+                        state,
+                        deposit,
+                        pcut,
+                        ecut,
+                        transport_electrons,
+                    )
+            scorer.end_batch(per_batch)
+
+        block = scorer.finalize()
+        assembler = DijAssembler(
+            grid_shape=self.grid.shape,
+            n_beamlets=n_beamlets,
+            n_histories_per_beamlet=n_histories_per_beamlet,
+            n_batches=n_batches,
+            truncation=truncation,
+        )
+        assembler.add_block(0, block.dose, block.sigma, block.energy_deposited)
+        return assembler.finalize(energy_emitted=energy_emitted, energy_escaped=energy_escaped)
