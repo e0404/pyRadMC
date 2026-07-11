@@ -61,3 +61,34 @@ def test_finalize_requires_all_batches_closed() -> None:
     scorer.end_batch(n_histories=1)
     with pytest.raises(RuntimeError, match="batch"):
         scorer.finalize()
+
+
+def test_deposit_grid_equals_equivalent_scalar_deposits() -> None:
+    """The kernel backends' bulk entry point is exactly a batch of deposit calls."""
+    from pyRadMC.scoring.dose import BatchedDoseScorer
+
+    grid = _make_grid()
+    energy = np.zeros(grid.shape)
+    energy[0, 0, 0] = 1.25
+    energy[1, 0, 0] = 0.75
+
+    bulk = BatchedDoseScorer(grid, n_batches=1)
+    bulk.deposit_grid(energy)
+    bulk.end_batch(n_histories=5)
+
+    scalar = BatchedDoseScorer(grid, n_batches=1)
+    scalar.deposit(0, 0, 0, 1.25)
+    scalar.deposit(1, 0, 0, 0.75)
+    scalar.end_batch(n_histories=5)
+
+    a, b = bulk.finalize(), scalar.finalize()
+    np.testing.assert_array_equal(a.dose, b.dose)
+    assert a.energy_deposited == pytest.approx(b.energy_deposited)
+
+
+def test_deposit_grid_rejects_shape_mismatch() -> None:
+    from pyRadMC.scoring.dose import BatchedDoseScorer
+
+    scorer = BatchedDoseScorer(_make_grid(), n_batches=1)
+    with pytest.raises(ValueError, match="shape"):
+        scorer.deposit_grid(np.zeros((1, 2, 3)))

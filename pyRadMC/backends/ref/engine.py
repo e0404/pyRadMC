@@ -14,9 +14,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-import numpy as np
-
 from pyRadMC import ECUT_MEV, PCUT_MEV
+from pyRadMC.backends.results import TransportResult
 from pyRadMC.data.interface import CrossSectionSource
 from pyRadMC.geometry.grid import VoxelGrid
 from pyRadMC.geometry.source import ParallelBeamSource, PencilBeamSource
@@ -26,25 +25,6 @@ from pyRadMC.transport.history import transport_history
 from pyRadMC.transport.particles import ELECTRON, PHOTON
 
 __all__ = ["ReferenceEngine", "TransportResult"]
-
-
-@dataclass(frozen=True)
-class TransportResult:
-    """One engine run: batched dose estimate plus exact energy bookkeeping.
-
-    ``energy_emitted == energy_deposited + energy_escaped`` holds to float
-    accumulation precision; it is asserted in the integration tier.
-    """
-
-    dose: np.ndarray
-    """Per-voxel dose, MeV/g per emitted history."""
-    dose_sigma: np.ndarray
-    """Per-voxel 1-sigma standard error from batch statistics."""
-    energy_emitted: float
-    energy_deposited: float
-    energy_escaped: float
-    n_histories: int
-    n_batches: int
 
 
 @dataclass(frozen=True)

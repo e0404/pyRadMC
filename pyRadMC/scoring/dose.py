@@ -67,6 +67,20 @@ class BatchedDoseScorer:
         self._current_energy[ix, iy, iz] += energy
         self._energy_deposited += energy
 
+    def deposit_grid(self, energy: np.ndarray) -> None:
+        """Add a whole per-voxel energy grid, in MeV, to the current batch.
+
+        The bulk entry point for kernel backends, which score device-side and hand
+        back one array per batch; statistically identical to an equivalent sequence
+        of :meth:`deposit` calls.
+        """
+        if energy.shape != self._current_energy.shape:
+            raise ValueError(
+                f"energy grid shape {energy.shape} != dose grid {self._current_energy.shape}"
+            )
+        self._current_energy += energy
+        self._energy_deposited += float(energy.sum())
+
     def end_batch(self, n_histories: int) -> None:
         """Close the current batch of ``n_histories`` emitted histories."""
         if self._closed >= self._n_batches:

@@ -22,8 +22,9 @@ One particle at a time, for the reference backend. The scheme, per AGENTS.md 7.2
 
 Substeps are limited to a fraction of the CSDA range (energy-loss accuracy) and of
 the smallest voxel edge (heterogeneity accuracy). The reference backend keeps both
-conservative; the Warp backend (Phase 2) is where step aggressiveness gets bought
-with better transport mechanics, and it is validated against this loop.
+conservative; the Warp backend mirrors this loop step for step and is validated
+against it — step aggressiveness beyond it must be bought with better transport
+mechanics, not by loosening the oracle.
 
 Electrons at or below ECUT deposit their kinetic energy locally and terminate.
 """

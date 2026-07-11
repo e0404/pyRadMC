@@ -9,6 +9,8 @@ Written before any implementation exists. Each is skipped until its backend land
 
 from __future__ import annotations
 
+import ast
+
 import numpy as np
 import pytest
 
@@ -133,19 +135,119 @@ class TestTableIntegrationContract:
         # assert abs(actual - exact) < abs(naive - exact) / 10
 
 
+def _cross_target_equality_violations(tree: ast.Module) -> list[int]:
+    """Line numbers of exact-equality assertions between different targets.
+
+    Heuristic by design: within each test function, variables assigned from an
+    expression mentioning an engine constructor are tagged with (backend, device
+    literal). An equality comparison (``==``, ``np.array_equal``,
+    ``assert_array_equal``, ``assert_equal``) whose operands carry different
+    backends — or the same backend with different literal devices — is flagged.
+    Helper indirection can evade it; the point is to catch the shape a reasonable
+    person writes before coffee, not a determined adversary.
+    """
+    engine_names = {"ReferenceEngine": "ref", "WarpEngine": "warp"}
+    equality_calls = {"assert_array_equal", "array_equal", "assert_equal"}
+
+    def tag_of(expr: ast.AST) -> tuple[str, str | None] | None:
+        for sub in ast.walk(expr):
+            if isinstance(sub, ast.Call):
+                name = (
+                    sub.func.id if isinstance(sub.func, ast.Name) else getattr(sub.func, "attr", "")
+                )
+                if name in engine_names:
+                    device = None
+                    for kw in sub.keywords:
+                        if kw.arg == "device" and isinstance(kw.value, ast.Constant):
+                            device = str(kw.value.value)
+                    return (engine_names[name], device)
+        return None
+
+    violations: list[int] = []
+    functions = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)]
+    for func in functions:
+        tagged: dict[str, tuple[str, str | None]] = {}
+        for node in ast.walk(func):
+            if isinstance(node, ast.Assign) and len(node.targets) == 1:
+                target = node.targets[0]
+                tag = tag_of(node.value)
+                if isinstance(target, ast.Name) and tag is not None:
+                    tagged[target.id] = tag
+
+        def tags_in(
+            expr: ast.AST, tagged: dict[str, tuple[str, str | None]] = tagged
+        ) -> set[tuple[str, str | None]]:
+            # Early-bound default: each function's variable tags, not the last one's.
+            found = set()
+            direct = tag_of(expr)
+            if direct is not None:
+                found.add(direct)
+            for sub in ast.walk(expr):
+                if isinstance(sub, ast.Name) and sub.id in tagged:
+                    found.add(tagged[sub.id])
+            return found
+
+        def is_cross_target(operands: list[ast.AST], lineno: int, tags_in=tags_in) -> None:
+            tags = set().union(*(tags_in(op) for op in operands))
+            backends = {backend for backend, _ in tags}
+            devices = {device for _, device in tags if device is not None}
+            if len(backends) > 1 or (len(devices) > 1):
+                violations.append(lineno)
+
+        for node in ast.walk(func):
+            if isinstance(node, ast.Compare) and any(isinstance(op, ast.Eq) for op in node.ops):
+                is_cross_target([node.left, *node.comparators], node.lineno)
+            elif isinstance(node, ast.Call):
+                name = (
+                    node.func.id
+                    if isinstance(node.func, ast.Name)
+                    else getattr(node.func, "attr", "")
+                )
+                if name in equality_calls and len(node.args) >= 2:
+                    is_cross_target(list(node.args[:2]), node.lineno)
+    return violations
+
+
 def test_no_cross_target_bit_equality_is_asserted_anywhere() -> None:
     """A meta-test, and a deliberate one.
 
-    Greps the test tree for exact-equality assertions between backends. Cross-target
-    bit-reproducibility is unattainable (non-associative atomics, differing
-    transcendental intrinsics). A test asserting it will pass on the developer's
-    machine and fail in CI, and the usual response is to loosen it until it passes
-    vacuously. Better to forbid the shape outright.
+    Walks the test tree's ASTs for exact-equality assertions between backends (or
+    between devices of one backend). Cross-target bit-reproducibility is
+    unattainable (non-associative atomics, differing transcendental intrinsics). A
+    test asserting it will pass on the developer's machine and fail in CI, and the
+    usual response is to loosen it until it passes vacuously. Better to forbid the
+    shape outright.
 
-    See AGENTS.md section 2.3.
+    See AGENTS.md section 2.3. Within-target equality (same backend, same device)
+    is legitimate and stays unflagged — the Warp backend's determinism tests rely
+    on it.
     """
-    pytest.skip("implement once more than one backend exists")
+    from pathlib import Path
 
-    # walk tests/, parse with ast, flag assert_array_equal / == between
-    # results tagged as coming from different backends
-    _ = np  # keep the import meaningful when the body lands
+    # The checker must actually detect the forbidden shapes, or this test is a
+    # rubber stamp: prove it on planted violations first.
+    planted = ast.parse(
+        "def test_bad_backends():\n"
+        "    a = ReferenceEngine(grid=g, cross_sections=x, rng=r).run(s, 1, 1, 0)\n"
+        "    b = WarpEngine(grid=g, cross_sections=x).run(s, 1, 1, 0)\n"
+        "    np.testing.assert_array_equal(a.dose, b.dose)\n"
+        "def test_bad_devices():\n"
+        "    a = WarpEngine(grid=g, cross_sections=x, device='cpu').run(s, 1, 1, 0)\n"
+        "    b = WarpEngine(grid=g, cross_sections=x, device='cuda:0').run(s, 1, 1, 0)\n"
+        "    assert (a.dose == b.dose).all()\n"
+        "def test_fine_same_device():\n"
+        "    a = WarpEngine(grid=g, cross_sections=x, device='cpu').run(s, 1, 1, 0)\n"
+        "    b = WarpEngine(grid=g, cross_sections=x, device='cpu').run(s, 1, 1, 0)\n"
+        "    np.testing.assert_array_equal(a.dose, b.dose)\n"
+    )
+    assert len(_cross_target_equality_violations(planted)) == 2
+
+    offenders = []
+    for path in sorted(Path(__file__).parent.parent.rglob("test_*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        offenders.extend((path.name, line) for line in _cross_target_equality_violations(tree))
+    assert offenders == [], (
+        f"cross-target exact-equality assertions found: {offenders}. "
+        "Compare backends statistically (AGENTS.md 2.3 and 4), never bitwise."
+    )
+    _ = np  # the oracle-style imports stay meaningful for the module docstring

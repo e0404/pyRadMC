@@ -1,7 +1,7 @@
 """Photon transport with Woodcock tracking.
 
 One photon at a time: this loop serves the reference backend and is the behavioural
-specification for the Warp kernels (Phase 2). Sampling lives in :mod:`pyRadMC.physics`;
+specification the Warp kernels mirror. Sampling lives in :mod:`pyRadMC.physics`;
 data access goes through :class:`pyRadMC.data.interface.CrossSectionSource`; this
 module only sequences them.
 

@@ -138,3 +138,59 @@ def assert_chi2_consistent(
     p_value = float(stats.chi2.sf(chi2, dof))
 
     assert p_value > alpha, f"chi2={chi2:.1f} on {dof} dof, p={p_value:.2e} < alpha={alpha}"
+
+
+def assert_chi2_consistent_batched(
+    a: np.ndarray,
+    sigma_a: np.ndarray,
+    n_batches_a: int,
+    b: np.ndarray,
+    sigma_b: np.ndarray,
+    n_batches_b: int,
+    alpha: float = 0.01,
+    mask: np.ndarray | None = None,
+) -> None:
+    """Chi-squared consistency for two *batch-estimated* uncertainty maps.
+
+    :func:`assert_chi2_consistent` assumes the sigmas are exact. When both are
+    estimated from k batches, each voxel's z^2 is F(1, nu)-distributed with the
+    Welch-Satterthwaite effective dof
+
+        nu = (v_a + v_b)^2 / (v_a^2 / (k_a - 1) + v_b^2 / (k_b - 1)),
+
+    so E[z^2] = nu / (nu - 2) — about 1.2 at 8 batches, not 1. Summed over ~10^3
+    voxels that inflation alone pushes the exact-sigma null past any alpha: the
+    plain oracle becomes a false-positive machine on backend-vs-backend
+    comparisons, and the reflex response of loosening alpha would blunt real
+    detections. This variant computes the correct first two moments of the sum of
+    F variates and tests against the normal approximation (fine at these voxel
+    counts). It reduces to the exact-sigma oracle as the batch counts grow; it is
+    a calibration of the null, not a tolerance change.
+
+    Requires at least 6 batches on each side so the F variance exists (nu > 4).
+    Detection power differs from the exact-sigma oracle only through the genuinely
+    wider null; the AGENTS.md section 4 ordering (chi-squared first) is unchanged.
+    """
+    if min(n_batches_a, n_batches_b) < 6:
+        raise ValueError("need at least 6 batches per side for a calibrated batched chi2")
+    if mask is None:
+        mask = np.ones(a.shape, dtype=bool)
+
+    va = sigma_a[mask] ** 2
+    vb = sigma_b[mask] ** 2
+    if np.any(va + vb <= 0.0):
+        raise ValueError("zero uncertainty in the compared region; score dose-squared")
+
+    nu = (va + vb) ** 2 / (va**2 / (n_batches_a - 1) + vb**2 / (n_batches_b - 1))
+    z_sq = (a[mask] - b[mask]) ** 2 / (va + vb)
+    chi2 = float(np.sum(z_sq))
+    mean = float(np.sum(nu / (nu - 2.0)))
+    variance = float(np.sum(2.0 * nu**2 * (nu - 1.0) / ((nu - 2.0) ** 2 * (nu - 4.0))))
+    z_score = (chi2 - mean) / np.sqrt(variance)
+    p_value = float(stats.norm.sf(z_score))
+
+    assert p_value > alpha, (
+        f"chi2={chi2:.1f} vs batched-null mean {mean:.1f} (sd {np.sqrt(variance):.1f}) "
+        f"on {int(np.count_nonzero(mask))} voxels, p={p_value:.2e} < alpha={alpha}. "
+        "The two estimates are not statistically consistent: suspect a bias, not noise."
+    )

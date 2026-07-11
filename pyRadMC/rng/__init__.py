@@ -2,8 +2,8 @@
 
 Physics routines import :func:`uniform` from here and call ``uniform(state)`` — nothing
 else (AGENTS.md section 2.6). The binding below is the host implementation used by the
-``ref`` backend; kernel targets (Phase 2+) bind their own ``uniform`` at kernel compile
-time and never route through this module.
+``ref`` backend; kernel targets bind their own ``uniform`` (see
+:mod:`pyRadMC.rng.warp_shim`) at kernel compile time and never route through this module.
 """
 
 from pyRadMC.rng.host import HostRNG, uniform

@@ -24,8 +24,8 @@ def uniform(state: np.random.Generator) -> float:
     """Draw one float64 from U[0, 1) — the only RNG call physics routines make.
 
     Module-level rather than a method so that physics code reads ``uniform(state)``
-    identically across targets; kernel targets (Phase 2+) bind their own ``uniform``
-    at kernel compile time and never import this one.
+    identically across targets; kernel targets bind their own ``uniform``
+    (:mod:`pyRadMC.rng.warp_shim`) at kernel compile time and never import this one.
     """
     return float(state.random())
 

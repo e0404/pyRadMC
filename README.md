@@ -2,13 +2,15 @@
 
 Fast photon Monte Carlo dose engine for radiotherapy treatment planning.
 
-> **Status: Phase 1 complete, pre-alpha.** The pure-NumPy reference engine transports
-> photons *and* secondary electrons (Class II condensed history: Berger-Seltzer
-> restricted stopping powers, discrete Moller events, Gaussian multiple-scattering
-> hinge, thin-target bremsstrahlung, positrons with at-rest annihilation) in
-> voxelized water with analytic cross-sections. Electron buildup is real; the
-> benchmark-PDD gamma gate awaits trusted reference curves. Do not use for anything
-> clinical, now or later, without independent validation.
+> **Status: Phase 2 complete, pre-alpha.** The production Warp backend runs the full
+> coupled photon-electron physics on CPU and CUDA **from the same physics source**
+> the pure-NumPy reference interprets, validated against that reference with the
+> chi-squared detection oracle on both devices. Scoring is fixed-point, so one
+> device + one seed is bit-reproducible even on CUDA. Measured throughput for a
+> 6 MeV broad beam in water with coupled transport: ~1.6e7 histories/s on a laptop
+> RTX 4070 (the 1e6/s exit criterion with an order of magnitude to spare) and
+> ~4e5/s single-threaded on Warp-CPU. No Dij yet (Phase 3). Do not use for
+> anything clinical, now or later, without independent validation.
 
 ## Why
 
@@ -66,7 +68,15 @@ beam with electrons transported against the same beam in the KERMA approximation
 the buildup region is the difference — and the right panel shows electron-beam depth
 doses whose R50 tracks the CSDA range.
 
-The engine API in three lines:
+![Phase 2: one physics source compiled three ways, and the throughput gap](examples/phase2_warp_backend.png)
+
+Phase 2 shipped the production Warp backend (`examples/phase2_warp_backend.py`): the
+same 6 MeV beam computed by the reference interpreter and by the Warp compilation of
+the *identical* physics source on CPU and CUDA. The depth-dose curves agree within
+their error bands; the bars show why the backend exists.
+
+The engine API in three lines (swap in `WarpEngine(grid=..., cross_sections=...,
+device="cuda:0")` for the production backend — the `run` signatures are identical):
 
 ```python
 grid = VoxelGrid.uniform_water(shape=(16, 16, 16), spacing=(1.0, 1.0, 1.0))
@@ -83,7 +93,7 @@ result = ReferenceEngine(grid=grid, cross_sections=xs, rng=HostRNG()).run(
 |---|---|---|
 | `ref` | correctness oracle; never optimized | CPU (NumPy) |
 | `warp` | production | CPU, CUDA |
-| `numba` | optional CPU cross-check | CPU |
+| `numba` | optional CPU cross-check — never built; drop/keep decision pending² | CPU |
 
 Warp is CUDA-only for GPU. If vendor-neutral GPU becomes a requirement, the physics
 layer is framework-agnostic and a Taichi backend is a port, not a rewrite.
@@ -120,7 +130,7 @@ repeating here because they are the ones people break:
 |---|---|
 | 0 ✅ | Reference photon transport (KERMA approximation), interfaces, test scaffold |
 | 1 ✅ | Reference condensed-history electron transport; PDD validation gate¹ |
-| 2 | Warp backend, CPU and CUDA from one source |
+| 2 ✅ | Warp backend, CPU and CUDA from one source² |
 | 3 | Beamlet tagging, batched Dij assembly, basic variance reduction |
 | 4 | Correlated sampling; study of per-beamlet noise vs. optimized-plan bias |
 | 5 | Tabulated data, phase-space source, pyRadPlan adapter |
@@ -129,6 +139,14 @@ repeating here because they are the ones people break:
 maintainer-supplied EGSnrc depth-dose curves (1, 2 and 6 MeV; gamma 5%/3mm — the
 criterion is limited by the analytic cross-sections, and Phase 5 must pass the same
 data at 2%/2mm over the full depth range).
+
+² Both Warp devices reproduce the reference within the chi-squared detection
+oracle; GPU throughput cleared the 1e6 histories/s criterion at ~1.6e7 on a laptop
+RTX 4070. The third exit criterion ("Warp-CPU within 2x of numba-CPU, or the numba
+backend is dropped") is a maintainer decision: no numba backend was ever built, and
+building one solely to lose to it would be the tail wagging the dog — the
+recommendation on record is to drop it and keep the plan's Taichi note as the
+fallback if Warp-CPU ever becomes the bottleneck.
 
 ## License
 

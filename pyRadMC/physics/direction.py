@@ -1,8 +1,8 @@
 """Direction sampling and rotation on the unit sphere.
 
 Pure scalar functions (AGENTS.md section 2.5). Directions are three floats, never an
-array: the tuple return maps onto ``wp.vec3`` when this source is compiled for the
-Warp targets (Phase 2).
+array: the tuple return compiles to a multiple-value return on the Warp targets
+(Phase 2).
 """
 
 from __future__ import annotations

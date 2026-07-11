@@ -13,4 +13,4 @@ import pytest
 
 def test_dij_tier_pending() -> None:
     """Placeholder keeping the tier collected and visibly skipped until Phase 3."""
-    pytest.skip("Phase 3: Dij scoring waits for electron transport and the Warp backend")
+    pytest.skip("Phase 3: Dij scoring needs the maintainer's go-ahead (AGENTS.md 7.2)")

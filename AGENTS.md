@@ -267,57 +267,72 @@ A phase is not done when its tests pass. Before a phase may exit:
 
 ### 7.2 Current phase
 
-**Phase 1: reference condensed-history electron transport — exit criteria met
-2026-07-10.** (Phase 0 — reference photon engine and interfaces — exited the same
-day.)
+**Phase 2: Warp backend, CPU and CUDA from one source — exit criteria met
+2026-07-11** (pending one maintainer decision, below). Phases 0 and 1 exited
+2026-07-10; their exit records live in the git history of this section.
 
-Secondary electrons, and positrons transported as electrons, get Class II
-condensed-history transport in the `ref` backend: Berger-Seltzer restricted collision
-stopping power with the Sternheimer density effect, discrete Moller events above ECUT,
-a Gaussian multiple-scattering hinge, and discrete thin-target bremsstrahlung (1/k
-spectrum between PCUT and the electron energy, emission rate matched to the radiative
-stopping power). Approximations decided for this phase (maintainer-approved
-2026-07-10), each named where implemented: positrons reuse electron cross-sections (no
-Bhabha) and annihilate at rest; bremsstrahlung photons and photoelectrons are emitted
-forward; the pair-production energy split is sampled uniformly.
+What Phase 2 built:
 
-Exit criteria:
+- **Single-source compilation.** The unmodified physics sources (plus the table
+  lookups and the geometry point queries) are re-imported with `pyRadMC.rng`,
+  `math`, and the array-handle aliases shimmed, then wrapped in `@wp.func`
+  (`backends/warp/physics.py`). The files on disk are what compiles; reference and
+  kernels cannot drift.
+- **Kernels mirror the reference loops** (`backends/warp/kernels.py`): separate
+  photon and electron kernels with persistent particle queues, all data through
+  the flattened tables of `data/tables.py` (`CrossSectionSource.build_tables` is
+  now concrete and generic). Kernels are channel-complete per section 2.10 — the
+  coherent branch exists with a Thomson-limit angular sampler
+  (`physics/rayleigh.py`), unreachable while every data source keeps the coherent
+  column at zero.
+- **Deterministic scoring.** int64 fixed-point deposits (1e-9 MeV quanta) make one
+  device + one seed bit-reproducible even under CUDA atomics; per-particle RNG
+  streams derive from the parent's, so results are also invariant to chunking
+  (test-pinned). Cross-target remains statistical only, now enforced by an AST
+  meta-test over the test tree.
+- **The batched chi-squared oracle** (`assert_chi2_consistent_batched`): with
+  sigmas estimated from k batches, each voxel's z^2 is F(1, nu)-distributed and
+  E[chi2] inflates by nu/(nu-2); the exact-sigma null mis-rejects unbiased
+  backend-vs-backend comparisons. Use the batched variant whenever *both* sides
+  carry batch-estimated sigma; it reduces to the plain oracle as batches grow.
 
-- Photon-beam depth dose shows electron buildup; surface-to-maximum ratio and buildup
-  depth agree with physics-derived expectations.
-- Electron-beam depth dose: R50 and practical range consistent with ESTAR CSDA ranges,
-  within tolerances stated in the tests.
-- Stopping powers and CSDA ranges pinned against transcribed NIST ESTAR anchors in the
-  unit tier; the restricted-vs-unrestricted Moller consistency identity is
-  contract-tested.
-- The validation tier gains ESTAR-anchored gates plus a documented slot for
-  maintainer-supplied benchmark PDD curves (the gamma-index gate lands with that data).
-- Energy conservation and within-target bit reproducibility remain exact.
-- Fast tiers stay under 30 seconds.
+Exit criteria, measured:
 
-KERMA-mode transport remains available as an explicit engine option for photon-only
-physics tests. The benchmark-PDD gamma gate runs in the validation tier against
-maintainer-supplied EGSnrc curves (1, 2, 6 MeV; 5 percent / 3 mm, pass rate at least
-90 percent; provenance and known gaps in ``tests/validation/data/README.md``). The
-criterion is deliberately data-limited: the analytic backend under-absorbs the soft
-scattered spectrum. **Phase 5 (tabulated data) must pass the same file over the full
-depth range at 2 percent / 2 mm — replace the data layer, never loosen this gate.**
+- Both Warp devices reproduce `ref` under the chi-squared detection oracle (the
+  section 4 primary; stronger than the z-score oracle the plan named) for KERMA,
+  full coupled transport, and electron beams.
+- GPU throughput: ~1.6e7 histories/s (6 MeV broad beam in water, coupled
+  transport, laptop RTX 4070) against the 1e6/s criterion; Warp-CPU ~4e5/s
+  single-threaded. Perf tier records baselines; the 1e6/s floor is asserted.
+- Energy conservation holds at 1e-4 relative on the Warp backend (float32
+  transport plus scoring quanta; exact on `ref` as before). Within-device bit
+  reproducibility is exact and asserted. Fast tiers stay under 30 seconds with a
+  warm kernel cache.
 
-Next is Phase 2 (Warp backend, CPU and CUDA from one source; see the README roadmap).
-Do not begin Warp kernels or Dij scoring without the maintainer's explicit go-ahead.
+**Open maintainer decision:** the plan's third exit criterion offers "Warp-CPU
+within 2x of numba-CPU, or the numba backend is dropped". No numba backend was
+ever built. Recommendation on record: drop it (delete the placeholder subpackage
+and the `numba` extra); the Taichi note in the plan remains the fallback if
+Warp-CPU ever becomes the constraint.
 
-Standing items for the Phase 2 design (maintainer-approved 2026-07-11):
+Standing items carried forward:
 
-- **Kernels are born channel-complete** (section 2.10): the photon loop carries all four
-  ``PhotonProcess`` branches, including Rayleigh sampling for any data source whose
-  coherent cross-section is nonzero. The analytic backend keeps Rayleigh at zero.
 - **Pair-refit warning for whoever enables Rayleigh (Phase 5)**: the analytic pair
-  channel is calibrated against water totals that *include* coherent scattering, i.e. it
-  silently absorbs the Rayleigh contribution above 2 MeV. Turning on a real coherent
-  channel without recalibrating pair against coherent-free totals double-counts
-  attenuation. The tabulated backend must take its channels from one consistent
-  decomposition of the same library.
-- **Positrons stay Moller-approximated** (no Bhabha, annihilation at rest): sub-half-
-  percent in water at these energies. If ever upgraded, Bhabha and annihilation in
-  flight land together as the new default per section 2.10, with a test showing the
-  dosimetric effect.
+  channel is calibrated against water totals that *include* coherent scattering.
+  Turning on a real coherent channel without recalibrating pair against
+  coherent-free totals double-counts attenuation; the tabulated backend must take
+  its channels from one consistent decomposition of the same library — and must
+  replace the Thomson-limit coherent angular model with form-factor sampling in
+  the same change.
+- **Positrons stay Moller-approximated** (no Bhabha, annihilation at rest). If
+  ever upgraded, Bhabha and annihilation in flight land together as the new
+  default per section 2.10, with a test showing the dosimetric effect.
+- The benchmark-PDD gamma gate (validation tier, EGSnrc curves at 5%/3mm) is
+  data-limited by the analytic cross-sections. **Phase 5 must pass the same file
+  over the full depth range at 2 percent / 2 mm — replace the data layer, never
+  loosen this gate.**
+
+Next is Phase 3 (beamlet tagging, batched Dij assembly, basic variance reduction;
+see the README roadmap). Do not begin Dij scoring without the maintainer's
+explicit go-ahead. Phase 3 must set its wall-clock target from the measured Phase
+2 throughput, per the plan.
