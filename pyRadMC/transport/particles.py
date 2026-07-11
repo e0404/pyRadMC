@@ -28,10 +28,18 @@ ELECTRON = 1
 POSITRON = 2
 
 DepositFn = Callable[[int, int, int, float], None]
-"""Scoring callback ``(ix, iy, iz, energy_mev)`` for one energy deposit."""
+"""Scoring callback ``(ix, iy, iz, energy_mev)`` for one energy deposit.
 
-StackEntry = tuple[int, float, float, float, float, float, float, float]
-"""One stacked particle: ``(kind, energy, x, y, z, ux, uy, uz)``."""
+With Phase 3 variance reduction, the energy passed here is already
+weight-scaled: the scorer sees expected energy, never per-particle energy.
+"""
+
+StackEntry = tuple[int, float, float, float, float, float, float, float, float]
+"""One stacked particle: ``(kind, energy, weight, x, y, z, ux, uy, uz)``.
+
+``weight`` is the statistical weight (1.0 for analog transport); secondaries
+inherit their parent's weight unless a roulette game changed it.
+"""
 
 SpawnFn = Callable[[StackEntry], None]
 """Stack push for a secondary particle."""
@@ -46,17 +54,20 @@ def annihilate_at_rest(
     deposit: DepositFn,
     spawn: SpawnFn,
     pcut: float,
+    weight: float,
 ) -> None:
     """Positron annihilation at rest: two back-to-back 511 keV photons, isotropic.
 
     A stated approximation (annihilation in flight neglected; AGENTS.md 7.2). Called
     only for positions inside the grid. If PCUT is at or above 511 keV the photons
-    would die immediately, so the 1.022 MeV is deposited instead.
+    would die immediately, so the 1.022 MeV is deposited instead. The photons carry
+    the positron's statistical weight; at 511 keV they sit above the photon
+    roulette threshold by construction (see ``PHOTON_ROULETTE_MEV``).
     """
     if pcut >= ELECTRON_MASS_MEV:
         ix, iy, iz = grid.voxel_index(x, y, z)
-        deposit(ix, iy, iz, 2.0 * ELECTRON_MASS_MEV)
+        deposit(ix, iy, iz, weight * 2.0 * ELECTRON_MASS_MEV)
         return
     ax, ay, az = sample_isotropic_direction(rng_state)
-    spawn((PHOTON, ELECTRON_MASS_MEV, x, y, z, ax, ay, az))
-    spawn((PHOTON, ELECTRON_MASS_MEV, x, y, z, -ax, -ay, -az))
+    spawn((PHOTON, ELECTRON_MASS_MEV, weight, x, y, z, ax, ay, az))
+    spawn((PHOTON, ELECTRON_MASS_MEV, weight, x, y, z, -ax, -ay, -az))

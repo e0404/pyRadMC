@@ -40,7 +40,12 @@ import math
 
 import warp as wp
 
-from pyRadMC import ELECTRON_MASS_MEV
+from pyRadMC import (
+    ELECTRON_MASS_MEV,
+    PHOTON_ROULETTE_MEV,
+    PHOTON_ROULETTE_SURVIVAL,
+    PHOTON_ROULETTE_WEIGHT_CAP,
+)
 from pyRadMC.backends.warp.physics import warp_physics
 from pyRadMC.data.interface import PhotonProcess
 from pyRadMC.rng.warp_shim import WarpRNGState, init_slot, spawn_stream, uniform
@@ -91,6 +96,7 @@ moller_direction_cosines = _p.moller_direction_cosines
 sample_hinge_cos_theta = _p.sample_hinge_cos_theta
 bremsstrahlung_step_parameters = _p.bremsstrahlung_step_parameters
 sample_bremsstrahlung_energy = _p.sample_bremsstrahlung_energy
+roulette_weight = _p.roulette_weight
 lookup_1d = _p.lookup_loglinear_1d
 lookup_2d = _p.lookup_loglinear_2d
 point_inside = _p.point_inside
@@ -155,6 +161,7 @@ class Queue:
     kind: wp.array(dtype=wp.int32)
     beamlet: wp.array(dtype=wp.int32)
     energy: wp.array(dtype=float)
+    weight: wp.array(dtype=float)
     x: wp.array(dtype=float)
     y: wp.array(dtype=float)
     z: wp.array(dtype=float)
@@ -172,6 +179,7 @@ def _queue_push(
     kind: int,
     beamlet: int,
     energy: float,
+    weight: float,
     x: float,
     y: float,
     z: float,
@@ -185,6 +193,7 @@ def _queue_push(
         q.kind[idx] = kind
         q.beamlet[idx] = beamlet
         q.energy[idx] = energy
+        q.weight[idx] = weight
         q.x[idx] = x
         q.y[idx] = y
         q.z[idx] = z
@@ -216,7 +225,13 @@ def _deposit(
 
 @wp.func
 def _escape(escaped: wp.array(dtype=wp.int64), energy: float):
-    quanta = wp.int64(wp.float64(energy) * wp.float64(_INV_QUANTUM) + wp.float64(0.5))
+    """Signed ledger entry: roulette boosts book *negative* weight-energy here.
+
+    ``floor(x + 0.5)`` is round-to-nearest for either sign (plain int64 casting
+    truncates toward zero, which would round negative entries the wrong way); for
+    the non-negative deposits it is bit-identical to the previous truncation.
+    """
+    quanta = wp.int64(wp.floor(wp.float64(energy) * wp.float64(_INV_QUANTUM) + wp.float64(0.5)))
     wp.atomic_add(escaped, 0, quanta)
 
 
@@ -255,25 +270,48 @@ def _annihilate_at_rest(
     pcut: float,
     beamlet: int,
     base: int,
+    weight: float,
 ):
     """Positron annihilation at rest; mirror of transport.particles.annihilate_at_rest.
 
     Called only for positions inside the grid. Each annihilation photon gets its
     own child stream, since the pair are transported by independent threads; both
-    inherit the positron's beamlet tag.
+    inherit the positron's beamlet tag and statistical weight.
     """
     if pcut >= ELECTRON_MASS_MEV:
         ix = point_axis_index(x, gi.x_lo, gi.sx)
         iy = point_axis_index(y, gi.y_lo, gi.sy)
         iz = point_axis_index(z, gi.z_lo, gi.sz)
-        _deposit(edep, gi, base, ix, iy, iz, 2.0 * ELECTRON_MASS_MEV)
+        _deposit(edep, gi, base, ix, iy, iz, weight * 2.0 * ELECTRON_MASS_MEV)
         return
     ax, ay, az = sample_isotropic_direction(state)
     _queue_push(
-        q_photon, PHOTON, beamlet, ELECTRON_MASS_MEV, x, y, z, ax, ay, az, spawn_stream(state)
+        q_photon,
+        PHOTON,
+        beamlet,
+        ELECTRON_MASS_MEV,
+        weight,
+        x,
+        y,
+        z,
+        ax,
+        ay,
+        az,
+        spawn_stream(state),
     )
     _queue_push(
-        q_photon, PHOTON, beamlet, ELECTRON_MASS_MEV, x, y, z, -ax, -ay, -az, spawn_stream(state)
+        q_photon,
+        PHOTON,
+        beamlet,
+        ELECTRON_MASS_MEV,
+        weight,
+        x,
+        y,
+        z,
+        -ax,
+        -ay,
+        -az,
+        spawn_stream(state),
     )
 
 
@@ -303,6 +341,7 @@ def photon_kernel(
     e = q_in.energy[tid]
     beamlet = q_in.beamlet[tid]
     base = beamlet * gi.n_voxels
+    w = q_in.weight[tid]
     x = q_in.x[tid]
     y = q_in.y[tid]
     z = q_in.z[tid]
@@ -319,14 +358,14 @@ def photon_kernel(
             x, y, z, ux, uy, uz, gi.x_lo, gi.y_lo, gi.z_lo, gi.x_hi, gi.y_hi, gi.z_hi
         )
         if t >= _INFINITY_CM:
-            _escape(escaped, e)
+            _escape(escaped, w * e)
             return
         t += _ENTRY_NUDGE_CM
         x += t * ux
         y += t * uy
         z += t * uz
         if not point_inside(x, y, z, gi.x_lo, gi.y_lo, gi.z_lo, gi.x_hi, gi.y_hi, gi.z_hi):
-            _escape(escaped, e)
+            _escape(escaped, w * e)
             return
 
     while True:
@@ -336,7 +375,7 @@ def photon_kernel(
         y += step * uy
         z += step * uz
         if not point_inside(x, y, z, gi.x_lo, gi.y_lo, gi.z_lo, gi.x_hi, gi.y_hi, gi.z_hi):
-            _escape(escaped, e)
+            _escape(escaped, w * e)
             return
 
         ix = point_axis_index(x, gi.x_lo, gi.sx)
@@ -359,7 +398,7 @@ def photon_kernel(
         mu_real = mu_compton + mu_photo + mu_pair + mu_rayleigh
         if mu_real > mu_majorant * (1.0 + _MAJORANT_TOLERANCE):
             wp.atomic_add(majorant_violations, 0, 1)
-            _escape(escaped, e)
+            _escape(escaped, w * e)
             return
 
         if uniform(state) * mu_majorant >= mu_real:
@@ -379,23 +418,42 @@ def photon_kernel(
                 cos_electron = compton_electron_cos_theta(e, ratio)
                 ex, ey, ez = rotate_direction(ux, uy, uz, cos_electron, phi + math.pi)
                 _queue_push(
-                    q_electron, ELECTRON, beamlet, recoil, x, y, z, ex, ey, ez, spawn_stream(state)
+                    q_electron,
+                    ELECTRON,
+                    beamlet,
+                    recoil,
+                    w,
+                    x,
+                    y,
+                    z,
+                    ex,
+                    ey,
+                    ez,
+                    spawn_stream(state),
                 )
             else:
-                _deposit(edep, gi, base, ix, iy, iz, recoil)
+                _deposit(edep, gi, base, ix, iy, iz, w * recoil)
             cos_gamma = compton_cos_theta(e, ratio)
             ux, uy, uz = rotate_direction(ux, uy, uz, cos_gamma, phi)
             e *= ratio
             if e <= pcut:
-                _deposit(edep, gi, base, ix, iy, iz, e)
+                _deposit(edep, gi, base, ix, iy, iz, w * e)
                 return
+            if e < PHOTON_ROULETTE_MEV and w < PHOTON_ROULETTE_WEIGHT_CAP:
+                # Basic VR, mirror of the reference loop: roulette the softened
+                # scattered photon; the signed ledger entry keeps the balance exact.
+                new_w = roulette_weight(w, PHOTON_ROULETTE_SURVIVAL, state)
+                _escape(escaped, (w - new_w) * e)
+                if new_w == 0.0:
+                    return
+                w = new_w
         elif process == PhotonProcess.PHOTOELECTRIC:
             if transport_electrons != 0 and e > ecut:
                 _queue_push(
-                    q_electron, ELECTRON, beamlet, e, x, y, z, ux, uy, uz, spawn_stream(state)
+                    q_electron, ELECTRON, beamlet, e, w, x, y, z, ux, uy, uz, spawn_stream(state)
                 )
             else:
-                _deposit(edep, gi, base, ix, iy, iz, e)
+                _deposit(edep, gi, base, ix, iy, iz, w * e)
             return
         else:  # pair production
             kinetic = e - 2.0 * ELECTRON_MASS_MEV
@@ -409,6 +467,7 @@ def photon_kernel(
                         ELECTRON,
                         beamlet,
                         share_e,
+                        w,
                         x,
                         y,
                         z,
@@ -418,13 +477,14 @@ def photon_kernel(
                         spawn_stream(state),
                     )
                 else:
-                    _deposit(edep, gi, base, ix, iy, iz, share_e)
+                    _deposit(edep, gi, base, ix, iy, iz, w * share_e)
                 if share_p > ecut:
                     _queue_push(
                         q_electron,
                         POSITRON,
                         beamlet,
                         share_p,
+                        w,
                         x,
                         y,
                         z,
@@ -434,11 +494,13 @@ def photon_kernel(
                         spawn_stream(state),
                     )
                 else:
-                    _deposit(edep, gi, base, ix, iy, iz, share_p)
-                    _annihilate_at_rest(x, y, z, gi, state, q_photon_out, edep, pcut, beamlet, base)
+                    _deposit(edep, gi, base, ix, iy, iz, w * share_p)
+                    _annihilate_at_rest(
+                        x, y, z, gi, state, q_photon_out, edep, pcut, beamlet, base, w
+                    )
             else:
-                _deposit(edep, gi, base, ix, iy, iz, kinetic)
-                _annihilate_at_rest(x, y, z, gi, state, q_photon_out, edep, pcut, beamlet, base)
+                _deposit(edep, gi, base, ix, iy, iz, w * kinetic)
+                _annihilate_at_rest(x, y, z, gi, state, q_photon_out, edep, pcut, beamlet, base, w)
             return
 
 
@@ -468,6 +530,7 @@ def electron_kernel(
     e = q_in.energy[tid]
     beamlet = q_in.beamlet[tid]
     base = beamlet * gi.n_voxels
+    w = q_in.weight[tid]
     x = q_in.x[tid]
     y = q_in.y[tid]
     z = q_in.z[tid]
@@ -488,14 +551,14 @@ def electron_kernel(
             x, y, z, ux, uy, uz, gi.x_lo, gi.y_lo, gi.z_lo, gi.x_hi, gi.y_hi, gi.z_hi
         )
         if t >= _INFINITY_CM:
-            _escape(escaped, e + latent)
+            _escape(escaped, w * (e + latent))
             return
         t += _ENTRY_NUDGE_CM
         x += t * ux
         y += t * uy
         z += t * uz
         if not point_inside(x, y, z, gi.x_lo, gi.y_lo, gi.z_lo, gi.x_hi, gi.y_hi, gi.z_hi):
-            _escape(escaped, e + latent)
+            _escape(escaped, w * (e + latent))
             return
 
     while True:
@@ -503,9 +566,9 @@ def electron_kernel(
             ix = point_axis_index(x, gi.x_lo, gi.sx)
             iy = point_axis_index(y, gi.y_lo, gi.sy)
             iz = point_axis_index(z, gi.z_lo, gi.sz)
-            _deposit(edep, gi, base, ix, iy, iz, e)
+            _deposit(edep, gi, base, ix, iy, iz, w * e)
             if is_positron:
-                _annihilate_at_rest(x, y, z, gi, state, q_photon, edep, pcut, beamlet, base)
+                _annihilate_at_rest(x, y, z, gi, state, q_photon, edep, pcut, beamlet, base, w)
             return
 
         ix = point_axis_index(x, gi.x_lo, gi.sx)
@@ -563,14 +626,21 @@ def electron_kernel(
         d2 = continuous - d1
 
         _deposit_or_escape(
-            edep, escaped, gi, base, x + ux * s1 / 2.0, y + uy * s1 / 2.0, z + uz * s1 / 2.0, d1
+            edep,
+            escaped,
+            gi,
+            base,
+            x + ux * s1 / 2.0,
+            y + uy * s1 / 2.0,
+            z + uz * s1 / 2.0,
+            w * d1,
         )
         e -= d1
         x += ux * s1
         y += uy * s1
         z += uz * s1
         if not point_inside(x, y, z, gi.x_lo, gi.y_lo, gi.z_lo, gi.x_hi, gi.y_hi, gi.z_hi):
-            _escape(escaped, e + latent)
+            _escape(escaped, w * (e + latent))
             return
 
         mean_square = (
@@ -586,20 +656,47 @@ def electron_kernel(
             k = sample_bremsstrahlung_energy(e, pcut, state)
             k = min(k, e - d2)
             if k > pcut:
-                _queue_push(q_photon, PHOTON, beamlet, k, x, y, z, ux, uy, uz, spawn_stream(state))
+                photon_w = w
+                if k < PHOTON_ROULETTE_MEV and w < PHOTON_ROULETTE_WEIGHT_CAP:
+                    # Basic VR, mirror of the reference loop: roulette the soft
+                    # bremsstrahlung photon at birth; signed ledger keeps balance.
+                    photon_w = roulette_weight(w, PHOTON_ROULETTE_SURVIVAL, state)
+                    _escape(escaped, (w - photon_w) * k)
+                if photon_w > 0.0:
+                    _queue_push(
+                        q_photon,
+                        PHOTON,
+                        beamlet,
+                        k,
+                        photon_w,
+                        x,
+                        y,
+                        z,
+                        ux,
+                        uy,
+                        uz,
+                        spawn_stream(state),
+                    )
             else:
-                _deposit_or_escape(edep, escaped, gi, base, x, y, z, k)
+                _deposit_or_escape(edep, escaped, gi, base, x, y, z, w * k)
             e -= k
 
         _deposit_or_escape(
-            edep, escaped, gi, base, x + ux * s2 / 2.0, y + uy * s2 / 2.0, z + uz * s2 / 2.0, d2
+            edep,
+            escaped,
+            gi,
+            base,
+            x + ux * s2 / 2.0,
+            y + uy * s2 / 2.0,
+            z + uz * s2 / 2.0,
+            w * d2,
         )
         e -= d2
         x += ux * s2
         y += uy * s2
         z += uz * s2
         if not point_inside(x, y, z, gi.x_lo, gi.y_lo, gi.z_lo, gi.x_hi, gi.y_hi, gi.z_hi):
-            _escape(escaped, e + latent)
+            _escape(escaped, w * (e + latent))
             return
 
         # --- discrete Moller event at the end of the substep ---------------------
@@ -613,6 +710,7 @@ def electron_kernel(
                 ELECTRON,
                 beamlet,
                 delta_energy,
+                w,
                 x,
                 y,
                 z,
@@ -648,6 +746,7 @@ def generate_pencil_beam(
     q.kind[tid] = kind
     q.beamlet[tid] = 0
     q.energy[tid] = energy
+    q.weight[tid] = 1.0
     q.x[tid] = px
     q.y[tid] = py
     q.z[tid] = pz
@@ -682,6 +781,7 @@ def generate_parallel_beam(
     q.kind[tid] = kind
     q.beamlet[tid] = 0
     q.energy[tid] = energy
+    q.weight[tid] = 1.0
     q.x[tid] = x
     q.y[tid] = y
     q.z[tid] = z0
@@ -741,6 +841,7 @@ def generate_beamlet_lattice(
     q.kind[tid] = PHOTON
     q.beamlet[tid] = local * n_batches + batch
     q.energy[tid] = energy
+    q.weight[tid] = 1.0
     q.x[tid] = x
     q.y[tid] = y
     q.z[tid] = z0

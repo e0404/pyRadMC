@@ -58,13 +58,14 @@ def transport_history(
         False selects the Phase 0 KERMA approximation: charged secondaries deposit
         at their creation voxel. Explicit engine option per AGENTS.md 7.2.
     """
-    stack: list[StackEntry] = [(kind, energy, x, y, z, ux, uy, uz)]
+    stack: list[StackEntry] = [(kind, energy, 1.0, x, y, z, ux, uy, uz)]
     escaped = 0.0
     while stack:
-        particle_kind, e, px, py, pz, dx, dy, dz = stack.pop()
+        particle_kind, e, w, px, py, pz, dx, dy, dz = stack.pop()
         if particle_kind == PHOTON:
             escaped += photon_steps(
                 e,
+                w,
                 px,
                 py,
                 pz,
@@ -84,6 +85,7 @@ def transport_history(
             escaped += electron_steps(
                 particle_kind == POSITRON,
                 e,
+                w,
                 px,
                 py,
                 pz,

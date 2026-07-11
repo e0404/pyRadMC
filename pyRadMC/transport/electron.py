@@ -33,7 +33,12 @@ from __future__ import annotations
 
 import math
 
-from pyRadMC import ELECTRON_MASS_MEV
+from pyRadMC import (
+    ELECTRON_MASS_MEV,
+    PHOTON_ROULETTE_MEV,
+    PHOTON_ROULETTE_SURVIVAL,
+    PHOTON_ROULETTE_WEIGHT_CAP,
+)
 from pyRadMC.data.interface import CrossSectionSource
 from pyRadMC.geometry.grid import VoxelGrid
 from pyRadMC.physics.brems import bremsstrahlung_step_parameters, sample_bremsstrahlung_energy
@@ -41,6 +46,7 @@ from pyRadMC.physics.direction import rotate_direction
 from pyRadMC.physics.moller import moller_direction_cosines, sample_moller_delta_energy
 from pyRadMC.physics.msc import sample_hinge_cos_theta
 from pyRadMC.physics.path import sample_path_length
+from pyRadMC.physics.roulette import roulette_weight
 from pyRadMC.rng import RNGState, uniform
 from pyRadMC.transport.particles import (
     ELECTRON,
@@ -73,6 +79,7 @@ _ENTRY_NUDGE_CM = 1.0e-9  # same convention as the photon loop
 def electron_steps(
     is_positron: bool,
     energy: float,
+    weight: float,
     x: float,
     y: float,
     z: float,
@@ -89,13 +96,17 @@ def electron_steps(
 ) -> float:
     """Transport one electron or positron; secondaries go to ``spawn``.
 
-    Returns the energy escaping the grid (for a positron this includes the
-    2 m_e c^2 of latent annihilation energy it carries out). Every MeV of kinetic
-    energy is either deposited, handed to a spawned secondary, or escapes — the
-    engine's exact energy balance extends over this loop unchanged.
+    Returns the weight-energy removed from the transported population: physical
+    escape (for a positron including the 2 m_e c^2 of latent annihilation energy
+    it carries out) plus the net ledger effect of rouletting sub-threshold
+    bremsstrahlung photons at birth (see :mod:`pyRadMC.transport.photon`). The
+    electron itself never plays; its ``weight`` is constant and scales every
+    deposit, so the engine's exact energy balance extends over this loop
+    unchanged.
     """
     escaped = 0.0
     e = energy
+    w = weight
     min_spacing = min(grid.spacing)
     latent = 2.0 * ELECTRON_MASS_MEV if is_positron else 0.0
 
@@ -103,13 +114,13 @@ def electron_steps(
     if not grid.contains(x, y, z):
         t = grid.distance_to_entry(x, y, z, ux, uy, uz)
         if math.isinf(t):
-            return e + latent
+            return w * (e + latent)
         t += _ENTRY_NUDGE_CM
         x += t * ux
         y += t * uy
         z += t * uz
         if not grid.contains(x, y, z):
-            return e + latent
+            return w * (e + latent)
 
     def deposit_or_escape(px: float, py: float, pz: float, amount: float) -> float:
         """Deposit at a point if it is inside; otherwise report it as escaped."""
@@ -125,9 +136,9 @@ def electron_steps(
         if e <= ecut:
             # Terminal: local deposit; the current position is inside the grid.
             ix, iy, iz = grid.voxel_index(x, y, z)
-            deposit(ix, iy, iz, e)
+            deposit(ix, iy, iz, w * e)
             if is_positron:
-                annihilate_at_rest(x, y, z, grid, rng_state, deposit, spawn, pcut)
+                annihilate_at_rest(x, y, z, grid, rng_state, deposit, spawn, pcut, w)
             return escaped
 
         ix, iy, iz = grid.voxel_index(x, y, z)
@@ -163,13 +174,15 @@ def electron_steps(
         d1 = continuous * (s1 / s) if s > 0.0 else 0.0
         d2 = continuous - d1
 
-        escaped += deposit_or_escape(x + ux * s1 / 2.0, y + uy * s1 / 2.0, z + uz * s1 / 2.0, d1)
+        escaped += deposit_or_escape(
+            x + ux * s1 / 2.0, y + uy * s1 / 2.0, z + uz * s1 / 2.0, w * d1
+        )
         e -= d1
         x += ux * s1
         y += uy * s1
         z += uz * s1
         if not grid.contains(x, y, z):
-            return escaped + e + latent
+            return escaped + w * (e + latent)
 
         mean_square = cross_sections.scattering_power(e, material) * rho * s
         cos_hinge = sample_hinge_cos_theta(mean_square, rng_state)
@@ -183,18 +196,27 @@ def electron_steps(
             # PCUT is not transportable and deposits at the hinge instead.
             k = min(k, e - d2)
             if k > pcut:
-                spawn((PHOTON, k, x, y, z, ux, uy, uz))  # forward, stated approx
+                photon_w = w
+                if k < PHOTON_ROULETTE_MEV and w < PHOTON_ROULETTE_WEIGHT_CAP:
+                    # Basic VR: roulette the soft bremsstrahlung photon at birth;
+                    # the ledger entry keeps the run's energy balance exact.
+                    photon_w = roulette_weight(w, PHOTON_ROULETTE_SURVIVAL, rng_state)
+                    escaped += (w - photon_w) * k
+                if photon_w > 0.0:
+                    spawn((PHOTON, k, photon_w, x, y, z, ux, uy, uz))  # forward
             else:
-                escaped += deposit_or_escape(x, y, z, k)
+                escaped += deposit_or_escape(x, y, z, w * k)
             e -= k
 
-        escaped += deposit_or_escape(x + ux * s2 / 2.0, y + uy * s2 / 2.0, z + uz * s2 / 2.0, d2)
+        escaped += deposit_or_escape(
+            x + ux * s2 / 2.0, y + uy * s2 / 2.0, z + uz * s2 / 2.0, w * d2
+        )
         e -= d2
         x += ux * s2
         y += uy * s2
         z += uz * s2
         if not grid.contains(x, y, z):
-            return escaped + e + latent
+            return escaped + w * (e + latent)
 
         # --- discrete Moller event at the end of the substep -------------------------
         if moller_pending and e > 2.0 * ecut:
@@ -202,6 +224,6 @@ def electron_steps(
             cos_delta, cos_primary = moller_direction_cosines(e, delta_energy)
             phi = 2.0 * math.pi * uniform(rng_state)
             delta_dir = rotate_direction(ux, uy, uz, cos_delta, phi)
-            spawn((ELECTRON, delta_energy, x, y, z, *delta_dir))
+            spawn((ELECTRON, delta_energy, w, x, y, z, *delta_dir))
             ux, uy, uz = rotate_direction(ux, uy, uz, cos_primary, phi + math.pi)
             e -= delta_energy

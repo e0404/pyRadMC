@@ -29,13 +29,25 @@ Stated approximations, named here because this is where they are implemented:
   model). The analytic source keeps the coherent column at zero.
 
 Photons at or below ``pcut`` deposit their energy locally and terminate.
+
+**Variance reduction (Phase 3)**: a Compton-scattered photon dropping below
+``PHOTON_ROULETTE_MEV`` plays Russian roulette (:mod:`pyRadMC.physics.roulette`)
+while its weight is under ``PHOTON_ROULETTE_WEIGHT_CAP``. The game is exactly
+fair, and its weight-energy change is booked through the escaped-energy ledger,
+so the per-run energy balance stays exact. Always on — one configuration
+(AGENTS.md 2.10); tests instrument it away by zeroing the threshold constant.
 """
 
 from __future__ import annotations
 
 import math
 
-from pyRadMC import ELECTRON_MASS_MEV
+from pyRadMC import (
+    ELECTRON_MASS_MEV,
+    PHOTON_ROULETTE_MEV,
+    PHOTON_ROULETTE_SURVIVAL,
+    PHOTON_ROULETTE_WEIGHT_CAP,
+)
 from pyRadMC.data.interface import CrossSectionSource, PhotonProcess
 from pyRadMC.geometry.grid import VoxelGrid
 from pyRadMC.physics.channel import select_photon_process
@@ -47,6 +59,7 @@ from pyRadMC.physics.compton import (
 from pyRadMC.physics.direction import rotate_direction
 from pyRadMC.physics.path import sample_path_length
 from pyRadMC.physics.rayleigh import sample_rayleigh_cos_theta
+from pyRadMC.physics.roulette import roulette_weight
 from pyRadMC.rng import RNGState, uniform
 from pyRadMC.transport.particles import (
     ELECTRON,
@@ -72,6 +85,7 @@ _MAJORANT_TOLERANCE = 1.0e-9
 
 def photon_steps(
     energy: float,
+    weight: float,
     x: float,
     y: float,
     z: float,
@@ -87,26 +101,33 @@ def photon_steps(
     ecut: float,
     transport_electrons: bool,
 ) -> float:
-    """Transport one photon; secondaries go to ``spawn``. Returns escaped energy.
+    """Transport one photon; secondaries go to ``spawn``. Returns removed energy.
 
     With ``transport_electrons`` false, charged secondaries deposit locally (KERMA);
     annihilation photons are spawned in either mode. Charged secondaries at or below
     ``ecut`` deposit locally in either mode (production threshold).
+
+    ``weight`` scales every deposit and every ledger entry. The return value is the
+    weight-energy removed from the transported population without being deposited:
+    physical escape plus the net effect of Russian roulette (a killed photon's
+    weight-energy enters positively, a survivor's boost negatively, so the game
+    leaves the per-run balance exact and the expectation unchanged).
     """
     escaped = 0.0
     e = energy
+    w = weight
 
     # Fly through the vacuum outside the grid, if born there.
     if not grid.contains(x, y, z):
         t = grid.distance_to_entry(x, y, z, ux, uy, uz)
         if math.isinf(t):
-            return e
+            return w * e
         t += _ENTRY_NUDGE_CM
         x += t * ux
         y += t * uy
         z += t * uz
         if not grid.contains(x, y, z):  # grazing-corner numerics
-            return e
+            return w * e
 
     while True:
         mu_majorant = cross_sections.majorant(e)
@@ -115,7 +136,7 @@ def photon_steps(
         y += step * uy
         z += step * uz
         if not grid.contains(x, y, z):
-            return escaped + e
+            return escaped + w * e
 
         ix, iy, iz = grid.voxel_index(x, y, z)
         rho = float(grid.density[ix, iy, iz])
@@ -152,20 +173,28 @@ def photon_steps(
             if transport_electrons and recoil > ecut:
                 cos_electron = compton_electron_cos_theta(e, ratio)
                 edir = rotate_direction(ux, uy, uz, cos_electron, phi + math.pi)
-                spawn((ELECTRON, recoil, x, y, z, *edir))
+                spawn((ELECTRON, recoil, w, x, y, z, *edir))
             else:
-                deposit(ix, iy, iz, recoil)
+                deposit(ix, iy, iz, w * recoil)
             cos_gamma = compton_cos_theta(e, ratio)
             ux, uy, uz = rotate_direction(ux, uy, uz, cos_gamma, phi)
             e *= ratio
             if e <= pcut:
-                deposit(ix, iy, iz, e)
+                deposit(ix, iy, iz, w * e)
                 return escaped
+            if e < PHOTON_ROULETTE_MEV and w < PHOTON_ROULETTE_WEIGHT_CAP:
+                # Basic VR: roulette the softened scattered photon; the ledger
+                # entry keeps the run's energy balance exact (module docstring).
+                new_w = roulette_weight(w, PHOTON_ROULETTE_SURVIVAL, rng_state)
+                escaped += (w - new_w) * e
+                if new_w == 0.0:
+                    return escaped
+                w = new_w
         elif process == PhotonProcess.PHOTOELECTRIC:
             if transport_electrons and e > ecut:
-                spawn((ELECTRON, e, x, y, z, ux, uy, uz))  # forward, no fluorescence
+                spawn((ELECTRON, e, w, x, y, z, ux, uy, uz))  # forward, no fluorescence
             else:
-                deposit(ix, iy, iz, e)
+                deposit(ix, iy, iz, w * e)
             return escaped
         else:  # pair production
             kinetic = e - 2.0 * ELECTRON_MASS_MEV
@@ -176,14 +205,14 @@ def photon_steps(
                     (POSITRON, (1.0 - fraction) * kinetic),
                 ):
                     if share > ecut:
-                        spawn((kind, share, x, y, z, ux, uy, uz))  # forward
+                        spawn((kind, share, w, x, y, z, ux, uy, uz))  # forward
                     else:
-                        deposit(ix, iy, iz, share)
+                        deposit(ix, iy, iz, w * share)
                         if kind == POSITRON:
-                            annihilate_at_rest(x, y, z, grid, rng_state, deposit, spawn, pcut)
+                            annihilate_at_rest(x, y, z, grid, rng_state, deposit, spawn, pcut, w)
             else:
-                deposit(ix, iy, iz, kinetic)
-                annihilate_at_rest(x, y, z, grid, rng_state, deposit, spawn, pcut)
+                deposit(ix, iy, iz, w * kinetic)
+                annihilate_at_rest(x, y, z, grid, rng_state, deposit, spawn, pcut, w)
             return escaped
 
 
@@ -211,6 +240,7 @@ def transport_photon(
     stack: list[StackEntry] = []
     escaped = photon_steps(
         energy,
+        1.0,
         x,
         y,
         z,
@@ -227,10 +257,11 @@ def transport_photon(
         transport_electrons=False,
     )
     while stack:
-        kind, e, px, py, pz, dx, dy, dz = stack.pop()
+        kind, e, w, px, py, pz, dx, dy, dz = stack.pop()
         assert kind == PHOTON  # KERMA mode spawns nothing else
         escaped += photon_steps(
             e,
+            w,
             px,
             py,
             pz,

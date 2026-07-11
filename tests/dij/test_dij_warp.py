@@ -225,7 +225,10 @@ class TestTruncationAgainstDVH:
 
         engine = WarpEngine(grid=grid, cross_sections=_xs(grid), device=device)
         source = _lattice(3, 3)
-        kwargs = dict(n_histories_per_beamlet=8_000, n_batches=4, seed=SEED)
+        # Statistics chosen to populate the sub-threshold tail: Russian roulette
+        # thins exactly the photons that seed it, so the non-vacuity guard below
+        # needs enough histories for truncation to have real work to do.
+        kwargs = dict(n_histories_per_beamlet=24_000, n_batches=4, seed=SEED)
         full = engine.run_dij(source, truncation=0.0, **kwargs)
         cut = engine.run_dij(source, **kwargs)  # default DIJ_TRUNCATION_RELATIVE
         assert cut.truncation == DIJ_TRUNCATION_RELATIVE
