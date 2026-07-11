@@ -2,7 +2,8 @@
 
 Fast photon Monte Carlo dose engine for radiotherapy treatment planning.
 
-> **Status: Phase 3 complete, pre-alpha.** The engine now produces its primary
+> **Status: Phase 4 underway (correlated sampling and the noise/optimization
+> study), pre-alpha.** The engine produces its primary
 > product: a **beamlet-resolved dose influence matrix (Dij)** — sparse CSC columns
 > with a per-entry statistical uncertainty, computed on CPU and CUDA by tagging
 > every history's whole secondary family with its beamlet of origin. Because RNG
@@ -14,9 +15,9 @@ Fast photon Monte Carlo dose engine for radiotherapy treatment planning.
 > laptop RTX 4070 at planning statistics: ~1.1e7 histories/s, i.e. a 100-beamlet
 > 6 MeV field at 2–3 % per-beamlet sigma in single-digit seconds. Particles
 > carry statistical weights (soft photons play an unbiased Russian roulette; the
-> EGSnrc validation gates pass with it active). No correlated sampling yet
-> (Phase 4). Do not use for anything clinical, now or later, without independent
-> validation.
+> EGSnrc validation gates pass with it active). Correlated sampling across
+> beamlets is being built now (Phase 4). Do not use for anything clinical, now
+> or later, without independent validation.
 
 ## Why
 
@@ -146,7 +147,7 @@ repeating here because they are the ones people break:
 | 1 ✅ | Reference condensed-history electron transport; PDD validation gate¹ |
 | 2 ✅ | Warp backend, CPU and CUDA from one source² |
 | 3 ✅ | Beamlet tagging, batched Dij assembly, basic variance reduction³ |
-| 4 | Correlated sampling; study of per-beamlet noise vs. optimized-plan bias |
+| 4 🚧 | Correlated sampling; study of per-beamlet noise vs. optimized-plan bias |
 | 5 | Tabulated data, phase-space source, pyRadPlan adapter |
 
 ¹ The nightly validation tier gates against NIST ESTAR ranges and against

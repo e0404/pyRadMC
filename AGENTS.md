@@ -266,9 +266,33 @@ A phase is not done when its tests pass. Before a phase may exit:
 
 ### 7.2 Current phase
 
-**Phase 3: beamlet tagging, batched Dij assembly, basic variance reduction —
-exit criteria met 2026-07-11.** Phases 0 through 2 exited earlier; their exit
-records live in the git history of this section.
+**Phase 4: correlated sampling and the noise/optimization study — begun
+2026-07-11 with the maintainer's explicit go-ahead.** Phases 0 through 3 have
+exited; Phase 3's exit record is reproduced below (it defines the machinery
+Phase 4 builds on), earlier records live in the git history of this section.
+
+What Phase 4 is building (IMPLEMENTATION_PLAN.md section Phase 4; README
+roadmap row 4):
+
+- **Correlated sampling across beamlets via history repetition.** A change of
+  the *stream* mapping only: key the physics stream on the within-beamlet index
+  ``r = h % n_per`` instead of the global history index ``h``, so corresponding
+  histories in every beamlet replay the same interaction sequence and only the
+  entry position differs. The scheduling bit-inertness machinery carries over
+  unchanged. **Statistical landmine:** repetition makes Dij columns
+  *correlated* — per-column sigmas stay valid, but any sum across columns may
+  not combine sigmas assuming independence. Whether repetition ships default-on
+  or not is decided from the study data at phase exit (section 2.10: one
+  configuration ships); until then it is the phase's experiment instrument.
+- **The empirical study of per-beamlet uncertainty vs. optimized-plan DVH
+  bias**: a toy IMRT optimization (scipy, no new dependency) over Dij
+  realizations at several statistics levels, against a high-statistics
+  ground-truth Dij.
+
+Exit criteria: a defensible, data-backed default for per-beamlet sigma, and a
+measured speedup from correlated sampling.
+
+Phase 3 exit record (2026-07-11) follows.
 
 What Phase 3 built:
 
@@ -342,6 +366,6 @@ Standing items carried forward:
   over the full depth range at 2 percent / 2 mm — replace the data layer, never
   loosen this gate.**
 
-Next is Phase 4 (correlated sampling; the study of per-beamlet noise vs.
-optimized-plan bias — see the README roadmap). Do not begin it without the
-maintainer's explicit go-ahead.
+Next after this phase is Phase 5 (tabulated data, phase space, pyRadPlan
+adapter — see the README roadmap). Do not begin it without the maintainer's
+explicit go-ahead.

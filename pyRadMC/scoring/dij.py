@@ -139,6 +139,12 @@ class DijResult:
     Column ``j`` holds beamlet ``j``'s dose per emitted history (MeV/g) in the
     voxels that survived truncation; ``sigma`` is the matching per-entry standard
     error. Voxel indices are flat C-order over ``grid_shape``.
+
+    ``correlated`` records the stream mapping the Dij was computed under
+    (Phase 4). When True, columns share random streams and are statistically
+    *dependent*: each per-entry ``sigma`` stays valid on its own, but sigmas
+    must never be combined across columns in quadrature — cross-column
+    covariance is not carried here.
     """
 
     grid_shape: tuple[int, int, int]
@@ -153,6 +159,7 @@ class DijResult:
     energy_emitted: float
     energy_deposited: float
     energy_escaped: float
+    correlated: bool = False
 
     @property
     def n_voxels(self) -> int:
@@ -217,6 +224,7 @@ class DijAssembler:
     n_histories_per_beamlet: int
     n_batches: int
     truncation: float
+    correlated: bool = False
     _next_beamlet: int = 0
     _indices: list[np.ndarray] = field(default_factory=list)
     _dose: list[np.ndarray] = field(default_factory=list)
@@ -274,4 +282,5 @@ class DijAssembler:
             energy_emitted=energy_emitted,
             energy_deposited=energy_deposited,
             energy_escaped=energy_escaped,
+            correlated=self.correlated,
         )

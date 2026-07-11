@@ -138,6 +138,7 @@ class ReferenceEngine:
         ecut: float = ECUT_MEV,
         transport_electrons: bool = True,
         truncation: float = DIJ_TRUNCATION_RELATIVE,
+        correlated: bool = False,
     ) -> DijResult:
         """Compute the beamlet-resolved dose influence matrix over the lattice.
 
@@ -149,6 +150,16 @@ class ReferenceEngine:
         functions of ``(seed, h)``, so the Dij is bit-reproducible on one target
         regardless of how a backend schedules the transport, and a 1x1 lattice
         reproduces the open-field :meth:`run` bit for bit (test-pinned).
+
+        Correlated sampling (Phase 4) changes the *stream key* only: with
+        ``correlated=True``, the history at within-beamlet index
+        ``rw = h - j * n_histories_per_beamlet`` draws the stream ``(seed, rw)``
+        instead of ``(seed, h)``, so corresponding histories of every beamlet
+        replay the same random sequence — same within-bixel entry offset, same
+        interaction sequence — and only the beamlet's position differs. Beamlet
+        assignment, batching, scoring and the energy books are untouched, and on
+        a 1x1 lattice ``rw == h``, so the open-field anchor above holds in both
+        modes (test-pinned).
 
         Every deposit of a history's whole secondary family scores into its
         beamlet's column: the columns partition the open-field dose exactly.
@@ -165,6 +176,14 @@ class ReferenceEngine:
             Per-column relative truncation threshold. Accuracy-defining
             (AGENTS.md 2.8): the default is :data:`pyRadMC.DIJ_TRUNCATION_RELATIVE`
             and a different value in a call is a visible, greppable decision.
+        correlated
+            Key streams on the within-beamlet index so columns share random
+            sequences (correlated sampling). **Phase 4 experiment instrument**
+            (the sanctioned-toggle pattern of AGENTS.md 2.10): the shipped
+            default is decided from the noise/bias study at phase exit. A
+            correlated Dij's columns are statistically dependent — per-column
+            sigmas stay valid, but never combine sigmas across columns in
+            quadrature. The result records the mode in ``DijResult.correlated``.
         """
         if n_histories_per_beamlet < 1:
             raise ValueError(
@@ -186,8 +205,9 @@ class ReferenceEngine:
             for beamlet in range(n_beamlets):
                 deposit = partial(scorer.deposit, beamlet)
                 for r in range(per_batch):
-                    h = beamlet * n_histories_per_beamlet + batch * per_batch + r
-                    state = self.rng.init_state(seed, h)
+                    rw = batch * per_batch + r
+                    h = beamlet * n_histories_per_beamlet + rw
+                    state = self.rng.init_state(seed, rw if correlated else h)
                     primary = source.emit(beamlet, state)
                     energy_emitted += primary.energy
                     energy_escaped += transport_history(
@@ -216,6 +236,7 @@ class ReferenceEngine:
             n_histories_per_beamlet=n_histories_per_beamlet,
             n_batches=n_batches,
             truncation=truncation,
+            correlated=correlated,
         )
         assembler.add_block(0, block.dose, block.sigma)
         return assembler.finalize(
