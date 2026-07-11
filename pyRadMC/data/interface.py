@@ -23,6 +23,10 @@ cm^2/g and MeV cm^2/g respectively.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pyRadMC.data.tables import CrossSectionTables
 
 __all__ = ["CrossSectionSource", "PhotonProcess"]
 
@@ -134,10 +138,33 @@ class CrossSectionSource(ABC):
 
     # -- construction -------------------------------------------------------
 
-    @abstractmethod
-    def build_tables(self) -> object:
+    def build_tables(
+        self, ecut: float, pcut: float, e_max: float, n_points: int | None = None
+    ) -> CrossSectionTables:
         """Flatten host-side data into kernel-consumable array handles.
 
-        The returned object is backend-specific (NumPy arrays for ``ref``, Warp arrays
-        or textures for ``warp``). Its contents are frozen after construction.
+        Generic over implementations: everything flows through the abstract query
+        methods above, so a source never flattens itself differently from how it
+        answers the host API (that equality is what the table parity tests pin).
+        The result is host NumPy; kernel backends upload and cast it. Its contents
+        are frozen after construction.
+
+        Parameters
+        ----------
+        ecut, pcut
+            Electron and photon cutoffs in MeV the tables are built at
+            (accuracy-defining, AGENTS.md section 2.8).
+        e_max
+            Upper grid edge in MeV; must cover the highest primary energy.
+        n_points
+            Grid nodes; defaults to :data:`pyRadMC.data.tables.TABLE_POINTS`.
         """
+        from pyRadMC.data.tables import TABLE_POINTS, build_cross_section_tables
+
+        return build_cross_section_tables(
+            self,
+            ecut=ecut,
+            pcut=pcut,
+            e_max=e_max,
+            n_points=TABLE_POINTS if n_points is None else n_points,
+        )

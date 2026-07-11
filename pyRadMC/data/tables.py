@@ -1,0 +1,276 @@
+"""Flattened cross-section tables and their kernel-side lookups.
+
+``CrossSectionSource.build_tables`` flattens the host-side query API onto log-energy
+grids so that kernels can interpolate instead of calling Python (AGENTS.md 2.6: this
+module *is* the kernel-side face of the data interface — transport code never sees a
+formula). Two grids are built, both with ``n_points`` nodes:
+
+photon grid
+    ``[PCUT/2, e_max]``: every transported photon energy, with margin below the cut.
+electron grid
+    ``[ECUT/2, e_max]``: every kinetic energy the electron loop queries, with margin.
+
+Values are interpolated **linearly in the value on the log-energy grid**. At the
+default 2048 points over these spans the local spacing is ~3e-3 in log energy and the
+interpolation error is second order in it — a few 1e-5 relative for the smooth
+channels, pinned in ``tests/unit/test_tables.py``. (This per-energy lookup is distinct
+from the *spectrum-integration* requirement of AGENTS.md 2.7, which binds the Phase 5
+tabulated ``CrossSectionSource`` itself.)
+
+The Woodcock majorant nodes carry a relative headroom above the float64 maximum so
+that the kernel-side inequality ``rho * sum(channel lookups) <= majorant lookup``
+survives float32 rounding everywhere. Enlarging a Woodcock majorant is *exact* — it
+only adds delta scattering (Woodcock et al. (1965), ANL-7050) — whereas the reverse
+error is a silent under-attenuation bias, so the headroom errs on the only safe side.
+
+The lookup functions are single-source (AGENTS.md 2.5): pure scalar functions over
+the :mod:`pyRadMC.data.handles` aliases, running under NumPy on the host and compiled
+to ``@wp.func`` by the Warp physics loader.
+"""
+
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+import numpy as np
+import numpy.typing as npt
+
+from pyRadMC.data.handles import Table1D, Table2D
+from pyRadMC.data.interface import PhotonProcess
+from pyRadMC.data.materials import MATERIALS
+
+if TYPE_CHECKING:
+    from pyRadMC.data.interface import CrossSectionSource
+
+__all__ = [
+    "MAJORANT_HEADROOM",
+    "TABLE_POINTS",
+    "CrossSectionTables",
+    "build_cross_section_tables",
+    "lookup_loglinear_1d",
+    "lookup_loglinear_2d",
+]
+
+TABLE_POINTS: int = 2048
+"""Default nodes per grid. Sized so interpolation error sits far below the 2e-4
+parity budget of the table tests; memory is trivial at any plausible material count."""
+
+MAJORANT_HEADROOM: float = 1.0 + 1.0e-6
+"""Relative headroom on the majorant nodes: ~8 float32 ulps above the float64
+maximum, so the kernel-side Woodcock inequality cannot be broken by rounding. Costs
+one delta-scattering event per ~1e6 flights; exactness is unaffected (see module
+docstring)."""
+
+
+# -- kernel-side lookups (single-source; compiled to @wp.func for Warp) ----------
+
+
+def lookup_loglinear_1d(
+    values: Table1D, log_e_min: float, inv_dlog: float, n_points: int, energy: float
+) -> float:
+    """Interpolate one gridded quantity at ``energy``, linear in value over log E.
+
+    Clamps flat outside the grid: linear extrapolation of a steep channel (the
+    E^-3 photoelectric) would go negative below the grid, and no transported
+    particle is ever outside it by construction — the clamp only guards float
+    round-off at the edges.
+
+    Parameters
+    ----------
+    values
+        Grid node values, shape ``(n_points,)``.
+    log_e_min, inv_dlog, n_points
+        Grid metadata from :class:`CrossSectionTables`: log of the lowest node
+        energy, inverse log-spacing, node count.
+    energy
+        Query energy in MeV; must be positive.
+    """
+    t = (math.log(energy) - log_e_min) * inv_dlog
+    t = min(max(t, 0.0), float(n_points - 1))
+    i = min(int(t), n_points - 2)
+    w = t - float(i)
+    return float(values[i]) * (1.0 - w) + float(values[i + 1]) * w
+
+
+def lookup_loglinear_2d(
+    values: Table2D,
+    material: int,
+    log_e_min: float,
+    inv_dlog: float,
+    n_points: int,
+    energy: float,
+) -> float:
+    """Interpolate one per-material quantity; see :func:`lookup_loglinear_1d`.
+
+    Parameters
+    ----------
+    values
+        Grid node values, shape ``(n_materials, n_points)``.
+    material
+        Material row index.
+    log_e_min, inv_dlog, n_points, energy
+        As in :func:`lookup_loglinear_1d`.
+    """
+    t = (math.log(energy) - log_e_min) * inv_dlog
+    t = min(max(t, 0.0), float(n_points - 1))
+    i = min(int(t), n_points - 2)
+    w = t - float(i)
+    return float(values[material, i]) * (1.0 - w) + float(values[material, i + 1]) * w
+
+
+# -- host-side container and builder ---------------------------------------------
+
+
+@dataclass(frozen=True)
+class CrossSectionTables:
+    """Flattened interaction data on log-energy grids; frozen after construction.
+
+    Arrays are float64 NumPy on the host; backends cast on upload (the Warp backend
+    to float32). Units follow :mod:`pyRadMC.data.interface`: mass coefficients in
+    cm^2/g, stopping powers in MeV cm^2/g, ranges in g/cm^2, scattering power in
+    rad^2 cm^2/g, the majorant macroscopic in 1/cm.
+
+    Attributes
+    ----------
+    n_points
+        Nodes per grid.
+    ecut, pcut, e_max
+        The cutoffs (MeV) the electron tables were built at and the upper grid
+        edge; provenance so a mismatched engine configuration is detectable.
+    photon_log_e_min, photon_inv_dlog
+        Photon grid metadata for the lookup functions.
+    electron_log_e_min, electron_inv_dlog
+        Electron grid metadata.
+    mu_compton, mu_photo, mu_pair, mu_rayleigh
+        Per-channel mass attenuation coefficients, ``(n_materials, n_points)``.
+        All four :class:`~pyRadMC.data.interface.PhotonProcess` channels are always
+        present — kernels are channel-complete (AGENTS.md 2.10); a disabled channel
+        is an all-zero row, a *data* statement, not a flag.
+    majorant
+        Woodcock majorant with float32 headroom, ``(n_points,)``.
+    stopping_restricted, stopping_radiative, moller, csda_range, scattering_power
+        Electron-grid quantities, ``(n_materials, n_points)``; the restricted
+        stopping power and Moller cross-section are evaluated at ``ecut``.
+    """
+
+    n_points: int
+    ecut: float
+    pcut: float
+    e_max: float
+    photon_log_e_min: float
+    photon_inv_dlog: float
+    electron_log_e_min: float
+    electron_inv_dlog: float
+    mu_compton: npt.NDArray[np.float64]
+    mu_photo: npt.NDArray[np.float64]
+    mu_pair: npt.NDArray[np.float64]
+    mu_rayleigh: npt.NDArray[np.float64]
+    majorant: npt.NDArray[np.float64]
+    stopping_restricted: npt.NDArray[np.float64]
+    stopping_radiative: npt.NDArray[np.float64]
+    moller: npt.NDArray[np.float64]
+    csda_range: npt.NDArray[np.float64]
+    scattering_power: npt.NDArray[np.float64]
+
+
+def build_cross_section_tables(
+    source: CrossSectionSource,
+    ecut: float,
+    pcut: float,
+    e_max: float,
+    n_points: int = TABLE_POINTS,
+) -> CrossSectionTables:
+    """Flatten a :class:`CrossSectionSource` onto the two lookup grids.
+
+    Generic over sources: everything goes through the host query API, so the
+    analytic and (Phase 5) tabulated backends flatten identically.
+
+    Parameters
+    ----------
+    source
+        The host-side data source to flatten.
+    ecut, pcut
+        Electron and photon cutoffs in MeV (accuracy-defining, AGENTS.md 2.8);
+        the electron tables are built *at* this ``ecut``.
+    e_max
+        Upper grid edge in MeV; must cover the highest primary energy. No
+        transported particle can exceed it (secondaries only lose energy).
+    n_points
+        Nodes per grid.
+    """
+    if pcut <= 0.0 or ecut <= 0.0:
+        raise ValueError(f"non-positive cutoff: pcut={pcut}, ecut={ecut}")
+    if e_max <= max(pcut, ecut):
+        raise ValueError(f"e_max={e_max} MeV does not cover the transport range")
+    if n_points < 2:
+        raise ValueError(f"need at least two grid nodes, got {n_points}")
+
+    n_materials = len(MATERIALS)
+    photon_energies = np.geomspace(0.5 * pcut, e_max, n_points)
+    electron_energies = np.geomspace(0.5 * ecut, e_max, n_points)
+
+    channels = {
+        process: np.empty((n_materials, n_points))
+        for process in (
+            PhotonProcess.COMPTON,
+            PhotonProcess.PHOTOELECTRIC,
+            PhotonProcess.PAIR,
+            PhotonProcess.RAYLEIGH,
+        )
+    }
+    for material in range(n_materials):
+        for j, energy in enumerate(photon_energies):
+            for process, table in channels.items():
+                table[material, j] = source.mu_over_rho(float(energy), material, process)
+
+    majorant = np.array([source.majorant(float(e)) for e in photon_energies]) * MAJORANT_HEADROOM
+
+    electron_tables = {
+        name: np.empty((n_materials, n_points))
+        for name in (
+            "stopping_restricted",
+            "stopping_radiative",
+            "moller",
+            "csda_range",
+            "scattering_power",
+        )
+    }
+    for material in range(n_materials):
+        for j, energy in enumerate(electron_energies):
+            e = float(energy)
+            electron_tables["stopping_restricted"][material, j] = source.restricted_stopping_power(
+                e, material, ecut
+            )
+            electron_tables["stopping_radiative"][material, j] = source.radiative_stopping_power(
+                e, material
+            )
+            electron_tables["moller"][material, j] = source.moller_cross_section(e, material, ecut)
+            electron_tables["csda_range"][material, j] = source.csda_range(e, material)
+            electron_tables["scattering_power"][material, j] = source.scattering_power(e, material)
+
+    def grid_metadata(energies: npt.NDArray[np.float64]) -> tuple[float, float]:
+        log_min = float(np.log(energies[0]))
+        log_max = float(np.log(energies[-1]))
+        return log_min, (n_points - 1) / (log_max - log_min)
+
+    photon_log_e_min, photon_inv_dlog = grid_metadata(photon_energies)
+    electron_log_e_min, electron_inv_dlog = grid_metadata(electron_energies)
+
+    return CrossSectionTables(
+        n_points=n_points,
+        ecut=ecut,
+        pcut=pcut,
+        e_max=e_max,
+        photon_log_e_min=photon_log_e_min,
+        photon_inv_dlog=photon_inv_dlog,
+        electron_log_e_min=electron_log_e_min,
+        electron_inv_dlog=electron_inv_dlog,
+        mu_compton=channels[PhotonProcess.COMPTON],
+        mu_photo=channels[PhotonProcess.PHOTOELECTRIC],
+        mu_pair=channels[PhotonProcess.PAIR],
+        mu_rayleigh=channels[PhotonProcess.RAYLEIGH],
+        majorant=majorant,
+        **electron_tables,
+    )

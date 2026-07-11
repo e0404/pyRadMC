@@ -40,15 +40,20 @@ from pyRadMC.rng import warp_shim
 
 __all__ = ["warp_physics"]
 
-_PHYSICS_MODULE_NAMES = (
-    "pyRadMC.physics.path",
-    "pyRadMC.physics.channel",
-    "pyRadMC.physics.direction",
-    "pyRadMC.physics.compton",
-    "pyRadMC.physics.moller",
-    "pyRadMC.physics.msc",
-    "pyRadMC.physics.brems",
-)
+# Modules to re-import under the shims, mapped to the functions to wrap with
+# wp.func. None means the module's whole __all__ (the physics modules export
+# nothing but kernel-compilable functions); data modules name their kernel-side
+# lookups explicitly, since their __all__ also carries host-side builders.
+_KERNEL_MODULES: dict[str, tuple[str, ...] | None] = {
+    "pyRadMC.physics.path": None,
+    "pyRadMC.physics.channel": None,
+    "pyRadMC.physics.direction": None,
+    "pyRadMC.physics.compton": None,
+    "pyRadMC.physics.moller": None,
+    "pyRadMC.physics.msc": None,
+    "pyRadMC.physics.brems": None,
+    "pyRadMC.data.tables": ("lookup_loglinear_1d", "lookup_loglinear_2d"),
+}
 
 _MISSING = object()
 
@@ -77,27 +82,36 @@ def _make_rng_shim() -> types.ModuleType:
     return shim
 
 
-def _load() -> types.SimpleNamespace:
-    """Re-import the physics sources under the shims and wrap them with wp.func."""
-    physics_pkg = importlib.import_module("pyRadMC.physics")
-    patched = {"math": _make_math_shim(), "pyRadMC.rng": _make_rng_shim()}
+def _make_handles_shim() -> types.ModuleType:
+    """Build a stand-in for ``pyRadMC.data.handles`` with Warp array types."""
+    shim = types.ModuleType("pyRadMC.data.handles")
+    shim.Table1D = wp.array(dtype=float)
+    shim.Table2D = wp.array2d(dtype=float)
+    return shim
 
-    saved_modules = {
-        name: sys.modules.pop(name, None) for name in (*patched, *_PHYSICS_MODULE_NAMES)
+
+def _load() -> types.SimpleNamespace:
+    """Re-import the kernel-function sources under the shims and wrap with wp.func."""
+    patched = {
+        "math": _make_math_shim(),
+        "pyRadMC.rng": _make_rng_shim(),
+        "pyRadMC.data.handles": _make_handles_shim(),
     }
+
+    saved_modules = {name: sys.modules.pop(name, None) for name in (*patched, *_KERNEL_MODULES)}
     # Re-importing a submodule also rebinds it as an attribute of its parent
-    # package; save those bindings so the host package is restored exactly.
+    # package; save those bindings so the host packages are restored exactly.
+    parents = {name: importlib.import_module(name.rsplit(".", 1)[0]) for name in _KERNEL_MODULES}
     saved_attrs = {
-        name.rsplit(".", 1)[1]: getattr(physics_pkg, name.rsplit(".", 1)[1], _MISSING)
-        for name in _PHYSICS_MODULE_NAMES
+        name: getattr(parents[name], name.rsplit(".", 1)[1], _MISSING) for name in _KERNEL_MODULES
     }
 
     namespace = types.SimpleNamespace()
     try:
         sys.modules.update(patched)
-        for name in _PHYSICS_MODULE_NAMES:
+        for name, wrap_names in _KERNEL_MODULES.items():
             module = importlib.import_module(name)
-            for public_name in module.__all__:
+            for public_name in wrap_names if wrap_names is not None else module.__all__:
                 fn = getattr(module, public_name)
                 wrapped = wp.func(fn)
                 # Rebinding inside the module makes intra-module calls (e.g.
@@ -111,12 +125,13 @@ def _load() -> types.SimpleNamespace:
                 sys.modules[name] = saved
             else:
                 sys.modules.pop(name, None)
-        for short_name, saved in saved_attrs.items():
+        for name, saved in saved_attrs.items():
+            short_name = name.rsplit(".", 1)[1]
             if saved is _MISSING:
-                if hasattr(physics_pkg, short_name):
-                    delattr(physics_pkg, short_name)
+                if hasattr(parents[name], short_name):
+                    delattr(parents[name], short_name)
             else:
-                setattr(physics_pkg, short_name, saved)
+                setattr(parents[name], short_name, saved)
     return namespace
 
 

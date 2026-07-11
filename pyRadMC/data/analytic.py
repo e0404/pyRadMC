@@ -400,12 +400,6 @@ class AnalyticCrossSections(CrossSectionSource):
         if not 0 <= material < len(MATERIALS):
             raise ValueError(f"unknown material index {material}")
 
-    # -- construction ---------------------------------------------------------
-
-    def build_tables(self) -> object:
-        """Not implemented in Phase 0: the reference backend uses the host API directly."""
-        raise NotImplementedError("Phase 2: kernel table flattening arrives with Warp")
-
     # -- internals ------------------------------------------------------------
 
     def _photoelectric(self, energy: float) -> float:
