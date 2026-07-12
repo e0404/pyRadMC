@@ -45,8 +45,9 @@ Photons at or below ``pcut`` deposit their energy locally and terminate.
   docstring). For ``N > 1`` a **primary** photon's first Compton samples the
   final state N times, each copy weighted ``1/N`` and energy-conserving per
   realization; only the primary splits, so the population is bounded and the
-  roulette culls the degraded copies. Retained for Phase 5 phase-space sources;
-  test-pinned with N = 2 as the instrument so the path stays validated.
+  roulette culls the degraded copies. Phase 5 re-measured the FOM on a
+  phase-space source and it is still < 1 (see the constant's docstring), so it
+  stays off; the N > 1 path remains test-pinned with N = 2 as the instrument.
 """
 
 from __future__ import annotations

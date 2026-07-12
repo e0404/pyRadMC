@@ -268,11 +268,23 @@ A phase is not done when its tests pass. Before a phase may exit:
 
 ### 7.2 Current phase
 
-**Phase 5: tabulated data, phase space, pyRadPlan adapter — NOT STARTED.**
-Gated on the maintainer's explicit go-ahead; this exit record is not that
-go-ahead. Phases 0 through 4 have exited. Phase 4's exit record is reproduced
-below — it defines the machinery Phase 5 builds on and carries the warnings
-that target Phase 5; earlier records live in the git history of this section.
+**Phase 5: tabulated data, phase space, pyRadPlan adapter — UNDERWAY,
+begun 2026-07-12.** The maintainer's explicit go-ahead was given 2026-07-12;
+the phase-space source is the workstream in progress (most independent of the
+three). Shipped so far, on the ``ref`` backend: the IAEA phase-space reader
+(``geometry/phasespace.py`` — byte layout confirmed against a reference
+implementation and a real file, not memory) and ``PhaseSpaceSource``, which
+required the source contract to carry a per-particle ``kind`` and statistical
+``weight`` (``Primary`` gained both, additive; ``run`` weights the emitted-energy
+book and, for a positron primary, adds the ``2 m_e c^2`` of annihilation photons
+its kinetic energy does not account for, or the ledger cannot close). The warp
+port is carried forward — warp builds primaries in-kernel from analytic source
+parameters and rejects a phase-space source by type, so this source is ``ref``
+only for now. The Compton-splitting ``N > 1`` turn-on this workstream was meant to
+unlock was measured and stays **off** (see the carried item below). Phases 0
+through 4 have exited. Phase 4's exit record is reproduced below — it defines
+the machinery Phase 5 builds on and carries the warnings that target Phase 5;
+earlier records live in the git history of this section.
 
 ---
 
@@ -342,14 +354,25 @@ history.
   scoring (batches are aligned across columns); ``DijResult`` carries no
   per-batch data, so it exposes none. Build it with the pyRadPlan adapter that
   consumes it; never reintroduce a quadrature plan-dose sigma anywhere.
-- **Compton splitting is retained but OFF — turn it on in Phase 5.**
-  ``PHOTON_SPLIT_N`` ships at 1 (analog); the ``N > 1`` path is test-pinned via
-  the N = 2 instrument but dormant, because uniform primary splitting does not
-  earn its keep for the analytic-water Dij and cannot reach the low-dose tail
-  (measured). Splitting a phase-space source particle *is* efficient by
-  construction — enable it there (``N > 1``) and rerun the efficiency figure of
-  merit ``1/(sigma^2*time)`` to set the value. The soft-photon roulette stays
-  always-on regardless.
+- **Compton splitting stays OFF — the Phase 5 phase-space FOM was measured and
+  is still < 1.** ``PHOTON_SPLIT_N`` ships at 1 (analog); the ``N > 1`` path is
+  test-pinned via the N = 2 instrument but dormant. Phase 4 found it does not earn
+  its keep for the analytic-water Dij and cannot reach the low-dose tail. Phase 5
+  then ran the ``1/(sigma^2*time)`` FOM on a phase-space source, on now-stable-power
+  hardware (calibrated at 1.06x spread, not the 4-6x drift that blocked Phase 4):
+  the efficiency ratio split/no-split came out **0.75, 0.48, 0.28 at N = 2, 4, 8**
+  — worse, monotonically, tight across interleaved repeats. So the value stays 1.
+  Why the Phase 4 "efficient by construction" expectation did not hold: the
+  retained mechanism splits at the *first Compton*, where copies decorrelate only
+  after that scatter, so sigma^2 reduction saturates far below 1/N while cost
+  scales ~linearly with N; and emitting a phase-space primary (an index into a
+  preloaded array) is as cheap as sampling an analytic beam, so the cost structure
+  — and the sub-unity FOM — matches the analytic-beam result. The untested
+  alternative, if phase-space variance reduction is ever wanted, is splitting the
+  source particle **at emission** (to reuse a finite phase-space file — a
+  latent-variance argument the CPU-time FOM does not measure), which is a different
+  mechanism from first-Compton splitting. The soft-photon roulette stays always-on
+  regardless.
 - **VR CPU cost is still unmeasured under controlled conditions.** This laptop's
   power state drifts 4-6x, so only the interleaved-median *ratio* (split cost)
   is trustworthy here; GPU cost is neutral (a warp retires with its longest

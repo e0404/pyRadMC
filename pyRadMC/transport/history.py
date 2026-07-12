@@ -37,6 +37,7 @@ def transport_history(
     pcut: float,
     ecut: float,
     transport_electrons: bool = True,
+    weight: float = 1.0,
 ) -> float:
     """Transport one primary and all its descendants; returns the escaped energy.
 
@@ -57,8 +58,14 @@ def transport_history(
     transport_electrons
         False selects the Phase 0 KERMA approximation: charged secondaries deposit
         at their creation voxel. Explicit engine option per AGENTS.md 7.2.
+    weight
+        Statistical weight of the primary (1.0 for analog beam sources; a
+        phase-space record supplies its own). Descendants inherit it and the scorer
+        sees weight-scaled (expected) energy throughout, so the returned escaped
+        energy is weight-scaled too — callers must weight the emitted-energy book
+        the same way for the energy ledger to balance.
     """
-    stack: list[StackEntry] = [(kind, energy, 1.0, x, y, z, ux, uy, uz)]
+    stack: list[StackEntry] = [(kind, energy, weight, x, y, z, ux, uy, uz)]
     escaped = 0.0
     first = True
     while stack:

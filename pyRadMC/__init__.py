@@ -76,10 +76,15 @@ region but cost rises ~1.7x) and roughly neutral on the GPU (a warp retires
 with its longest thread). Worse, it does **not** help the low-dose tail — the
 Dij's NTCP/LET region — because that tail is fed by rare wide-angle multiple
 scatters that uniform primary splitting cannot target; splitting deeper only
-degrades the FOM further (measured). The machinery is retained because
-splitting a **phase-space source particle** (Phase 5) is efficient by
-construction and is the natural place to turn this on (N > 1), rerunning the
-measurement to set the value.
+degrades the FOM further (measured).
+
+**Phase 5 re-measured it on a phase-space source and it still ships off.** On
+now-stable-power hardware the FOM ratio split/no-split was 0.75, 0.48, 0.28 at
+N = 2, 4, 8 — worse, monotonically. First-Compton splitting decorrelates copies
+only after that scatter (variance saturates far below 1/N) while cost grows
+~linearly, and emitting a phase-space primary is as cheap as an analytic beam,
+so the cost structure matches. The N > 1 path stays retained and N=2-pinned. See
+AGENTS.md 7.2 for the full record and the emission-time-splitting alternative.
 """
 
 # --- physical constants --------------------------------------------------------

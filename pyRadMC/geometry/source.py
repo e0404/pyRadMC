@@ -17,7 +17,15 @@ __all__ = ["BeamletGridSource", "ParallelBeamSource", "PencilBeamSource", "Prima
 
 
 class Primary(NamedTuple):
-    """One emitted primary photon."""
+    """One emitted primary particle.
+
+    ``kind`` and ``weight`` are additive with defaults so the monoenergetic beam
+    sources — which emit unit-weight photons and construct ``Primary`` positionally
+    with the first seven fields — are unchanged. ``kind`` is ``None`` for those
+    sources, meaning "defer to the engine's ``primary_kind`` argument"; a
+    phase-space source sets it per record ("photon", "electron", "positron"). A
+    ``weight`` other than 1.0 is the statistical weight a phase-space record carries.
+    """
 
     energy: float
     x: float
@@ -26,6 +34,8 @@ class Primary(NamedTuple):
     ux: float
     uy: float
     uz: float
+    kind: str | None = None
+    weight: float = 1.0
 
 
 @dataclass(frozen=True)

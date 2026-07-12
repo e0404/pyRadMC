@@ -15,18 +15,24 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import partial
 
-from pyRadMC import DIJ_TRUNCATION_RELATIVE, ECUT_MEV, PCUT_MEV
+from pyRadMC import DIJ_TRUNCATION_RELATIVE, ECUT_MEV, ELECTRON_MASS_MEV, PCUT_MEV
 from pyRadMC.backends.results import TransportResult
 from pyRadMC.data.interface import CrossSectionSource
 from pyRadMC.geometry.grid import VoxelGrid
+from pyRadMC.geometry.phasespace import PhaseSpaceSource
 from pyRadMC.geometry.source import BeamletGridSource, ParallelBeamSource, PencilBeamSource
 from pyRadMC.rng.interface import RNG
 from pyRadMC.scoring.dij import BatchedBeamletScorer, DijAssembler, DijResult
 from pyRadMC.scoring.dose import BatchedDoseScorer
 from pyRadMC.transport.history import transport_history
-from pyRadMC.transport.particles import ELECTRON, PHOTON
+from pyRadMC.transport.particles import ELECTRON, PHOTON, POSITRON
 
 __all__ = ["ReferenceEngine", "TransportResult"]
+
+# Maps a Primary's per-particle kind name to a transport particle constant. A
+# phase-space source sets ``kind`` per record; beam sources leave it None and the
+# run's ``primary_kind`` argument decides.
+_KIND_TO_PARTICLE = {"photon": PHOTON, "electron": ELECTRON, "positron": POSITRON}
 
 
 @dataclass(frozen=True)
@@ -39,7 +45,7 @@ class ReferenceEngine:
 
     def run(
         self,
-        source: PencilBeamSource | ParallelBeamSource,
+        source: PencilBeamSource | ParallelBeamSource | PhaseSpaceSource,
         n_histories: int,
         n_batches: int,
         seed: int,
@@ -71,9 +77,12 @@ class ReferenceEngine:
             deposit at their creation voxel) — the explicit option AGENTS.md 7.2
             keeps for photon-only physics tests.
         primary_kind
-            ``"photon"`` (default) or ``"electron"``: what the source emits. The
-            electron option exists for validating electron transport against ranges;
-            electron *beams* as a clinical modality remain out of scope (AGENTS.md 6).
+            ``"photon"`` (default) or ``"electron"``: the fallback kind for sources
+            whose emitted :class:`~pyRadMC.geometry.source.Primary` leaves ``kind``
+            unset (the monoenergetic beam sources). A phase-space source overrides
+            it per record, so this argument is ignored for that source. The electron
+            option exists for validating electron transport against ranges; electron
+            *beams* as a clinical modality remain out of scope (AGENTS.md 6).
         """
         if n_histories < 1:
             raise ValueError(f"need at least one history, got {n_histories}")
@@ -84,7 +93,6 @@ class ReferenceEngine:
             )
         if primary_kind not in ("photon", "electron"):
             raise ValueError(f"unknown primary_kind {primary_kind!r}")
-        kind = PHOTON if primary_kind == "photon" else ELECTRON
 
         scorer = BatchedDoseScorer(self.grid, n_batches)
         per_batch = n_histories // n_batches
@@ -97,7 +105,15 @@ class ReferenceEngine:
                 state = self.rng.init_state(seed, history)
                 history += 1
                 primary = source.emit(state)
-                energy_emitted += primary.energy
+                kind_name = primary.kind if primary.kind is not None else primary_kind
+                kind = _KIND_TO_PARTICLE[kind_name]
+                # A positron primary will annihilate at rest, injecting 2*m_e c^2 of
+                # photons from rest mass that its kinetic energy does not account for.
+                # (For a photon that pair-produces, that 1.022 MeV is already inside
+                # the photon's energy; a positron primary brings it as rest mass.)
+                # Count it so the emitted = deposited + escaped ledger stays exact.
+                rest_mass = 2.0 * ELECTRON_MASS_MEV if kind == POSITRON else 0.0
+                energy_emitted += primary.weight * (primary.energy + rest_mass)
                 energy_escaped += transport_history(
                     kind,
                     primary.energy,
@@ -114,6 +130,7 @@ class ReferenceEngine:
                     pcut,
                     ecut,
                     transport_electrons,
+                    weight=primary.weight,
                 )
             scorer.end_batch(per_batch)
 
