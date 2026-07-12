@@ -60,6 +60,7 @@ __all__ = [
     "Tables",
     "electron_kernel",
     "generate_beamlet_lattice",
+    "generate_from_upload",
     "generate_parallel_beam",
     "generate_pencil_beam",
     "photon_kernel",
@@ -118,6 +119,7 @@ class GridInfo:
     sx: float
     sy: float
     sz: float
+    nx: int
     ny: int
     nz: int
     n_voxels: int
@@ -257,9 +259,9 @@ def _deposit_or_escape(
     if amount <= 0.0:
         return
     if point_inside(x, y, z, gi.x_lo, gi.y_lo, gi.z_lo, gi.x_hi, gi.y_hi, gi.z_hi):
-        ix = point_axis_index(x, gi.x_lo, gi.sx)
-        iy = point_axis_index(y, gi.y_lo, gi.sy)
-        iz = point_axis_index(z, gi.z_lo, gi.sz)
+        ix = point_axis_index(x, gi.x_lo, gi.sx, gi.nx)
+        iy = point_axis_index(y, gi.y_lo, gi.sy, gi.ny)
+        iz = point_axis_index(z, gi.z_lo, gi.sz, gi.nz)
         _deposit(edep, gi, base, ix, iy, iz, amount)
     else:
         _escape(escaped, amount)
@@ -286,9 +288,9 @@ def _annihilate_at_rest(
     inherit the positron's beamlet tag and statistical weight.
     """
     if pcut >= ELECTRON_MASS_MEV:
-        ix = point_axis_index(x, gi.x_lo, gi.sx)
-        iy = point_axis_index(y, gi.y_lo, gi.sy)
-        iz = point_axis_index(z, gi.z_lo, gi.sz)
+        ix = point_axis_index(x, gi.x_lo, gi.sx, gi.nx)
+        iy = point_axis_index(y, gi.y_lo, gi.sy, gi.ny)
+        iz = point_axis_index(z, gi.z_lo, gi.sz, gi.nz)
         _deposit(edep, gi, base, ix, iy, iz, weight * 2.0 * ELECTRON_MASS_MEV)
         return
     ax, ay, az = sample_isotropic_direction(state)
@@ -386,9 +388,9 @@ def photon_kernel(
             _escape(escaped, w * e)
             return
 
-        ix = point_axis_index(x, gi.x_lo, gi.sx)
-        iy = point_axis_index(y, gi.y_lo, gi.sy)
-        iz = point_axis_index(z, gi.z_lo, gi.sz)
+        ix = point_axis_index(x, gi.x_lo, gi.sx, gi.nx)
+        iy = point_axis_index(y, gi.y_lo, gi.sy, gi.ny)
+        iz = point_axis_index(z, gi.z_lo, gi.sz, gi.nz)
         rho = density[ix, iy, iz]
         mat = material[ix, iy, iz]
         mu_compton = rho * lookup_2d(
@@ -641,17 +643,17 @@ def electron_kernel(
 
     while True:
         if e <= ecut:
-            ix = point_axis_index(x, gi.x_lo, gi.sx)
-            iy = point_axis_index(y, gi.y_lo, gi.sy)
-            iz = point_axis_index(z, gi.z_lo, gi.sz)
+            ix = point_axis_index(x, gi.x_lo, gi.sx, gi.nx)
+            iy = point_axis_index(y, gi.y_lo, gi.sy, gi.ny)
+            iz = point_axis_index(z, gi.z_lo, gi.sz, gi.nz)
             _deposit(edep, gi, base, ix, iy, iz, w * e)
             if is_positron:
                 _annihilate_at_rest(x, y, z, gi, state, q_photon, edep, pcut, beamlet, base, w)
             return
 
-        ix = point_axis_index(x, gi.x_lo, gi.sx)
-        iy = point_axis_index(y, gi.y_lo, gi.sy)
-        iz = point_axis_index(z, gi.z_lo, gi.sz)
+        ix = point_axis_index(x, gi.x_lo, gi.sx, gi.nx)
+        iy = point_axis_index(y, gi.y_lo, gi.sy, gi.ny)
+        iz = point_axis_index(z, gi.z_lo, gi.sz, gi.nz)
         rho = density[ix, iy, iz]
         mat = material[ix, iy, iz]
 
@@ -833,6 +835,44 @@ def generate_pencil_beam(
     q.uy[tid] = dy
     q.uz[tid] = dz
     q.rng[tid] = init_slot(seed, history_offset + tid)
+
+
+@wp.kernel
+def generate_from_upload(
+    seed: int,
+    hist: wp.array(dtype=wp.int32),
+    kind: wp.array(dtype=wp.int32),
+    energy: wp.array(dtype=float),
+    px: wp.array(dtype=float),
+    py: wp.array(dtype=float),
+    pz: wp.array(dtype=float),
+    dx: wp.array(dtype=float),
+    dy: wp.array(dtype=float),
+    dz: wp.array(dtype=float),
+    weight: wp.array(dtype=float),
+    q: Queue,
+):
+    """Write host-sampled primaries (a phase-space chunk) at fixed slots.
+
+    Mirror of :func:`generate_pencil_beam` for a phase-space source: kind, energy,
+    weight, position and direction come per-particle from uploaded arrays instead of
+    analytic parameters. The transport rng is seeded from the primary's own history
+    index (``hist``), so it is a pure function of ``(seed, history)`` and independent
+    of chunk boundaries — the host draws the record from a separate stream.
+    """
+    tid = wp.tid()
+    q.kind[tid] = kind[tid]
+    q.beamlet[tid] = 0
+    q.primary[tid] = 1  # source particle: the only one that may split
+    q.energy[tid] = energy[tid]
+    q.weight[tid] = weight[tid]
+    q.x[tid] = px[tid]
+    q.y[tid] = py[tid]
+    q.z[tid] = pz[tid]
+    q.ux[tid] = dx[tid]
+    q.uy[tid] = dy[tid]
+    q.uz[tid] = dz[tid]
+    q.rng[tid] = init_slot(seed, hist[tid])
 
 
 @wp.kernel

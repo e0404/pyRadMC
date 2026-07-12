@@ -39,6 +39,28 @@ class TestVoxelGrid:
         # Last interior position.
         assert grid.voxel_index(1.999, 1.999, 1.999) == (3, 3, 3)
 
+    def test_axis_index_is_clamped_to_valid_range(self) -> None:
+        """A ULP-edge position at the upper face maps to the last voxel, never n.
+
+        On the GPU (float32) a position one rounding-ULP below the upper face passes
+        the ``pos < hi`` containment check yet ``floor((pos - lo) / spacing)`` can
+        round up to ``n``; unclamped that indexed out of bounds (an illegal memory
+        access under Warp). The clamp keeps such a point in voxel ``n - 1`` and a
+        below-origin straggler in voxel 0, without moving any interior point.
+        """
+        from pyRadMC.geometry.grid import point_axis_index
+
+        # position == upper face -> floor gives n; must clamp to n - 1.
+        assert point_axis_index(10.0, 0.0, 1.0, 10) == 9
+        # just past the upper face (a float-error straggler) also clamps.
+        assert point_axis_index(10.0001, 0.0, 1.0, 10) == 9
+        # below the origin clamps to 0.
+        assert point_axis_index(-0.001, 0.0, 1.0, 10) == 0
+        # interior points are untouched (half-open convention preserved).
+        assert point_axis_index(0.0, 0.0, 1.0, 10) == 0
+        assert point_axis_index(3.7, 0.0, 1.0, 10) == 3
+        assert point_axis_index(9.999, 0.0, 1.0, 10) == 9
+
     def test_contains_is_half_open_on_the_upper_faces(self) -> None:
         from pyRadMC.geometry.grid import VoxelGrid
 

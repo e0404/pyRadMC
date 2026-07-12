@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from pyRadMC.geometry.phasespace import PhaseSpaceSource
@@ -96,3 +97,44 @@ class TestEmit:
         src = PhaseSpaceSource(tmp_path / "s")
         energies = {src.emit(_rng_state(SEED, h)).energy for h in range(50)}
         assert len(energies) > 1
+
+
+class TestSampleBatch:
+    """The vectorized batch sampler used by the warp backend."""
+
+    def _src(self, tmp_path: Path) -> PhaseSpaceSource:
+        recs = [
+            Rec(t, float(i + 1), x=float(i), y=-float(i), z=1.0, u=0.6, v=0.0, weight=0.5 + 0.1 * i)
+            for i, t in enumerate([1, 2, 3, 1, 2, 1, 1, 3, 1, 2])
+        ]
+        write_phsp(tmp_path / "s", recs)
+        return PhaseSpaceSource(tmp_path / "s")
+
+    def test_chunk_invariant(self, tmp_path: Path) -> None:
+        """History h draws the same record regardless of chunk boundaries."""
+        src = self._src(tmp_path)
+        whole = src.sample_batch(SEED, 0, 10)
+        first = src.sample_batch(SEED, 0, 4)
+        rest = src.sample_batch(SEED, 4, 6)
+        for key in whole:
+            joined = np.concatenate([first[key], rest[key]])
+            np.testing.assert_array_equal(whole[key], joined)
+
+    def test_decodes_valid_supported_records(self, tmp_path: Path) -> None:
+        """Every sampled primary is a real, supported record with a unit direction."""
+        src = self._src(tmp_path)
+        b = src.sample_batch(SEED, 0, 200)
+        assert set(np.unique(b["particle_type"])).issubset({1, 2, 3})
+        norm = b["ux"] ** 2 + b["uy"] ** 2 + b["uz"] ** 2
+        np.testing.assert_allclose(norm, 1.0, atol=1e-5)
+        # energies belong to the file's set {1..10}
+        assert set(np.round(b["energy"]).astype(int)).issubset(set(range(1, 11)))
+
+    def test_skips_unsupported_records(self, tmp_path: Path) -> None:
+        """A proton in the file is never returned by the batch sampler."""
+        write_phsp(tmp_path / "s", [Rec(1, 1.0), Rec(5, 9.0), Rec(1, 2.0), Rec(1, 3.0)])
+        with pytest.warns(UserWarning):
+            src = PhaseSpaceSource(tmp_path / "s")
+        b = src.sample_batch(SEED, 0, 300)
+        assert 9.0 not in set(np.round(b["energy"]))
+        assert set(np.unique(b["particle_type"])) == {1}

@@ -263,6 +263,30 @@ def _build_struct(header: IAEAHeader) -> struct.Struct:
     return struct.Struct(fmt)
 
 
+def _record_dtype(header: IAEAHeader) -> np.dtype:
+    """NumPy structured dtype for bulk-decoding records straight from the mmap.
+
+    Names the type byte, the energy float, and each *stored* coordinate at its byte
+    offset, with ``itemsize`` the full record length so a strided view selects one
+    record per stride. Constant coordinates and extra floats/ints are not named —
+    they are filled from the header (constants) or ignored (extras) after gather.
+    """
+    order = header.byte_order
+    names = ["typ", "e"]
+    formats: list[object] = [np.int8, order + "f4"]
+    offsets = [0, 1]
+    off = 5  # after int8 type + float32 energy
+    for coord, is_stored in zip(_COORDS, header.stored, strict=True):
+        if is_stored:
+            names.append(coord)
+            formats.append(order + "f4")
+            offsets.append(off)
+            off += 4
+    return np.dtype(
+        {"names": names, "formats": formats, "offsets": offsets, "itemsize": header.record_length}
+    )
+
+
 def _decode_record(raw: bytes, header: IAEAHeader, struct_: struct.Struct) -> PhspRecord:
     """Decode one raw record's bytes into a :class:`PhspRecord`."""
     fields = struct_.unpack(raw)
@@ -374,15 +398,16 @@ class PhaseSpaceSource:
 
     Because a phase-space particle can be any type at any position, this source
     breaks the unique beamlet ownership the Dij design relies on; it plugs into
-    :meth:`~pyRadMC.backends.ref.engine.ReferenceEngine.run`, not ``run_dij``. It
-    is ``ref`` only for now — the warp engine builds primaries in-kernel from
-    analytic source parameters (AGENTS.md 7.2).
+    ``run`` on either backend, never ``run_dij``. Per-history :meth:`emit` serves
+    the reference engine; :meth:`sample_batch` serves the warp engine, which
+    transports a whole chunk at once (AGENTS.md 7.2).
     """
 
     def __init__(self, path: Path | str, *, skip_unsupported: bool = True) -> None:
         self.header = read_iaea_header(path)
         _, self._phsp_path = _iaea_path(path)
         self._struct = _build_struct(self.header)
+        self._record_dtype = _record_dtype(self.header)
         self._reclen = self.header.record_length
         n = self.header.n_particles
         if n == 0:
@@ -391,14 +416,25 @@ class PhaseSpaceSource:
         self._file: BinaryIO | None = self._phsp_path.open("rb")
         self._mmap = mmap.mmap(self._file.fileno(), 0, access=mmap.ACCESS_READ)
 
-        # One vectorized pass over the per-record type byte (first byte of each
-        # record) to find records this MC cannot transport. The strided view over
-        # the map is copied into an owned array and dropped immediately: a view
-        # left alive (e.g. held by a traceback if the code below raises) would keep
-        # the map's buffer exported and block closing it in __del__.
-        view = np.frombuffer(self._mmap, dtype=np.int8, count=n * self._reclen)
-        codes = np.abs(view[:: self._reclen].astype(np.int16))
+        # One vectorized pass reading the per-record type byte (offset 0) and energy
+        # float (offset 1) via a strided structured view, to (a) find records this MC
+        # cannot transport and (b) get the maximum energy for sizing the transport
+        # tables. The owned columns are copied out and the view dropped immediately:
+        # a view left alive (e.g. held by a traceback if the code below raises) would
+        # keep the map's buffer exported and block closing it in __del__.
+        scan_dtype = np.dtype(
+            {
+                "names": ["typ", "e"],
+                "formats": [np.int8, self.header.byte_order + "f4"],
+                "offsets": [0, 1],
+                "itemsize": self._reclen,
+            }
+        )
+        view = np.frombuffer(self._mmap, dtype=scan_dtype, count=n)
+        codes = np.abs(view["typ"].astype(np.int16))
+        energies = np.abs(view["e"].astype(np.float64))
         del view
+        self.max_energy = float(energies.max())
         supported = (codes == IAEA_PHOTON) | (codes == IAEA_ELECTRON) | (codes == IAEA_POSITRON)
         unsupported = np.flatnonzero(~supported)
         if unsupported.size:
@@ -440,14 +476,18 @@ class PhaseSpaceSource:
         """Return the number of transportable particles available to sample."""
         return self._n_valid
 
-    def emit(self, rng_state: RNGState) -> Primary:
-        """Emit one primary, sampled uniformly from the file; consumes one uniform."""
+    def _record_for_state(self, rng_state: RNGState) -> PhspRecord:
+        """Sample one supported record from the file; consumes one uniform."""
         k = int(uniform(rng_state) * self._n_valid)
         if k >= self._n_valid:  # guard the uniform == 1.0 corner
             k = self._n_valid - 1
         idx = self._record_index(k)
         off = idx * self._reclen
-        rec = _decode_record(self._mmap[off : off + self._reclen], self.header, self._struct)
+        return _decode_record(self._mmap[off : off + self._reclen], self.header, self._struct)
+
+    def emit(self, rng_state: RNGState) -> Primary:
+        """Emit one primary, sampled uniformly from the file; consumes one uniform."""
+        rec = self._record_for_state(rng_state)
         return Primary(
             energy=rec.energy,
             x=rec.x,
@@ -459,6 +499,72 @@ class PhaseSpaceSource:
             kind=_IAEA_KIND[rec.particle_type],
             weight=rec.weight,
         )
+
+    def _record_indices(self, k: np.ndarray) -> np.ndarray:
+        """Vectorized :meth:`_record_index`: map supported ranks to file positions."""
+        idx = k.astype(np.int64, copy=True)
+        for u in self._unsupported:  # sorted ascending, tiny in the expected case
+            idx += idx >= u
+        return idx
+
+    def sample_batch(self, seed: int, history_offset: int, n: int) -> dict[str, np.ndarray]:
+        """Sample ``n`` primaries for histories ``[history_offset, history_offset + n)``.
+
+        Returns the primaries as column arrays for bulk upload to a device backend,
+        keyed ``particle_type`` (IAEA code 1/2/3), ``energy``, ``x/y/z``, ``ux/uy/uz``
+        and ``weight``, geometry as float32 to match the device queue. Sampling and
+        decoding are both vectorized: record indices come from a single ``PCG64(seed)``
+        stream advanced to ``history_offset``, so history ``h`` always draws the
+        ``h``-th value regardless of chunking (chunk-invariant), and the records are
+        gathered from the mmap through :data:`_record_dtype` in one fancy-indexed read.
+
+        This is a *different* stream from the reference :meth:`emit` (which spawns a
+        per-history generator), so the two backends draw different records — both
+        unbiased estimators of the same dose, compared statistically, never bit-wise.
+        """
+        bitgen = np.random.PCG64(seed)
+        bitgen.advance(history_offset)
+        u01 = np.random.Generator(bitgen).random(n)
+        k = (u01 * self._n_valid).astype(np.int64)
+        np.clip(k, 0, self._n_valid - 1, out=k)  # guard the u01 == 1 corner
+        recs = np.frombuffer(self._mmap, dtype=self._record_dtype, count=self.header.n_particles)[
+            self._record_indices(k)
+        ]
+
+        typ = recs["typ"].astype(np.int32)
+        sign_w = np.where(typ < 0, np.float32(-1.0), np.float32(1.0))
+        stored_names = recs.dtype.names
+
+        def col(name: str) -> np.ndarray:
+            if name in stored_names:
+                return np.asarray(recs[name], dtype=np.float32)
+            return np.full(n, self.header.constants[name], dtype=np.float32)
+
+        u = col("u")
+        v = col("v")
+        tmp = u.astype(np.float64) ** 2 + v.astype(np.float64) ** 2
+        w = np.where(tmp <= 1.0, sign_w * np.sqrt(np.maximum(0.0, 1.0 - tmp)), 0.0).astype(
+            np.float32
+        )
+        over = tmp > 1.0
+        if over.any():  # degenerate direction: renormalize u, v (w stays 0)
+            scale = np.sqrt(tmp[over]).astype(np.float32)
+            u = u.copy()
+            v = v.copy()
+            u[over] /= scale
+            v[over] /= scale
+
+        return {
+            "particle_type": np.abs(typ),
+            "energy": np.abs(recs["e"].astype(np.float32)),
+            "x": col("x"),
+            "y": col("y"),
+            "z": col("z"),
+            "ux": u,
+            "uy": v,
+            "uz": w,
+            "weight": col("weight"),
+        }
 
     def close(self) -> None:
         """Release the memory map and file handle."""

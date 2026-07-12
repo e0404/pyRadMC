@@ -30,20 +30,25 @@ from dataclasses import dataclass
 import numpy as np
 import warp as wp
 
-from pyRadMC import DIJ_TRUNCATION_RELATIVE, ECUT_MEV, PCUT_MEV
+from pyRadMC import DIJ_TRUNCATION_RELATIVE, ECUT_MEV, ELECTRON_MASS_MEV, PCUT_MEV
 from pyRadMC.backends.results import TransportResult
 from pyRadMC.backends.warp import kernels
 from pyRadMC.backends.warp.kernels import ENERGY_QUANTUM_MEV, GridInfo, Queue, Tables
 from pyRadMC.data.interface import CrossSectionSource
 from pyRadMC.geometry.grid import VoxelGrid
+from pyRadMC.geometry.phasespace import PhaseSpaceSource
 from pyRadMC.geometry.source import BeamletGridSource, ParallelBeamSource, PencilBeamSource
 from pyRadMC.scoring.dij import BatchedBeamletScorer, DijAssembler, DijResult
 from pyRadMC.scoring.dose import BatchedDoseScorer
-from pyRadMC.transport.particles import ELECTRON, PHOTON
+from pyRadMC.transport.particles import ELECTRON, PHOTON, POSITRON
 
 __all__ = ["WarpEngine"]
 
 _E_MAX_MARGIN = 1.0 + 1.0e-6  # table upper edge strictly above the primary energy
+
+# IAEA particle code (from PhaseSpaceSource.sample_batch) -> transport constant,
+# as a lookup indexed by the code (1/2/3); slot 0 is unused.
+_IAEA_TO_TRANSPORT = np.array([-1, PHOTON, ELECTRON, POSITRON], dtype=np.int32)
 
 
 def _upload_queue(capacity: int, device: str) -> Queue:
@@ -109,7 +114,7 @@ class WarpEngine:
 
     def run(
         self,
-        source: PencilBeamSource | ParallelBeamSource,
+        source: PencilBeamSource | ParallelBeamSource | PhaseSpaceSource,
         n_histories: int,
         n_batches: int,
         seed: int,
@@ -121,7 +126,11 @@ class WarpEngine:
         """Transport ``n_histories`` primaries; same contract as the reference engine.
 
         See :meth:`pyRadMC.backends.ref.engine.ReferenceEngine.run` for parameter
-        semantics — the two signatures are deliberately identical.
+        semantics — the two signatures are deliberately identical. A
+        :class:`~pyRadMC.geometry.phasespace.PhaseSpaceSource` is transported by
+        host-sampling each chunk of primaries and seeding the photon and electron
+        queues by kind; ``primary_kind`` is then ignored (each record carries its
+        own kind), and ``energy_emitted`` is booked from the sampled records.
         """
         if n_histories < 1:
             raise ValueError(f"need at least one history, got {n_histories}")
@@ -130,13 +139,16 @@ class WarpEngine:
                 f"n_histories={n_histories} not divisible by n_batches={n_batches}; "
                 "unequal batches would weight batch means inconsistently"
             )
-        if primary_kind not in ("photon", "electron"):
-            raise ValueError(f"unknown primary_kind {primary_kind!r}")
-        kind = PHOTON if primary_kind == "photon" else ELECTRON
+        is_phsp = isinstance(source, PhaseSpaceSource)
+        if not is_phsp:
+            if primary_kind not in ("photon", "electron"):
+                raise ValueError(f"unknown primary_kind {primary_kind!r}")
+            kind = PHOTON if primary_kind == "photon" else ELECTRON
 
         device = self.device
         gi, density, material = self._upload_grid(device)
-        tab = self._upload_tables(source.energy, pcut, ecut, device)
+        table_energy = source.max_energy if is_phsp else source.energy
+        tab = self._upload_tables(table_energy, pcut, ecut, device)
 
         chunk = min(self.chunk_size, n_histories)
         capacity = chunk * self.queue_factor
@@ -150,6 +162,7 @@ class WarpEngine:
         scorer = BatchedDoseScorer(self.grid, n_batches)
         per_batch = n_histories // n_batches
         energy_escaped = 0.0
+        energy_emitted = 0.0
 
         history = 0
         for _ in range(n_batches):
@@ -158,26 +171,47 @@ class WarpEngine:
             remaining = per_batch
             while remaining > 0:
                 n_chunk = min(chunk, remaining)
-                self._transport_chunk(
-                    source,
-                    kind,
-                    seed,
-                    history,
-                    n_chunk,
-                    gi,
-                    density,
-                    material,
-                    tab,
-                    queues,
-                    slots,
-                    edep,
-                    escaped,
-                    violations,
-                    pcut,
-                    ecut,
-                    transport_electrons,
-                    device,
-                )
+                if is_phsp:
+                    energy_emitted += self._transport_chunk_phsp(
+                        source,
+                        seed,
+                        history,
+                        n_chunk,
+                        gi,
+                        density,
+                        material,
+                        tab,
+                        queues,
+                        slots,
+                        edep,
+                        escaped,
+                        violations,
+                        pcut,
+                        ecut,
+                        transport_electrons,
+                        device,
+                    )
+                else:
+                    self._transport_chunk(
+                        source,
+                        kind,
+                        seed,
+                        history,
+                        n_chunk,
+                        gi,
+                        density,
+                        material,
+                        tab,
+                        queues,
+                        slots,
+                        edep,
+                        escaped,
+                        violations,
+                        pcut,
+                        ecut,
+                        transport_electrons,
+                        device,
+                    )
                 history += n_chunk
                 remaining -= n_chunk
             wp.synchronize_device(device)
@@ -192,11 +226,14 @@ class WarpEngine:
             scorer.end_batch(per_batch)
             energy_escaped += float(escaped.numpy()[0]) * ENERGY_QUANTUM_MEV
 
+        if not is_phsp:
+            energy_emitted = n_histories * source.energy
+
         dose = scorer.finalize()
         return TransportResult(
             dose=dose.dose,
             dose_sigma=dose.dose_sigma,
-            energy_emitted=n_histories * source.energy,
+            energy_emitted=energy_emitted,
             energy_deposited=dose.energy_deposited,
             energy_escaped=energy_escaped,
             n_histories=n_histories,
@@ -425,6 +462,108 @@ class WarpEngine:
             device,
         )
 
+    def _transport_chunk_phsp(
+        self,
+        source,
+        seed,
+        history_offset,
+        n_chunk,
+        gi,
+        density,
+        material,
+        tab,
+        queues,
+        slots,
+        edep,
+        escaped,
+        violations,
+        pcut,
+        ecut,
+        transport_electrons,
+        device,
+    ) -> float:
+        """Host-sample a phase-space chunk, seed the queues by kind, drain.
+
+        Returns the chunk's emitted energy: sum of ``weight * energy`` over the
+        sampled records, plus ``weight * 2 m_e c^2`` for each positron whose
+        annihilation photons the device books into deposited/escaped (so the
+        emitted = deposited + escaped ledger closes, as on the reference backend).
+        """
+        q_photon, q_photon_alt, q_electron, q_electron_alt = queues
+        for q in queues:
+            _reset_count(q, device)
+
+        batch = source.sample_batch(seed, history_offset, n_chunk)
+        pt = batch["particle_type"]
+        hist = (history_offset + np.arange(n_chunk, dtype=np.int64)).astype(np.int32)
+        transport_kind = _IAEA_TO_TRANSPORT[pt]
+
+        photon = pt == 1  # IAEA photon; electrons (2) and positrons (3) share the e- queue
+        charged = ~photon
+        self._seed_queue(
+            q_photon, seed, hist[photon], transport_kind[photon], batch, photon, device
+        )
+        self._seed_queue(
+            q_electron, seed, hist[charged], transport_kind[charged], batch, charged, device
+        )
+
+        self._drain_queues(
+            q_photon,
+            q_photon_alt,
+            q_electron,
+            q_electron_alt,
+            gi,
+            density,
+            material,
+            tab,
+            slots,
+            edep,
+            escaped,
+            violations,
+            pcut,
+            ecut,
+            transport_electrons,
+            device,
+        )
+
+        latent = np.where(pt == 3, 2.0 * ELECTRON_MASS_MEV, 0.0)
+        return float(
+            np.sum(
+                batch["weight"].astype(np.float64) * (batch["energy"].astype(np.float64) + latent)
+            )
+        )
+
+    def _seed_queue(self, queue, seed, hist_g, kind_g, batch, mask, device) -> None:
+        """Upload one kind-group's primaries and write them into ``queue``."""
+        n = int(hist_g.shape[0])
+        if n == 0:
+            _set_count(queue, 0, device)
+            return
+        cols = {
+            name: wp.array(batch[name][mask], dtype=float, device=device)
+            for name in ("energy", "x", "y", "z", "ux", "uy", "uz", "weight")
+        }
+        wp.launch(
+            kernels.generate_from_upload,
+            dim=n,
+            inputs=[
+                seed,
+                wp.array(hist_g, dtype=wp.int32, device=device),
+                wp.array(kind_g, dtype=wp.int32, device=device),
+                cols["energy"],
+                cols["x"],
+                cols["y"],
+                cols["z"],
+                cols["ux"],
+                cols["uy"],
+                cols["uz"],
+                cols["weight"],
+                queue,
+            ],
+            device=device,
+        )
+        _set_count(queue, n, device)
+
     def _drain_queues(
         self,
         q_photon,
@@ -546,6 +685,7 @@ class WarpEngine:
         gi.x_lo, gi.y_lo, gi.z_lo = self.grid.origin
         gi.x_hi, gi.y_hi, gi.z_hi = self.grid.upper_corner
         gi.sx, gi.sy, gi.sz = self.grid.spacing
+        gi.nx = self.grid.shape[0]
         gi.ny = self.grid.shape[1]
         gi.nz = self.grid.shape[2]
         gi.n_voxels = int(np.prod(self.grid.shape))

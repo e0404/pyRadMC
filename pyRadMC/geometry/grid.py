@@ -49,17 +49,29 @@ def point_inside(
     return not (z < z_lo or z >= z_hi)
 
 
-def point_axis_index(position: float, origin: float, spacing: float) -> int:
+def point_axis_index(position: float, origin: float, spacing: float, n: int) -> int:
     """Voxel index along one axis for a position the caller guarantees inside.
 
     ``floor`` (not ``int()``, which truncates toward zero) keeps the half-open
     convention correct for positions below the origin during the containment
     check race — identical semantics on the host and under Warp, where
     ``int(math.floor(...))`` compiles to a floor-then-cast.
+
+    The result is clamped to ``[0, n - 1]``. A position within a rounding ULP of
+    the upper face passes :func:`point_inside` (``pos < hi``) yet
+    ``floor((pos - origin) / spacing)`` can round up to ``n`` — notably in float32
+    under Warp — which would index out of bounds; the clamp keeps that point in its
+    (last) voxel. Only such ULP-edge points are affected, so the half-open
+    convention is unchanged for every interior point (test-pinned).
     """
     # Host math.floor already returns int, but the Warp compile of this same
     # source gets a float32 floor; the cast is what makes both return an index.
-    return int(math.floor((position - origin) / spacing))  # noqa: RUF046
+    idx = int(math.floor((position - origin) / spacing))  # noqa: RUF046
+    if idx < 0:
+        return 0
+    if idx >= n:
+        return n - 1
+    return idx
 
 
 def slab_entry_distance(
@@ -211,9 +223,9 @@ class VoxelGrid:
     def voxel_index(self, x: float, y: float, z: float) -> tuple[int, int, int]:
         """Voxel containing the position; the caller guarantees ``contains``."""
         return (
-            point_axis_index(x, self.origin[0], self.spacing[0]),
-            point_axis_index(y, self.origin[1], self.spacing[1]),
-            point_axis_index(z, self.origin[2], self.spacing[2]),
+            point_axis_index(x, self.origin[0], self.spacing[0], self.shape[0]),
+            point_axis_index(y, self.origin[1], self.spacing[1], self.shape[1]),
+            point_axis_index(z, self.origin[2], self.spacing[2], self.shape[2]),
         )
 
     def distance_to_entry(

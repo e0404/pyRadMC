@@ -19,14 +19,14 @@ Two honest caveats:
   For photons over a short gap this is a <1% effect; for the ~1% contamination
   electrons it slightly overstates their (surface/buildup) contribution.
 
-The phase-space source is reference-backend only (the warp engine builds primaries
-in-kernel from analytic source parameters), so this runs on ``ref`` and is not
-fast. Keep ``--histories`` modest for a quick look. Run from the repository root::
+By default this runs on the Warp backend (GPU if a CUDA device is present, else
+Warp-CPU), falling back to the reference engine if Warp is not installed. Run from
+the repository root::
 
-    python examples/phase5_phasespace_demo.py [PHSP] [--histories N] [--batches B]
+    python examples/phase5_phasespace_demo.py [PHSP] [--histories N] [--backend B]
 
 Renders ``phase5_phasespace_demo.png`` and ``phase5_phasespace_demo.csv`` beside
-this script. Wall-clock is reference-CPU and not a benchmark.
+this script. Wall-clock is machine-dependent and not a benchmark.
 """
 
 from __future__ import annotations
@@ -41,11 +41,9 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 
-from pyRadMC.backends.ref.engine import ReferenceEngine
 from pyRadMC.data.analytic import AnalyticCrossSections
 from pyRadMC.geometry.grid import VoxelGrid
 from pyRadMC.geometry.phasespace import PhaseSpaceSource
-from pyRadMC.rng.host import HostRNG
 
 DEFAULT_PHSP = Path("D:/data/phsp/Varian_TrueBeam6MV_01.IAEAheader")
 
@@ -56,7 +54,7 @@ DEFAULT_PHSP = Path("D:/data/phsp/Varian_TrueBeam6MV_01.IAEAheader")
 FRONT_Z_CM = 30.0
 DEPTH_CM = 30.0
 HALF_WIDTH_CM = 15.0
-SPACING = (0.5, 0.5, 0.5)
+SPACING = (0.2, 0.2, 0.2)
 # The uncollimated divergent beam spreads fluence over a wide area, so the
 # on-axis column is starved of deposits; average the PDD over a central column a
 # few cm wide (the field is broad) to get a usable curve at demo statistics.
@@ -91,15 +89,35 @@ def lateral_profile(dose: np.ndarray, grid: VoxelGrid, iz: int) -> tuple[np.ndar
     return x, dose[:, cj, iz]
 
 
+def make_engine(backend: str, grid: VoxelGrid, xs: AnalyticCrossSections):
+    """Build the transport engine; 'auto' prefers Warp GPU, then Warp CPU, then ref."""
+    if backend in ("auto", "warp"):
+        try:
+            import warp as wp
+
+            from pyRadMC.backends.warp.engine import WarpEngine
+
+            device = "cuda:0" if wp.is_cuda_available() else "cpu"
+            return WarpEngine(grid=grid, cross_sections=xs, device=device), f"warp:{device}"
+        except ImportError:
+            if backend == "warp":
+                raise
+    from pyRadMC.backends.ref.engine import ReferenceEngine
+    from pyRadMC.rng.host import HostRNG
+
+    return ReferenceEngine(grid=grid, cross_sections=xs, rng=HostRNG()), "ref"
+
+
 def main() -> None:
     """Run the demo and render the figure + CSV."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument(
         "phsp", nargs="?", type=Path, default=DEFAULT_PHSP, help="IAEA .IAEAheader path"
     )
-    parser.add_argument("--histories", type=int, default=30_000)
-    parser.add_argument("--batches", type=int, default=6)
+    parser.add_argument("--histories", type=int, default=1_000_000)
+    parser.add_argument("--batches", type=int, default=10)
     parser.add_argument("--seed", type=int, default=20260711)
+    parser.add_argument("--backend", choices=("auto", "warp", "ref"), default="auto")
     args = parser.parse_args()
 
     if not args.phsp.exists():
@@ -110,7 +128,7 @@ def main() -> None:
 
     grid = build_grid()
     xs = AnalyticCrossSections(geometry_densities=grid.max_density_by_material())
-    engine = ReferenceEngine(grid=grid, cross_sections=xs, rng=HostRNG())
+    engine, backend_name = make_engine(args.backend, grid, xs)
 
     print(f"loading {args.phsp.name} ...")
     with warnings.catch_warnings():
@@ -118,7 +136,7 @@ def main() -> None:
         source = PhaseSpaceSource(args.phsp)
     print(f"  {len(source):,} transportable particles; phantom {grid.shape} @ {grid.spacing} cm")
 
-    print(f"transporting {args.histories:,} histories on the reference backend ...")
+    print(f"transporting {args.histories:,} histories on {backend_name} ...")
     t0 = time.perf_counter()
     result = engine.run(source, n_histories=args.histories, n_batches=args.batches, seed=args.seed)
     source.close()
@@ -157,7 +175,10 @@ def main() -> None:
         writer.writerows(zip(depth, pdd_pct, strict=True))
     print(f"saved {stem.name}.csv")
 
-    print(f"  dmax at {depth[iz_max]:.1f} cm; {args.histories:,} histories in {dt:.1f} s (ref CPU)")
+    print(
+        f"  dmax at {depth[iz_max]:.1f} cm; {args.histories:,} histories "
+        f"in {dt:.1f} s ({backend_name})"
+    )
     print("  uncollimated field, air gap = vacuum; wall-clock is not a benchmark")
 
 

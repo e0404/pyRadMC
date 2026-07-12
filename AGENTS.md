@@ -271,16 +271,29 @@ A phase is not done when its tests pass. Before a phase may exit:
 **Phase 5: tabulated data, phase space, pyRadPlan adapter — UNDERWAY,
 begun 2026-07-12.** The maintainer's explicit go-ahead was given 2026-07-12;
 the phase-space source is the workstream in progress (most independent of the
-three). Shipped so far, on the ``ref`` backend: the IAEA phase-space reader
+three). Shipped so far, on **both backends**: the IAEA phase-space reader
 (``geometry/phasespace.py`` — byte layout confirmed against a reference
-implementation and a real file, not memory) and ``PhaseSpaceSource``, which
-required the source contract to carry a per-particle ``kind`` and statistical
-``weight`` (``Primary`` gained both, additive; ``run`` weights the emitted-energy
-book and, for a positron primary, adds the ``2 m_e c^2`` of annihilation photons
-its kinetic energy does not account for, or the ledger cannot close). The warp
-port is carried forward — warp builds primaries in-kernel from analytic source
-parameters and rejects a phase-space source by type, so this source is ``ref``
-only for now. The Compton-splitting ``N > 1`` turn-on this workstream was meant to
+implementation and a real file, not memory; validated against a 1.3 GB / 52.4M-
+particle Varian TrueBeam file, which drove a streaming mmap reader, an on-disk-
+count-wins tolerance for a stale PARTICLES header, and skip-with-count for stray
+neutron/proton records) and ``PhaseSpaceSource``, which required the source
+contract to carry a per-particle ``kind`` and statistical ``weight`` (``Primary``
+gained both, additive; ``run`` weights the emitted-energy book and, for a positron
+primary, adds the ``2 m_e c^2`` of annihilation photons its kinetic energy does not
+account for, or the ledger cannot close). The **warp port** is done: the engine
+host-samples each chunk (``sample_batch``), splits by kind, and seeds the existing
+photon/electron queues — which already carry ``kind``/``weight`` and already kind-
+separate their kernels — so transport is unchanged; cross-backend chi-squared,
+energy-balance and chunk-invariance tests pass on CPU and CUDA. ``sample_batch`` is
+**vectorized**: record indices come from one ``PCG64(seed)`` stream advanced to the
+chunk offset (chunk-invariant, but a *different* stream from ``emit``'s per-history
+spawn, so the backends draw independent records — emitted energy agrees only
+statistically, and the exact-match test was relaxed accordingly) and records are
+gathered from the mmap through a structured dtype in one fancy-indexed read. This
+removed the per-history ``SeedSequence`` construction that dominated the warp path
+(measured ~370 ms of 450 ms per 32k chunk); the demo now runs 300k histories in
+~0.4 s on a 4070. ``examples/phase5_phasespace_demo.py`` now defaults to Warp (GPU if
+present). The Compton-splitting ``N > 1`` turn-on this workstream was meant to
 unlock was measured and stays **off** (see the carried item below). Phases 0
 through 4 have exited. Phase 4's exit record is reproduced below — it defines
 the machinery Phase 5 builds on and carries the warnings that target Phase 5;
