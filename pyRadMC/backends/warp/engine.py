@@ -714,9 +714,14 @@ class WarpEngine:
                 field,
                 wp.array(getattr(host, field).astype(np.float32), dtype=float, device=device),
             )
+        tab.coherent_x = wp.array(host.coherent_x.astype(np.float32), dtype=float, device=device)
+        tab.coherent_cumulative = wp.array(
+            host.coherent_cumulative.astype(np.float32), dtype=float, device=device
+        )
         tab.p_log_e_min = host.photon_log_e_min
         tab.p_inv_dlog = host.photon_inv_dlog
         tab.e_log_e_min = host.electron_log_e_min
         tab.e_inv_dlog = host.electron_inv_dlog
         tab.n_points = host.n_points
+        tab.n_coherent = host.n_coherent
         return tab

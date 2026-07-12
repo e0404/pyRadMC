@@ -37,6 +37,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 import numpy.typing as npt
 
+from pyRadMC import RAYLEIGH_MOMENTUM_TRANSFER_PER_MEV
 from pyRadMC.data.handles import Table1D, Table2D
 from pyRadMC.data.interface import PhotonProcess
 from pyRadMC.data.materials import MATERIALS
@@ -56,6 +57,14 @@ __all__ = [
 TABLE_POINTS: int = 2048
 """Default nodes per grid. Sized so interpolation error sits far below the 2e-4
 parity budget of the table tests; memory is trivial at any plausible material count."""
+
+COHERENT_POINTS: int = 512
+"""Nodes on the coherent form-factor momentum-transfer grid; the cumulative is smooth
+and the sampler inverts it, so far fewer nodes than the energy grids suffice."""
+
+_COHERENT_X_MIN_FRACTION: float = 1.0e-7
+"""Lowest momentum-transfer node as a fraction of the maximum: small enough that the
+neglected coherent mass below it (~F(0)^2 x_min^2 / 2) is negligible."""
 
 MAJORANT_HEADROOM: float = 1.0 + 1.0e-6
 """Relative headroom on the majorant nodes: ~8 float32 ulps above the float64
@@ -173,6 +182,13 @@ class CrossSectionTables:
     moller: npt.NDArray[np.float64]
     csda_range: npt.NDArray[np.float64]
     scattering_power: npt.NDArray[np.float64]
+    # Coherent form-factor cumulative A(x) for angular sampling: abscissae ``coherent_x``
+    # (momentum transfer, 1/angstrom, ascending) and ``coherent_cumulative`` per material.
+    # The default source yields the flat (Thomson) cumulative; the tabulated one its EPDL
+    # form factor. Inverted by the coherent sampler with bisection, so no log-grid metadata.
+    coherent_x: npt.NDArray[np.float64]
+    coherent_cumulative: npt.NDArray[np.float64]
+    n_coherent: int
 
 
 def build_cross_section_tables(
@@ -258,6 +274,15 @@ def build_cross_section_tables(
     photon_log_e_min, photon_inv_dlog = grid_metadata(photon_energies)
     electron_log_e_min, electron_inv_dlog = grid_metadata(electron_energies)
 
+    # Coherent form-factor cumulative: the momentum-transfer grid spans up to the maximum
+    # transfer at e_max (backscatter), queried per material through the source so the flat
+    # (Thomson) default and the tabulated form factor flatten the same way.
+    x_max = RAYLEIGH_MOMENTUM_TRANSFER_PER_MEV * e_max
+    coherent_x = np.geomspace(x_max * _COHERENT_X_MIN_FRACTION, x_max, COHERENT_POINTS)
+    coherent_cumulative = np.stack(
+        [source.coherent_cumulative(coherent_x, material) for material in range(n_materials)]
+    )
+
     return CrossSectionTables(
         n_points=n_points,
         ecut=ecut,
@@ -272,5 +297,8 @@ def build_cross_section_tables(
         mu_pair=channels[PhotonProcess.PAIR],
         mu_rayleigh=channels[PhotonProcess.RAYLEIGH],
         majorant=majorant,
+        coherent_x=coherent_x,
+        coherent_cumulative=coherent_cumulative,
+        n_coherent=COHERENT_POINTS,
         **electron_tables,
     )

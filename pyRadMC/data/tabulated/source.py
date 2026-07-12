@@ -22,6 +22,7 @@ from pyRadMC.data.interface import CrossSectionSource, PhotonProcess
 from pyRadMC.data.materials import MATERIALS, WATER
 from pyRadMC.data.tables import lookup_loglinear_2d
 from pyRadMC.data.tabulated.model import TabulatedData
+from pyRadMC.physics.rayleigh import sample_coherent_cos_theta_form_factor
 
 __all__ = ["TabulatedCrossSections"]
 
@@ -90,8 +91,48 @@ class TabulatedCrossSections(CrossSectionSource):
         self._electron = {
             name: np.asarray(getattr(data, name), dtype=np.float64) for name in _ELECTRON_TABLES
         }
+        # Coherent form-factor sampling data (None -> Thomson fallback).
+        self._coherent_x: np.ndarray | None = None
+        self._coherent_cumulative: np.ndarray | None = None
+        self._n_coherent = 0
+        if data.coherent_x is not None and data.coherent_cumulative is not None:
+            self._coherent_x = np.asarray(data.coherent_x, dtype=np.float64)
+            self._coherent_cumulative = np.asarray(data.coherent_cumulative, dtype=np.float64)
+            self._n_coherent = int(self._coherent_x.shape[0])
 
     # -- photons ------------------------------------------------------------
+
+    def sample_coherent_cos_theta(self, energy: float, material: int, rng_state: object) -> float:
+        """Sample the coherent cosine from the compiled atomic form factor.
+
+        Falls back to the base Thomson sampler if the table carries no form-factor data
+        (``coherent_x``/``coherent_cumulative`` unset).
+        """
+        if self._coherent_cumulative is None or self._coherent_x is None:
+            return super().sample_coherent_cos_theta(energy, material, rng_state)
+        return sample_coherent_cos_theta_form_factor(
+            self._coherent_cumulative[material],
+            self._coherent_x,
+            self._n_coherent,
+            energy,
+            rng_state,
+        )
+
+    def coherent_cumulative(self, x_grid: np.ndarray, material: int) -> np.ndarray:
+        """Resample the compiled coherent cumulative onto ``x_grid`` for the kernel tables.
+
+        Falls back to the base flat (Thomson) cumulative if no form-factor data. The
+        cumulative is a monotone function of ``x``, so linear resampling onto a grid
+        within its range is faithful; the sampler only uses cumulative ratios.
+        """
+        if self._coherent_cumulative is None or self._coherent_x is None:
+            return super().coherent_cumulative(x_grid, material)
+        resampled = np.interp(
+            np.asarray(x_grid, dtype=np.float64),
+            self._coherent_x,
+            self._coherent_cumulative[material],
+        )
+        return np.asarray(resampled, dtype=np.float64)
 
     def mu_over_rho(self, energy: float, material: int, process: int) -> float:
         """Mass attenuation coefficient for one channel, in cm^2/g."""

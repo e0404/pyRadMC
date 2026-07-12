@@ -35,7 +35,7 @@ from enum import Enum
 
 import numpy as np
 
-from pyRadMC import ECUT_MEV, PCUT_MEV
+from pyRadMC import ECUT_MEV, PCUT_MEV, RAYLEIGH_MOMENTUM_TRANSFER_PER_MEV
 from pyRadMC.data.analytic import AnalyticCrossSections
 from pyRadMC.data.materials import WATER
 from pyRadMC.data.tables import TABLE_POINTS
@@ -45,6 +45,7 @@ from pyRadMC.data.tabulated.model import TabulatedData
 __all__ = ["ElectronStoppingStrategy", "compile_water"]
 
 _WATER_FORMULA = {1: 2, 8: 1}  # H2O by atom count
+_COHERENT_GRID_POINTS = 512  # momentum-transfer nodes for the coherent form-factor cumulative
 
 
 class ElectronStoppingStrategy(str, Enum):
@@ -92,6 +93,15 @@ def compile_water(
     mixed = epdl.material_mu_over_rho(channels, fractions, photon_energies)
     mu_over_rho = {process: values[np.newaxis, :] for process, values in mixed.items()}
 
+    # -- coherent form factor: EPDL MF=27, mixed by atom count ----------------
+    x_max = RAYLEIGH_MOMENTUM_TRANSFER_PER_MEV * e_max  # max momentum transfer, backscatter
+    coherent_x = np.geomspace(x_max * 1.0e-7, x_max, _COHERENT_GRID_POINTS)
+    form_factors = epdl.element_coherent_form_factor(epdl_text, elements=set(_WATER_FORMULA))
+    form_factor_squared = epdl.material_form_factor_squared(
+        form_factors, _WATER_FORMULA, coherent_x
+    )
+    coherent_cumulative = epdl.coherent_form_factor_cumulative(coherent_x, form_factor_squared)
+
     # -- elastic scattering power: EEDL, mixed by mass fraction ---------------
     scattering_elements = eedl.element_scattering_power(eedl_text, elements=set(_WATER_FORMULA))
     scattering = eedl.material_scattering_power(scattering_elements, fractions, electron_energies)
@@ -117,9 +127,11 @@ def compile_water(
         delta_cut=cut,
         materials=("water",),
         provenance=(
-            f"EPDL2023 photons + EEDL2023 elastic scattering; electron stopping: "
-            f"{strategy.value} (analytic ICRU-37 on grid); delta_cut={cut} MeV"
+            f"EPDL2023 photons + coherent form factors + EEDL2023 elastic scattering; "
+            f"electron stopping: {strategy.value} (analytic ICRU-37 on grid); delta_cut={cut} MeV"
         ),
+        coherent_x=coherent_x,
+        coherent_cumulative=coherent_cumulative[np.newaxis, :],
     )
 
 

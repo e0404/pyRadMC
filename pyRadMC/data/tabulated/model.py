@@ -40,3 +40,9 @@ class TabulatedData:
     delta_cut: float  # MeV; the cut the restricted quantities were integrated at
     materials: tuple[str, ...]  # material names, aligned with the array rows
     provenance: str  # human-readable source citation, carried for auditability
+    # Coherent (Rayleigh) angular sampling: the form-factor cumulative A(x) = int_0^x
+    # F^2(x') x' dx' on a shared momentum-transfer grid ``coherent_x`` (inverse angstroms,
+    # ascending). Optional: a table compiled without MF=27 form factors leaves both None,
+    # and the source falls back to Thomson coherent scattering.
+    coherent_x: np.ndarray | None = None  # (n_x,) 1/angstrom
+    coherent_cumulative: np.ndarray | None = None  # (n_materials, n_x)

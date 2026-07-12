@@ -92,6 +92,11 @@ AGENTS.md 7.2 for the full record and the emission-time-splitting alternative.
 ELECTRON_MASS_MEV: float = 0.510_998_950_69
 """Electron rest mass energy in MeV (CODATA 2022)."""
 
+RAYLEIGH_MOMENTUM_TRANSFER_PER_MEV: float = 80.65543
+"""Coherent-scattering momentum-transfer coefficient: the tabulated form-factor abscissa
+is ``x [1/angstrom] = this * E[MeV] * sin(theta/2)``, i.e. ``1/hc`` with
+``hc = 0.012_398_42 MeV*angstrom`` (CODATA 2022). EPDL MF=27 tabulates ``F`` against ``x``."""
+
 __all__ = [
     "DIJ_TRUNCATION_RELATIVE",
     "ECUT_MEV",
@@ -101,5 +106,6 @@ __all__ = [
     "PHOTON_ROULETTE_SURVIVAL",
     "PHOTON_ROULETTE_WEIGHT_CAP",
     "PHOTON_SPLIT_N",
+    "RAYLEIGH_MOMENTUM_TRANSFER_PER_MEV",
     "__version__",
 ]

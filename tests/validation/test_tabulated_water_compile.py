@@ -18,6 +18,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from pyRadMC.backends.ref.engine import ReferenceEngine
 from pyRadMC.data.analytic import AnalyticCrossSections
 from pyRadMC.data.interface import PhotonProcess
 from pyRadMC.data.materials import WATER
@@ -25,6 +26,10 @@ from pyRadMC.data.tabulated.format import load_tables, save_tables
 from pyRadMC.data.tabulated.model import TabulatedData
 from pyRadMC.data.tabulated.precompile import compile_water
 from pyRadMC.data.tabulated.source import TabulatedCrossSections
+from pyRadMC.geometry.grid import VoxelGrid
+from pyRadMC.geometry.source import ParallelBeamSource
+from pyRadMC.rng.host import HostRNG
+from tests.conftest import SEED, assert_chi2_consistent_batched
 
 NIST_WATER_MU_OVER_RHO = {1.0: 0.0707, 2.0: 0.0493, 6.0: 0.0277, 10.0: 0.0222, 15.0: 0.0194}
 ECUT = 0.2
@@ -105,5 +110,64 @@ def test_compiled_round_trips_and_flattens(water: TabulatedData, tmp_path: Path)
         water.mu_over_rho[PhotonProcess.COMPTON],
         rtol=1e-4,
     )
+    assert reloaded.coherent_x is not None and reloaded.coherent_cumulative is not None
     tables = TabulatedCrossSections(reloaded).build_tables(ecut=ECUT, pcut=0.05, e_max=30.0)
     assert tables.mu_compton.shape[0] == 1
+
+
+@pytest.mark.validation
+def test_compiled_coherent_scattering_is_forward_peaked(water: TabulatedData) -> None:
+    """The EPDL form factor forward-peaks coherent scattering, increasingly with energy.
+
+    Exercises the whole coherent chain end to end (EPDL MF=27 -> mix -> cumulative ->
+    compile -> loader -> sampler): unlike the Thomson limit (mean cosine 0, mean angle
+    90 deg), the atomic form factor concentrates coherent scattering forward, and more so
+    as the accessible momentum transfer grows with energy. Measured mean scattering angle
+    for water falls from ~35 deg at 30 keV to well under a degree at MeV energies.
+    """
+    xs = TabulatedCrossSections(water)
+    state = HostRNG().init_state(SEED, 0)
+
+    def mean_cos(energy: float, n: int = 20_000) -> float:
+        samples = [xs.sample_coherent_cos_theta(energy, WATER, state) for _ in range(n)]
+        return float(np.mean(samples))
+
+    mu_soft = mean_cos(0.05)
+    mu_hard = mean_cos(6.0)
+    assert 0.0 < mu_soft < 0.99  # forward of Thomson (0), but not yet fully forward
+    assert mu_hard > 0.999  # strongly forward at MeV energies
+    assert mu_hard > mu_soft
+
+
+@pytest.mark.validation
+def test_tabulated_dose_agrees_across_backends(water: TabulatedData) -> None:
+    """Ref and Warp transport of the compiled backend agree (chi-squared over high dose).
+
+    The capstone for the coherent form-factor port: both backends now sample the same
+    single-source form-factor coherent angle (Warp compiles it from the same physics
+    file), so the whole tabulated transport is statistically equivalent across targets
+    (AGENTS.md 2.3). Small phantom, KERMA mode to keep the reference cheap.
+    """
+    from pyRadMC.backends.warp.engine import WarpEngine
+
+    grid = VoxelGrid.uniform_water(shape=(8, 8, 16), spacing=(2.0, 2.0, 1.0))
+    xs = TabulatedCrossSections(water, geometry_densities=grid.max_density_by_material())
+    source = ParallelBeamSource(energy=6.0, z=-1.0, x_range=(0.0, 16.0), y_range=(0.0, 16.0))
+
+    ref = ReferenceEngine(grid=grid, cross_sections=xs, rng=HostRNG()).run(
+        source, n_histories=6_000, n_batches=12, seed=SEED, transport_electrons=False
+    )
+    warp = WarpEngine(grid=grid, cross_sections=xs, device="cpu").run(
+        source, n_histories=24_000, n_batches=12, seed=SEED, transport_electrons=False
+    )
+    mask = ref.dose > 0.1 * ref.dose.max()
+    mask &= (ref.dose_sigma > 0.0) & (warp.dose_sigma > 0.0)
+    assert_chi2_consistent_batched(
+        ref.dose,
+        ref.dose_sigma,
+        ref.n_batches,
+        warp.dose,
+        warp.dose_sigma,
+        warp.n_batches,
+        mask=mask,
+    )

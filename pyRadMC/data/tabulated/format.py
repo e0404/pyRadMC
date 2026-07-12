@@ -51,12 +51,17 @@ def save_tables(data: TabulatedData, path: Path | str, *, dtype: type = np.float
         arrays[f"mu_{proc}"] = data.mu_over_rho[proc].astype(dtype)
     for field in _ELECTRON_FIELDS:
         arrays[field] = getattr(data, field).astype(dtype)
+    has_coherent = data.coherent_x is not None and data.coherent_cumulative is not None
+    if data.coherent_x is not None and data.coherent_cumulative is not None:
+        arrays["coherent_x"] = data.coherent_x.astype(np.float64)  # abscissa: full precision
+        arrays["coherent_cumulative"] = data.coherent_cumulative.astype(dtype)
     manifest = {
         "version": FORMAT_VERSION,
         "provenance": data.provenance,
         "delta_cut": data.delta_cut,
         "materials": list(data.materials),
         "processes": processes,
+        "has_coherent": has_coherent,
     }
     arrays["_manifest"] = np.array(json.dumps(manifest))
     with path.open("wb") as handle:
@@ -87,4 +92,8 @@ def load_tables(path: Path | str) -> TabulatedData:
             delta_cut=float(manifest["delta_cut"]),
             materials=tuple(manifest["materials"]),
             provenance=str(manifest["provenance"]),
+            coherent_x=npz["coherent_x"] if manifest.get("has_coherent") else None,
+            coherent_cumulative=(
+                npz["coherent_cumulative"] if manifest.get("has_coherent") else None
+            ),
         )

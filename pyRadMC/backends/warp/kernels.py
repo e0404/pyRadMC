@@ -91,6 +91,7 @@ sample_compton_energy_ratio = _p.sample_compton_energy_ratio
 compton_cos_theta = _p.compton_cos_theta
 compton_electron_cos_theta = _p.compton_electron_cos_theta
 sample_rayleigh_cos_theta = _p.sample_rayleigh_cos_theta
+sample_coherent_cos_theta_form_factor = _p.sample_coherent_cos_theta_form_factor
 rotate_direction = _p.rotate_direction
 sample_isotropic_direction = _p.sample_isotropic_direction
 sample_moller_delta_energy = _p.sample_moller_delta_energy
@@ -140,11 +141,14 @@ class Tables:
     moller: wp.array2d(dtype=float)
     csda_range: wp.array2d(dtype=float)
     scattering_power: wp.array2d(dtype=float)
+    coherent_x: wp.array(dtype=float)
+    coherent_cumulative: wp.array2d(dtype=float)
     p_log_e_min: float
     p_inv_dlog: float
     e_log_e_min: float
     e_inv_dlog: float
     n_points: int
+    n_coherent: int
 
 
 @wp.struct
@@ -417,7 +421,9 @@ def photon_kernel(
         process = select_photon_process(mu_compton, mu_photo, mu_pair, mu_rayleigh, state)
 
         if process == PhotonProcess.RAYLEIGH:
-            cos_coherent = sample_rayleigh_cos_theta(state)
+            cos_coherent = sample_coherent_cos_theta_form_factor(
+                tab.coherent_cumulative[mat], tab.coherent_x, tab.n_coherent, e, state
+            )
             phi = 2.0 * math.pi * uniform(state)
             ux, uy, uz = rotate_direction(ux, uy, uz, cos_coherent, phi)
         elif process == PhotonProcess.COMPTON:

@@ -34,8 +34,11 @@ from pyRadMC.data.tabulated.endf import read_tab1_by_mf
 __all__ = [
     "MT_TO_PROCESS",
     "STANDARD_ATOMIC_WEIGHT",
+    "coherent_form_factor_cumulative",
+    "element_coherent_form_factor",
     "element_photon_channels",
     "mass_fractions_from_formula",
+    "material_form_factor_squared",
     "material_mu_over_rho",
 ]
 
@@ -169,3 +172,78 @@ def _resample_loglog(
     out = np.asarray(np.exp(log_mu_dst), dtype=np.float64)
     out[energy_dst < energy_src[positive][0]] = 0.0
     return out
+
+
+def element_coherent_form_factor(
+    text: str, elements: Iterable[int] | None = None
+) -> dict[int, tuple[np.ndarray, np.ndarray]]:
+    """Per-element atomic coherent-scattering form factor from EPDL MF=27/MT=502.
+
+    Returns ``{Z: (x, F)}`` where ``x`` is the momentum-transfer variable in inverse
+    angstroms (see :data:`RAYLEIGH_MOMENTUM_TRANSFER_PER_MEV`) and ``F`` the atomic form
+    factor, ``F(0) = Z``. No unit conversion or atomic weight is needed — the form factor
+    is a per-atom angular shape. ``elements`` behaves as in :func:`element_photon_channels`.
+    """
+    want = None if elements is None else set(elements)
+    sections = read_tab1_by_mf(text, 27)
+    out: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+    for (mat, mt), (x, form_factor) in sections.items():
+        if mt != 502:  # MF=27 also carries incoherent scattering functions (MT=504)
+            continue
+        z = mat // 100
+        if want is not None and z not in want:
+            continue
+        out[z] = (np.asarray(x, dtype=np.float64), np.asarray(form_factor, dtype=np.float64))
+    if want is not None and want - set(out):
+        raise KeyError(f"elements {sorted(want - set(out))} not found in the EPDL MF=27 text")
+    return out
+
+
+def material_form_factor_squared(
+    elements: Mapping[int, tuple[np.ndarray, np.ndarray]],
+    atom_counts: Mapping[int, float],
+    x_grid: np.ndarray,
+) -> np.ndarray:
+    r"""Mix per-element form factors into a material's ``F^2(x)`` on ``x_grid``.
+
+    Under the independent-atom approximation the molecular coherent cross section is the
+    sum of the atomic ones, so the material angular shape is
+    ``F^2_material(x) = sum_i n_i F_i^2(x)`` with ``n_i`` the atom count of element ``i``
+    (water: ``{1: 2, 8: 1}``). Only the *shape* matters — the coherent cross-section
+    magnitude comes from MF=23/MT=502 — so any consistent per-atom count works.
+    """
+    grid = np.asarray(x_grid, dtype=np.float64)
+    total = np.zeros_like(grid)
+    for z, count in atom_counts.items():
+        x_src, form_factor = elements[z]
+        total += count * _form_factor_on_grid(x_src, form_factor, grid) ** 2
+    return total
+
+
+def coherent_form_factor_cumulative(
+    x_grid: np.ndarray, form_factor_squared: np.ndarray
+) -> np.ndarray:
+    r"""Cumulative ``A(x) = \int_0^x F^2(x') x' dx'`` the coherent sampler inverts.
+
+    ``x' dx'`` is the coherent Jacobian ``d(x^2)/2``, so this is the running integral of
+    ``F^2`` over squared momentum transfer; monotone increasing from zero (``A[0] = 0``,
+    the tiny mass below the grid's first node is neglected). Trapezoidal on ``x_grid``.
+    """
+    integrand = np.asarray(form_factor_squared, dtype=np.float64) * np.asarray(
+        x_grid, dtype=np.float64
+    )
+    steps = np.diff(x_grid) * 0.5 * (integrand[1:] + integrand[:-1])
+    return np.concatenate(([0.0], np.cumsum(steps)))
+
+
+def _form_factor_on_grid(x_src: np.ndarray, f_src: np.ndarray, x_grid: np.ndarray) -> np.ndarray:
+    """Interpolate a form factor onto ``x_grid``, linear in log-log.
+
+    Held flat below its first positive abscissa: the ``x = 0`` node (``F = Z``) cannot
+    enter a log interpolation, and ``F`` is flat there anyway.
+    """
+    positive = x_src > 0.0
+    log_x = np.log(x_src[positive])
+    log_f = np.log(f_src[positive])
+    log_f_grid = np.interp(np.log(x_grid), log_x, log_f, left=log_f[0], right=log_f[-1])
+    return np.asarray(np.exp(log_f_grid), dtype=np.float64)

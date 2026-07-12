@@ -25,7 +25,11 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 
+import numpy as np
+
 if TYPE_CHECKING:
+    import numpy.typing as npt
+
     from pyRadMC.data.tables import CrossSectionTables
 
 __all__ = ["CrossSectionSource", "PhotonProcess"]
@@ -88,6 +92,34 @@ class CrossSectionSource(ABC):
 
         See Woodcock et al. (1965), ANL-7050.
         """
+
+    def sample_coherent_cos_theta(self, energy: float, material: int, rng_state: object) -> float:
+        """Sample the coherent (Rayleigh) polar scattering cosine.
+
+        The default is the Thomson distribution (zero-momentum-transfer, flat form
+        factor); a source with real atomic form-factor data (the tabulated backend)
+        overrides this to sample the forward-peaked coherent distribution. Kept on the
+        source, not as a free function, because the angular shape *is* cross-section data
+        (AGENTS.md 2.6): the sampling math lives in :mod:`pyRadMC.physics.rayleigh`, the
+        data that selects it lives here.
+        """
+        from pyRadMC.physics.rayleigh import sample_rayleigh_cos_theta
+
+        return sample_rayleigh_cos_theta(rng_state)
+
+    def coherent_cumulative(
+        self, x_grid: npt.NDArray[np.float64], material: int
+    ) -> npt.NDArray[np.float64]:
+        r"""Return the coherent form-factor cumulative ``A(x)=\int_0^x F^2 x' dx'`` on ``x_grid``.
+
+        This is the flattened, kernel-consumable face of :meth:`sample_coherent_cos_theta`:
+        :func:`~pyRadMC.data.tables.build_cross_section_tables` calls it per material to
+        fill the table the Warp kernel inverts. The default is the flat form factor,
+        ``A(x) = x^2/2``, which the sampler inverts to the Thomson distribution — so an
+        analytic (zero-coherent) source needs no override, and a form-factor source
+        (tabulated) resamples its compiled cumulative onto ``x_grid``.
+        """
+        return 0.5 * np.asarray(x_grid, dtype=np.float64) ** 2
 
     # -- electrons ----------------------------------------------------------
 

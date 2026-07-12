@@ -71,7 +71,6 @@ from pyRadMC.physics.compton import (
 )
 from pyRadMC.physics.direction import rotate_direction
 from pyRadMC.physics.path import sample_path_length
-from pyRadMC.physics.rayleigh import sample_rayleigh_cos_theta
 from pyRadMC.physics.roulette import roulette_weight
 from pyRadMC.rng import RNGState, uniform
 from pyRadMC.transport.particles import (
@@ -185,9 +184,10 @@ def photon_steps(
         process = select_photon_process(mu_compton, mu_photo, mu_pair, mu_rayleigh, rng_state)
 
         if process == PhotonProcess.RAYLEIGH:
-            # Coherent: direction changes, energy does not. Unreachable with the
-            # analytic data source (zero coherent column); see physics.rayleigh.
-            cos_coherent = sample_rayleigh_cos_theta(rng_state)
+            # Coherent: direction changes, energy does not. The source picks the angular
+            # model — Thomson for the analytic (zero-coherent) source, atomic form
+            # factors for the tabulated one; see CrossSectionSource.sample_coherent_cos_theta.
+            cos_coherent = cross_sections.sample_coherent_cos_theta(e, material, rng_state)
             phi = 2.0 * math.pi * uniform(rng_state)
             ux, uy, uz = rotate_direction(ux, uy, uz, cos_coherent, phi)
         elif process == PhotonProcess.COMPTON:
