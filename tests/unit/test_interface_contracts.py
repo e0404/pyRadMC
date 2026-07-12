@@ -12,7 +12,6 @@ from __future__ import annotations
 import ast
 
 import numpy as np
-import pytest
 
 
 class TestMajorantContract:
@@ -125,14 +124,43 @@ class TestTableIntegrationContract:
 
         The reference value is computed by dense-grid quadrature of the product.
         """
-        pytest.skip("Phase 5: tabulated backend not implemented")
+        from pyRadMC.data.interface import PhotonProcess
+        from pyRadMC.data.tabulated.model import TabulatedData
+        from pyRadMC.data.tabulated.source import TabulatedCrossSections
 
-        # S = lambda E: ...   # decreasing
-        # Q = lambda E: ...   # decreasing, correlated with S within each coarse bin
-        # exact = quad(lambda E: S(E) * Q(E), lo, hi)          # dense grid
-        # naive = mean(S over bin) * mean(Q over bin) * (hi - lo)
-        # actual = tabulated_backend.integrate_product(...)
-        # assert abs(actual - exact) < abs(naive - exact) / 10
+        # Two correlated-decreasing quantities tabulated on a shared grid.
+        e_grid = np.geomspace(0.1, 10.0, 40)
+        s = 1.0 / e_grid  # a stopping-power-like quantity
+        q = 1.0 / np.sqrt(e_grid)  # correlated with s within every interval
+        filler = np.ones((1, e_grid.size))
+        data = TabulatedData(
+            photon_energies=e_grid,
+            mu_over_rho={p: filler for p in (PhotonProcess.COMPTON, PhotonProcess.PAIR)},
+            electron_energies=e_grid,
+            restricted_stopping=s[None, :],
+            radiative_stopping=filler,
+            moller=filler,
+            csda_range=filler,
+            scattering_power=q[None, :],
+            delta_cut=0.2,
+            materials=("water",),
+            provenance="contract test",
+        )
+        src = TabulatedCrossSections(data)
+
+        lo, hi = 0.2, 5.0  # a wide interval spanning many grid nodes
+        dense = np.geomspace(lo, hi, 20_001)
+        s_dense, q_dense = 1.0 / dense, 1.0 / np.sqrt(dense)
+        exact = float(np.trapezoid(s_dense * q_dense, dense))
+        # Separately averaged bin quantities, then multiplied: discards the covariance.
+        mean_s = float(np.trapezoid(s_dense, dense)) / (hi - lo)
+        mean_q = float(np.trapezoid(q_dense, dense)) / (hi - lo)
+        naive = mean_s * mean_q * (hi - lo)
+
+        actual = src.integrate_product(
+            "restricted_stopping", "scattering_power", 0, lo, hi, n_sub=256
+        )
+        assert abs(actual - exact) < abs(naive - exact) / 10.0
 
 
 def _cross_target_equality_violations(tree: ast.Module) -> list[int]:

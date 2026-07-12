@@ -30,8 +30,11 @@ NIST_WATER_MU_OVER_RHO: dict[float, float] = {
 
 # The analytic backend is a parameterization, not a table. It is not expected to
 # reproduce XCOM to better than a few percent. This tolerance is a *statement of what
-# the analytic backend is for*: standing up the transport loop in Phase 0. It is
-# tightened to well under 1 percent when the tabulated backend lands in Phase 5.
+# the analytic backend is for*: standing up the transport loop in Phase 0. The
+# sub-percent reproduction promised for Phase 5 landed with the tabulated backend, in
+# tests/validation/test_epdl_water_nist.py (EPDL-derived water vs NIST XCOM, gate 1%,
+# measured ~0.3%); this analytic gate stays at 5% because loosening the oracle to the
+# parameterization is exactly what AGENTS.md 2.2 forbids.
 ANALYTIC_TOLERANCE_RELATIVE = 0.05
 
 
