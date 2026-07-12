@@ -66,11 +66,17 @@ def test_round_trip_preserves_every_field(tmp_path: Path) -> None:
 
 
 def test_dtype_is_selectable_at_compile_time(tmp_path: Path) -> None:
-    """Recompiling at a reduced precision is a one-argument change."""
+    """Recompiling the value tables at a reduced precision is a one-argument change.
+
+    The dtype knob compresses the value arrays only; the energy grids stay float64
+    (they are interpolation abscissae — see the format module docstring).
+    """
     data = synthetic_tables()
     p = save_tables(data, tmp_path / "w16", dtype=np.float16)
     back = load_tables(p)
-    assert back.photon_energies.dtype == np.float16
+    assert back.mu_over_rho[PhotonProcess.COMPTON].dtype == np.float16
+    assert back.photon_energies.dtype == np.float64
+    assert back.electron_energies.dtype == np.float64
     # float16 round-trips the values to ~1e-3 relative — enough to prove the knob works.
     np.testing.assert_allclose(
         back.mu_over_rho[PhotonProcess.COMPTON],

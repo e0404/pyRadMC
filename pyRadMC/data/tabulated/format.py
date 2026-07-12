@@ -2,10 +2,11 @@
 
 Small by nature (a material is tens of kilobytes), so the goal is not compactness
 but a fast, dependency-light load that leaves the runtime with ready arrays and no
-physics to assemble. The float dtype is chosen at *compile* time — recompiling the
-same source at reduced precision is one argument — while the loader is agnostic to
-which dtype it finds. A JSON manifest carries the format version, provenance,
-``delta_cut`` and the material/process lists needed to rebuild the model.
+physics to assemble. The float dtype of the *value* tables is chosen at *compile* time
+— recompiling the same source at reduced precision is one argument — while the loader is
+agnostic to which dtype it finds. The energy grids are always stored at float64: they
+are interpolation abscissae, not bulk data. A JSON manifest carries the format version,
+provenance, ``delta_cut`` and the material/process lists needed to rebuild the model.
 """
 
 from __future__ import annotations
@@ -38,9 +39,13 @@ def save_tables(data: TabulatedData, path: Path | str, *, dtype: type = np.float
     """
     path = Path(path)
     processes = sorted(data.mu_over_rho)
+    # Energy grids stay float64: they are the interpolation abscissae, and the loader's
+    # O(1) lookup assumes a perfectly uniform log spacing that a reduced dtype would
+    # perturb (breaking the geometric-grid check and drifting lookup indices). The dtype
+    # knob compresses the bulk value tables only.
     arrays: dict[str, np.ndarray] = {
-        "photon_energies": data.photon_energies.astype(dtype),
-        "electron_energies": data.electron_energies.astype(dtype),
+        "photon_energies": data.photon_energies.astype(np.float64),
+        "electron_energies": data.electron_energies.astype(np.float64),
     }
     for proc in processes:
         arrays[f"mu_{proc}"] = data.mu_over_rho[proc].astype(dtype)
