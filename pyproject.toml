@@ -39,7 +39,10 @@ dev = [
 docs = ["mkdocs-material>=9.5"]
 # Phase-exit examples only (AGENTS.md 7.1). matplotlib license: BSD-style, permissive.
 examples = ["matplotlib>=3.8"]
-all = ["pyRadMC[warp,dev,docs,examples]"]
+# CT image adapter (pyRadMC.adapters.ct), optional and out of the core. SimpleITK
+# license: Apache-2.0, permissive. Reads DICOM/NIfTI/MetaImage into a VoxelGrid.
+ct = ["SimpleITK>=2.3"]
+all = ["pyRadMC[warp,dev,docs,examples,ct]"]
 
 [project.urls]
 Homepage = "https://github.com/CHANGEME/pyRadMC"
@@ -61,6 +64,7 @@ markers = [
     "perf: benchmarks; alerts on regression, not pass/fail",
     "gpu: requires a CUDA device",
     "warp: requires the warp-lang optional dependency",
+    "ct: requires the SimpleITK optional dependency",
 ]
 filterwarnings = ["error"]
 
@@ -79,8 +83,15 @@ module = ["pyRadMC.backends.warp.*", "pyRadMC.rng.warp_shim"]
 ignore_errors = true
 
 [[tool.mypy.overrides]]
-module = ["warp.*", "scipy.*"]
+module = ["warp.*", "scipy.*", "SimpleITK.*"]
 ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# SimpleITK is an untyped boundary: its Image methods carry no annotations, so the
+# strict disallow_untyped_calls fires on GetSpacing/GetOrigin/etc. The adapter's own
+# code stays typed; only the calls across that boundary are exempt.
+module = ["pyRadMC.adapters.ct"]
+disallow_untyped_calls = false
 
 # ---------------------------------------------------------------------------
 # Lint
@@ -101,6 +112,7 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["D"]
 "pyRadMC/backends/warp/*" = ["N803", "N806"]  # kernel arg naming follows physics notation
+"pyRadMC/adapters/ct.py" = ["N813"]  # `import SimpleITK as sitk` is the library's own convention
 
 [tool.ruff.lint.pydocstyle]
 convention = "numpy"

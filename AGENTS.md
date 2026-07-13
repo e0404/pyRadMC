@@ -345,10 +345,26 @@ for a standalone MC"), in order:
    interface features are second order (the multiple-scattering hinge can still
    deflect the short post-hinge segment across the face) plus genuine interface
    dosimetry.
-2. **CT image adapter.** CT volume + Schneider-like HU-to-density/material table
-   into a ``VoxelGrid``. SimpleITK (Apache-2.0) is the candidate reader; adding it
-   is a new dependency and requires sign-off per section 5.
-3. **pyRadPlan adapter, last** (with the per-batch plan-dose sigma carried below).
+2. **CT image adapter — DONE 2026-07-14.** ``pyRadMC/adapters/ct.py`` (out of the
+   core, AGENTS.md 6; optional ``pyRadMC[ct]`` extra — SimpleITK, Apache-2.0,
+   maintainer-approved). A ``HounsfieldCalibration`` maps HU to per-voxel mass
+   density (a Schneider-like piecewise-linear ramp) and to a registry material index
+   (HU threshold bins into the ICRP media) — segmentation and density are
+   independent, which is exactly the multi-material design (material = composition
+   row, per-voxel density scales it). ``grid_from_hu`` is the pure, dependency-free
+   path; ``grid_from_image``/``read_ct`` add the SimpleITK reader, handling the ITK
+   frame (``(z,y,x)`` mm, origin at the first voxel centre) to engine frame
+   (``(x,y,z)`` cm, origin at the lower corner), including a negative-direction-cosine
+   axis flip; oblique orientations raise. The default calibration is an illustrative
+   cited Schneider curve — a real plan passes the scanner's own. Unit-tested (pure
+   calibration + synthetic-image reader, no committed CT data);
+   ``examples/phase5_ct_demo.py`` renders MC dose on a synthetic CT slice (dose tracks
+   the CT heterogeneities — deeper penetration through low-density lung). The CT
+   demo's off-body air pocket was dropped: dose-to-medium in near-vacuum voxels is
+   dominated by 1/density variance (speckle at finite statistics), which is inherent,
+   not an interface bias.
+3. **pyRadPlan adapter — the last remaining Phase 5 workstream** (with the per-batch
+   plan-dose sigma carried below).
 
 Phases 0 through 4 have exited. Phase 4's exit record is reproduced below — it defines
 the machinery Phase 5 builds on and carries the warnings that target Phase 5;

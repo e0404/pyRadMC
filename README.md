@@ -3,8 +3,8 @@
 Fast photon Monte Carlo dose engine for radiotherapy treatment planning.
 
 > **Status: Phase 4 complete, pre-alpha; Phase 5 underway — the phase-space source,
-> the tabulated cross-section backend, and multi-material data (ICRP media) are done;
-> a CT image adapter and (last) the pyRadPlan adapter remain.**
+> the tabulated cross-section backend, multi-material data (ICRP media), and a CT image
+> adapter are done; the pyRadPlan adapter is the last remaining workstream.**
 > The engine produces its primary
 > product: a **beamlet-resolved dose influence matrix (Dij)** — sparse CSC columns
 > with a per-entry statistical uncertainty, computed on CPU and CUDA by tagging
@@ -157,7 +157,7 @@ repeating here because they are the ones people break:
 | 2 ✅ | Warp backend, CPU and CUDA from one source² |
 | 3 ✅ | Beamlet tagging, batched Dij assembly, basic variance reduction³ |
 | 4 ✅ | Correlated sampling; study of per-beamlet noise vs. optimized-plan bias⁴ |
-| 5 🚧 | Tabulated data ✅, phase-space source ✅, multi-material media ✅, CT adapter (next), pyRadPlan adapter (last) |
+| 5 🚧 | Tabulated data ✅, phase-space source ✅, multi-material media ✅, CT image adapter ✅, pyRadPlan adapter (last) |
 
 ¹ The nightly validation tier gates against NIST ESTAR ranges and against
 maintainer-supplied EGSnrc depth-dose curves (1, 2 and 6 MeV; gamma 5%/3mm). The
