@@ -53,6 +53,11 @@ def _source() -> TabulatedCrossSections:
     return TabulatedCrossSections(_tables())
 
 
+def test_declared_materials_follow_the_compiled_table() -> None:
+    """n_materials is the compiled row count, not the registry size."""
+    assert _source().n_materials == 1
+
+
 class TestPhotonQueries:
     def test_grid_node_values_are_exact(self) -> None:
         """At a grid node the lookup returns the stored value (indexing is correct)."""

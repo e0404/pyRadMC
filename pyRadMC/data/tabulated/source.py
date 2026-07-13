@@ -100,6 +100,11 @@ class TabulatedCrossSections(CrossSectionSource):
             self._coherent_cumulative = np.asarray(data.coherent_cumulative, dtype=np.float64)
             self._n_coherent = int(self._coherent_x.shape[0])
 
+    @property
+    def n_materials(self) -> int:
+        """The compiled table's row count; queries beyond it raise on lookup."""
+        return len(self._data.materials)
+
     # -- photons ------------------------------------------------------------
 
     def sample_coherent_cos_theta(self, energy: float, material: int, rng_state: object) -> float:

@@ -57,6 +57,23 @@ class CrossSectionSource(ABC):
     access goes through the flattened tables that ``build_tables`` returns.
     """
 
+    @property
+    def n_materials(self) -> int:
+        """How many registry materials this source can answer for.
+
+        Tables are flattened for material indices ``0 .. n_materials - 1``
+        (:func:`~pyRadMC.data.tables.build_cross_section_tables` sizes its rows by
+        this), and a query beyond it must raise rather than approximate: a source
+        silently answering for a material it has no data for is a silent transport
+        bias. The default — the full registry — is for material-*independent*
+        sources (test instruments); a calibrated source overrides it with its real
+        coverage (the analytic source: water only; the tabulated source: the
+        compiled row count).
+        """
+        from pyRadMC.data.materials import MATERIALS
+
+        return len(MATERIALS)
+
     # -- photons ------------------------------------------------------------
 
     @abstractmethod

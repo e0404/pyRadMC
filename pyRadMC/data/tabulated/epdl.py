@@ -28,7 +28,7 @@ from collections.abc import Iterable, Mapping
 import numpy as np
 
 from pyRadMC.data.interface import PhotonProcess
-from pyRadMC.data.materials import AVOGADRO
+from pyRadMC.data.materials import AVOGADRO, STANDARD_ATOMIC_WEIGHT
 from pyRadMC.data.tabulated.endf import read_tab1_by_mf
 
 __all__ = [
@@ -56,24 +56,9 @@ MT_TO_PROCESS: dict[int, int] = {
     502: PhotonProcess.RAYLEIGH,
 }
 
-# Standard (conventional) atomic weights, g/mol; IUPAC 2021 (Prohaska et al.,
-# doi:10.1515/pac-2019-0603). Only the light elements of the ICRU-44 reference media
-# are listed; the general element/composition home is MaterialData (deferred task b),
-# which will supersede this table. Water needs H and O.
-STANDARD_ATOMIC_WEIGHT: dict[int, float] = {
-    1: 1.008,
-    6: 12.011,
-    7: 14.007,
-    8: 15.999,
-    11: 22.98976928,
-    12: 24.305,
-    15: 30.973761998,
-    16: 32.06,
-    17: 35.45,
-    18: 39.95,
-    19: 39.0983,
-    20: 40.078,
-}
+# STANDARD_ATOMIC_WEIGHT lives in pyRadMC.data.materials (its canonical home since the
+# Phase 5 materials task) and is re-exported here because the EPDL/EEDL parsers are
+# where the barns -> cm^2/g conversions that consume it happen.
 
 
 def element_photon_channels(

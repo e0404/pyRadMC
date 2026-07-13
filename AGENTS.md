@@ -310,9 +310,24 @@ which sits ~4% from ESTAR — provenance-consistent, not the accuracy default; M
 CSDA stay analytic. Water-only until ``MaterialData`` carries elemental composition (a
 deferred task). The backend passes the EGSnrc PDD gate at 5%/3mm
 (``test_tabulated_pdd_gamma_against_egsnrc_benchmark``) and is cross-backend consistent;
-``examples/phase5_tabulated_demo.py`` is the runnable demonstration. The **only Phase 5
-workstream left is the pyRadPlan adapter** (with the per-batch plan-dose sigma carried
-below).
+``examples/phase5_tabulated_demo.py`` is the runnable demonstration.
+
+**Remaining Phase 5 work, reordered by the maintainer 2026-07-13** ("more important
+for a standalone MC"), in order:
+
+1. **Material elemental composition.** ``MaterialData`` gains per-element mass
+   fractions; ICRU-44/ICRP standard media (air, lung, adipose, cortical bone) enter
+   the registry; the precompiler mixes per-element EPDL/EEDL data into per-material
+   tables (the runtime ``TabulatedData`` model already stores mixed per-material
+   tables, so composition is a compile-time input). The known blocker: the analytic
+   electron path is water-hardcoded (Berger-Seltzer I-value, Moller, CSDA,
+   density-effect), so multi-material electron stopping needs per-material
+   composition through the Berger-Seltzer formula or the per-element-capable
+   ``eedl`` strategy.
+2. **CT image adapter.** CT volume + Schneider-like HU-to-density/material table
+   into a ``VoxelGrid``. SimpleITK (Apache-2.0) is the candidate reader; adding it
+   is a new dependency and requires sign-off per section 5.
+3. **pyRadPlan adapter, last** (with the per-batch plan-dose sigma carried below).
 
 Phases 0 through 4 have exited. Phase 4's exit record is reproduced below — it defines
 the machinery Phase 5 builds on and carries the warnings that target Phase 5;
@@ -431,8 +446,8 @@ history.
   scoring at depth. Reaching 2%/2mm needs the benchmark's field width and EGSnrc
   transport settings (the missing metadata in `tests/validation/data/README.md`),
   **not** a different data layer. Do not loosen the 5%/3mm gate; a genuine 2%/2mm
-  gate awaits a fully specified benchmark. The Thomson-limit coherent angular model
-  is still in place (form-factor sampling is the next data refinement, above).
+  gate awaits a fully specified benchmark. (Form-factor coherent sampling — the
+  refinement anticipated here — has since landed; the gate result stands.)
 - **Positrons stay Moller-approximated** (no Bhabha, annihilation at rest). If
   ever upgraded, Bhabha and annihilation in flight land together as the new
   default per section 2.10, with a test showing the dosimetric effect.

@@ -40,7 +40,6 @@ import numpy.typing as npt
 from pyRadMC import RAYLEIGH_MOMENTUM_TRANSFER_PER_MEV
 from pyRadMC.data.handles import Table1D, Table2D
 from pyRadMC.data.interface import PhotonProcess
-from pyRadMC.data.materials import MATERIALS
 
 if TYPE_CHECKING:
     from pyRadMC.data.interface import CrossSectionSource
@@ -223,7 +222,7 @@ def build_cross_section_tables(
     if n_points < 2:
         raise ValueError(f"need at least two grid nodes, got {n_points}")
 
-    n_materials = len(MATERIALS)
+    n_materials = source.n_materials
     photon_energies = np.geomspace(0.5 * pcut, e_max, n_points)
     electron_energies = np.geomspace(0.5 * ecut, e_max, n_points)
 

@@ -77,9 +77,40 @@ class TestGridCoverage:
         grid_max = tables.electron_log_e_min + (tables.n_points - 1) / tables.electron_inv_dlog
         assert np.exp(grid_max) >= E_MAX * (1.0 - 1e-12)
 
-    def test_all_materials_tabulated(self, tables) -> None:
-        assert tables.mu_compton.shape == (len(MATERIALS), tables.n_points)
+    def test_all_materials_tabulated(self, xs, tables) -> None:
+        """Rows follow the *source's* declared coverage, not the registry size."""
+        assert tables.mu_compton.shape == (xs.n_materials, tables.n_points)
         assert tables.majorant.shape == (tables.n_points,)
+
+
+class TestSourceDeclaredMaterials:
+    """Table sizing is source-declared (Phase 5 materials task).
+
+    A source flattens exactly the materials it carries data for. The analytic source
+    is calibrated for water only and must say so — once the registry grows past
+    water, silently answering a bone query with water photoelectric/pair data would
+    be the silent-bias failure mode AGENTS.md 2.2/2.8 exist to prevent.
+    """
+
+    def test_analytic_declares_water_only(self, xs) -> None:
+        assert xs.n_materials == 1
+
+    def test_analytic_rejects_material_beyond_declaration(self, xs) -> None:
+        with pytest.raises(ValueError, match="material"):
+            xs.mu_over_rho(1.0, xs.n_materials, PhotonProcess.COMPTON)
+        with pytest.raises(ValueError, match="material"):
+            xs.restricted_stopping_power(1.0, xs.n_materials, ECUT_MEV)
+
+    def test_interface_default_covers_registry(self) -> None:
+        """A material-independent source (test instruments) defaults to the registry."""
+        from tests.integration.test_channel_complete import CoherentOnlySource
+
+        assert CoherentOnlySource().n_materials == len(MATERIALS)
+
+    def test_tables_sized_by_declared_count(self, xs) -> None:
+        tables = xs.build_tables(ecut=ECUT_MEV, pcut=PCUT_MEV, e_max=E_MAX, n_points=16)
+        for field in ("mu_compton", "stopping_restricted", "coherent_cumulative"):
+            assert getattr(tables, field).shape[0] == xs.n_materials
 
 
 class TestPhotonParity:
@@ -101,7 +132,7 @@ class TestPhotonParity:
     def test_channel_lookups_match_host(self, xs, tables) -> None:
         rng = np.random.default_rng(SEED)
         energies = np.exp(rng.uniform(np.log(PCUT_MEV), np.log(E_MAX), 4000))
-        for material in range(len(MATERIALS)):
+        for material in range(xs.n_materials):
             for energy in energies:
                 e = float(energy)
                 total = xs.mu_over_rho_total(e, material)
@@ -178,7 +209,7 @@ class TestElectronParity:
         rng = np.random.default_rng(SEED)
         energies = np.exp(rng.uniform(np.log(ECUT_MEV * 1.001), np.log(E_MAX), 4000))
         dlog = 1.0 / tables.electron_inv_dlog
-        for material in range(len(MATERIALS)):
+        for material in range(xs.n_materials):
             for field, host_fn in self.QUANTITIES:
                 relative_errors = []
                 for energy in energies:
