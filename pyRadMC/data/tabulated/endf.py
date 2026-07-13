@@ -22,6 +22,7 @@ __all__ = [
     "parse_endf_float",
     "read_mf26_angular_distributions",
     "read_mf26_energy_transfer",
+    "read_mf26_spectra",
     "read_tab1_by_mf",
 ]
 
@@ -137,6 +138,23 @@ def read_mf26_angular_distributions(
     for (mat, mf, mt), lines in _group_sections(text):
         if mf == 26 and mt == mt_target:
             out[mat] = _parse_mf26_angular(lines)
+    return out
+
+
+def read_mf26_spectra(text: str, mt_target: int) -> dict[int, list[AngularDistribution]]:
+    """Return ``{MAT: [(energy, secondary_energy, probability), ...]}`` for MF=26/``mt_target``.
+
+    The LAW=1 subsection of an electro-atomic reaction tabulates, per incident energy, the
+    normalized secondary-particle energy spectrum. For electro-ionization (MT=534-572) this
+    is the ejected electron's kinetic-energy distribution, used to build the restricted
+    collision stopping power. Energies are in eV. Structurally identical to the LAW=2
+    angular tables, so the same TAB2-of-lists reader serves.
+    """
+    out: dict[int, list[AngularDistribution]] = {}
+    for (mat, mf, mt), lines in _group_sections(text):
+        if mf == 26 and mt == mt_target:
+            idx, _ = _walk_mf26_subsections(lines, target_law=1)
+            out[mat] = _read_tab2_lists(lines, idx)
     return out
 
 

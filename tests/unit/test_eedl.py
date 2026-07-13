@@ -11,9 +11,11 @@ and NIST ESTAR lives in the opt-in validation tier.
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from pyRadMC.data.materials import AVOGADRO
 from pyRadMC.data.tabulated.eedl import (
+    element_collision_stopping,
     element_radiative_stopping,
     element_scattering_power,
     material_radiative_stopping,
@@ -22,6 +24,7 @@ from pyRadMC.data.tabulated.eedl import (
 from pyRadMC.data.tabulated.endf import (
     read_mf26_angular_distributions,
     read_mf26_energy_transfer,
+    read_mf26_spectra,
 )
 from pyRadMC.data.tabulated.epdl import STANDARD_ATOMIC_WEIGHT, mass_fractions_from_formula
 
@@ -98,8 +101,10 @@ def _xs_525(mat: int, e_ev: list[float], barns: list[float]) -> list[str]:
     return [head, ctrl, interp, *data, send]
 
 
-def _ang_525(mat: int, dists: list[tuple[float, list[float], list[float]]]) -> list[str]:
-    """MF=26/MT=525: a single LAW=2 subsection with per-energy angular tables P(mu)."""
+def _mf26_tab2(
+    mat: int, mt: int, law: int, dists: list[tuple[float, list[float], list[float]]]
+) -> list[str]:
+    """A single MF=26 subsection with the given LAW and per-energy (x, y) tables."""
     za = f"{mat // 100 * 1000:.1f}"
     ne = str(len(dists))
     ln = 1
@@ -107,23 +112,70 @@ def _ang_525(mat: int, dists: list[tuple[float, list[float], list[float]]]) -> l
 
     def add(fields: list[str]) -> None:
         nonlocal ln
-        out.append(_line(fields, mat, 26, 525, ln))
+        out.append(_line(fields, mat, 26, mt, ln))
         ln += 1
 
     add([za, "0.0", "0", "0", "1", "0"])  # HEAD: NK = 1
-    add(["11.0", "0.0", "0", "2", "1", "2"])  # multiplicity TAB1 (LAW=2)
+    add(["11.0", "0.0", "0", str(law), "1", "2"])  # multiplicity TAB1
     add(["2", "2"])
     add(["10.0", "1.0", "1.0E+11", "1.0"])
-    add(["0.0", "0.0", "0", "0", "1", ne])  # LAW=2 TAB2: NR=1, NE
+    add(["0.0", "0.0", "0", "0", "1", ne])  # LAW TAB2: NR=1, NE
     add([ne, "2"])
-    for energy, mu, p in dists:
-        n_pts = len(mu)
+    for energy, x, y in dists:
+        n_pts = len(x)
         add(["0.0", f"{energy:.5E}", "0", "0", str(2 * n_pts), str(n_pts)])
         pairs: list[str] = []
-        for m, prob in zip(mu, p, strict=True):
-            pairs += [f"{m:.6f}", f"{prob:.5E}"]
+        for xi, yi in zip(x, y, strict=True):
+            pairs += [f"{xi:.6f}", f"{yi:.5E}"]
         for i in range(0, len(pairs), 6):
             add(pairs[i : i + 6])
+    out.append(_line(["0.0", "0.0", "0", "0", "0", "0"], mat, 26, 0, 99999))  # SEND
+    return out
+
+
+def _ang_525(mat: int, dists: list[tuple[float, list[float], list[float]]]) -> list[str]:
+    """MF=26/MT=525: a single LAW=2 subsection with per-energy angular tables P(mu)."""
+    return _mf26_tab2(mat, 525, 2, dists)
+
+
+def _xs(mat: int, mt: int, e_ev: list[float], barns: list[float]) -> list[str]:
+    """A HEAD + TAB1 MF=23 cross section for one (element, reaction)."""
+    za = f"{mat // 100 * 1000:.1f}"
+    n = str(len(e_ev))
+    head = _line([za, "0.0", "0", "0", "0", "0"], mat, 23, mt, 1)
+    ctrl = _line(["0.0", "0.0", "0", "0", "1", n], mat, 23, mt, 2)
+    interp = _line([n, "2"], mat, 23, mt, 3)
+    pairs: list[str] = []
+    for x, y in zip(e_ev, barns, strict=True):
+        pairs += [f"{x:.5E}", f"{y:.5E}"]
+    data = [_line(pairs[i : i + 6], mat, 23, mt, 4 + i // 6) for i in range(0, len(pairs), 6)]
+    send = _line(["0.0", "0.0", "0", "0", "0", "0"], mat, 23, 0, 99999)
+    return [head, ctrl, interp, *data, send]
+
+
+def _law8(mat: int, mt: int, e_ev: list[float], et_ev: list[float]) -> list[str]:
+    """MF=26/MT: a single LAW=8 (energy-transfer) subsection, (E, average loss)."""
+    za = f"{mat // 100 * 1000:.1f}"
+    n = str(len(e_ev))
+    ln = 1
+    out: list[str] = []
+
+    def add(fields: list[str]) -> None:
+        nonlocal ln
+        out.append(_line(fields, mat, 26, mt, ln))
+        ln += 1
+
+    add([za, "0.0", "0", "0", "1", "0"])  # HEAD: NK = 1
+    add(["11.0", "0.0", "0", "8", "1", "2"])  # multiplicity TAB1 (LAW=8)
+    add(["2", "2"])
+    add(["10.0", "1.0", "1.0E+11", "1.0"])
+    add(["0.0", "0.0", "0", "0", "1", n])  # LAW=8 TAB1: NR=1, NP
+    add([n, "2"])
+    pairs: list[str] = []
+    for x, y in zip(e_ev, et_ev, strict=True):
+        pairs += [f"{x:.5E}", f"{y:.5E}"]
+    for i in range(0, len(pairs), 6):
+        add(pairs[i : i + 6])
     out.append(_line(["0.0", "0.0", "0", "0", "0", "0"], mat, 26, 0, 99999))  # SEND
     return out
 
@@ -239,3 +291,38 @@ def test_material_scattering_power_is_mass_weighted() -> None:
     t_o = np.array([_s_scat(40.0, 8, 1.0), _s_scat(8.0, 8, 0.5)])
     expected = fractions[1] * t_h + fractions[8] * t_o
     np.testing.assert_allclose(mixed, expected, rtol=1e-6)
+
+
+def test_mf26_spectra_reader_returns_law1_distributions() -> None:
+    """The LAW=1 reader returns each incident energy's tabulated secondary spectrum."""
+    text = "\n".join(_mf26_tab2(100, 534, 1, [(1.0e6, [0.0, 100.0], [0.01, 0.01])]))
+    spectra = read_mf26_spectra(text, 534)
+    assert set(spectra) == {100}
+    energy, w, f = spectra[100][0]
+    assert energy == pytest.approx(1.0e6, rel=1e-5)
+    np.testing.assert_allclose(w, [0.0, 100.0], atol=1e-6)
+    np.testing.assert_allclose(f, [0.01, 0.01], rtol=1e-5)
+
+
+def test_element_collision_stopping_sums_excitation_and_restricted_ionization() -> None:
+    """S_coll = (N_A/M)[sigma_528 <loss>_528 + sigma_534 integral_0^delta (B+W) f dW].
+
+    Excitation loss 50 eV; ionization binding B=20 eV with a flat secondary spectrum
+    W in [0, 100] eV (all below the 0.2 MeV cut), whose restricted mean loss is exactly
+    B + W_max/2 = 70 eV (trapezoid of a linear integrand). Grid = the 528 energy nodes.
+    """
+    e_ev = [1.0e6, 1.0e7]
+    spectrum = [(e, [0.0, 100.0], [0.01, 0.01]) for e in e_ev]  # f normalized over [0,100]
+    text = "\n".join(
+        _xs(100, 528, e_ev, [2.0, 2.0])  # excitation cross section
+        + _law8(100, 528, e_ev, [50.0, 50.0])  # excitation average loss (eV)
+        + _xs(100, 534, [20.0, *e_ev], [0.0, 3.0, 3.0])  # ionization: threshold B=20 eV
+        + _mf26_tab2(100, 534, 1, spectrum)  # ionization secondary spectrum
+    )
+    result = element_collision_stopping(text, delta_cut=0.2, elements={1})
+
+    energy_mev, s_coll = result[1]
+    np.testing.assert_allclose(energy_mev, [1.0, 10.0], rtol=1e-9)
+    prefactor = AVOGADRO / STANDARD_ATOMIC_WEIGHT[1] * 1.0e-24 * 1.0e-6
+    expected = prefactor * (2.0 * 50.0 + 3.0 * 70.0)  # excitation + restricted ionization
+    np.testing.assert_allclose(s_coll, [expected, expected], rtol=1e-6)

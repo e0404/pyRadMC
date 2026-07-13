@@ -30,19 +30,25 @@ from pyRadMC.data.materials import AVOGADRO
 from pyRadMC.data.tabulated.endf import (
     read_mf26_angular_distributions,
     read_mf26_energy_transfer,
+    read_mf26_spectra,
     read_tab1_by_mf,
 )
 from pyRadMC.data.tabulated.epdl import STANDARD_ATOMIC_WEIGHT
 
 __all__ = [
+    "element_collision_stopping",
     "element_radiative_stopping",
     "element_scattering_power",
+    "material_collision_stopping",
     "material_radiative_stopping",
     "material_scattering_power",
 ]
 
 _MT_BREMSSTRAHLUNG = 527
 _MT_ELASTIC_LARGE_ANGLE = 525
+_MT_EXCITATION = 528
+_IONIZATION_MT_LO = 534
+_IONIZATION_MT_HI = 572
 
 
 def element_radiative_stopping(
@@ -96,6 +102,127 @@ def material_radiative_stopping(
         energy_mev, s_rad = elements[z]
         total += weight * _interp_loglog(grid, energy_mev, s_rad)
     return total
+
+
+def element_collision_stopping(
+    text: str, delta_cut: float, elements: Iterable[int] | None = None
+) -> dict[int, tuple[np.ndarray, np.ndarray]]:
+    r"""Per-element restricted collision stopping power from EEDL, at ``delta_cut`` (MeV).
+
+    Returns ``{Z: (energy_MeV, S_restricted_MeV_cm2_g)}`` on the excitation cross section's
+    energy grid. Two inelastic channels contribute:
+
+    - **excitation** (MF=23/26 MT=528): its transfers are far below any delta-ray cut, so
+      all of ``sigma_528 * <E_loss>_528`` is restricted (the LAW=8 average loss);
+    - **ionization** (MT=534-572, per subshell): only transfers producing a sub-cut
+      secondary are continuous loss, so each subshell contributes
+      ``sigma_ss * integral_0^delta_cut (B_ss + W) f_ss(W|E) dW`` with ``B_ss`` the
+      subshell binding (the cross section threshold), ``W`` the ejected-electron energy,
+      and ``f_ss`` its normalized spectrum (MF=26 LAW=1). Above the cut the transfer is an
+      explicit delta ray, handled by the (analytic) Moller channel.
+
+    This is the ``eedl`` electron-stopping strategy's collision source; EEDL's evaluation
+    departs from ESTAR/ICRU-37 by a few percent (like its radiative one), which is why the
+    default ``berger-seltzer`` strategy keeps the analytic Berger-Seltzer form.
+    ``elements`` behaves as in :func:`element_radiative_stopping`.
+    """
+    want = None if elements is None else set(elements)
+    cross_sections = read_tab1_by_mf(text, 23)
+    excitation_loss = read_mf26_energy_transfer(text, _MT_EXCITATION)
+    subshell_mts = sorted(
+        {
+            mt
+            for (mat, mt) in cross_sections
+            if _IONIZATION_MT_LO <= mt <= _IONIZATION_MT_HI and (want is None or mat // 100 in want)
+        }
+    )
+    spectra = {mt: read_mf26_spectra(text, mt) for mt in subshell_mts}
+    delta_ev = delta_cut * 1.0e6
+
+    out: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+    for mat in {m for (m, _) in cross_sections}:
+        z = mat // 100
+        if want is not None and z not in want:
+            continue
+        if (mat, _MT_EXCITATION) not in cross_sections or mat not in excitation_loss:
+            continue
+        molar_mass = STANDARD_ATOMIC_WEIGHT.get(z)
+        if molar_mass is None:
+            if want is None:
+                continue
+            raise KeyError(f"no atomic weight for Z={z}; extend STANDARD_ATOMIC_WEIGHT")
+        atoms_per_gram = AVOGADRO / molar_mass
+
+        grid_ev, sigma_exc = cross_sections[(mat, _MT_EXCITATION)]
+        loss_energy_ev, loss_ev = excitation_loss[mat]
+        exc_loss_on = _interp_loglog(grid_ev, loss_energy_ev, loss_ev)
+        stopping = atoms_per_gram * sigma_exc * 1.0e-24 * exc_loss_on * 1.0e-6
+
+        for mt in subshell_mts:
+            if (mat, mt) not in cross_sections or mat not in spectra[mt]:
+                continue
+            shell_energy_ev, shell_sigma = cross_sections[(mat, mt)]
+            binding_ev = float(shell_energy_ev[0])  # cross-section threshold = binding
+            mean_loss = _restricted_ionization_loss(spectra[mt][mat], binding_ev, delta_ev)
+            loss_on = _interp_loglog(grid_ev, mean_loss[0], mean_loss[1])
+            sigma_on = _resample_threshold(grid_ev, shell_energy_ev, shell_sigma)
+            stopping += atoms_per_gram * sigma_on * 1.0e-24 * loss_on * 1.0e-6
+
+        out[z] = (np.asarray(grid_ev, dtype=np.float64) * 1.0e-6, stopping)
+    if want is not None and want - set(out):
+        raise KeyError(f"elements {sorted(want - set(out))} not found in the EEDL text")
+    return out
+
+
+def material_collision_stopping(
+    elements: Mapping[int, tuple[np.ndarray, np.ndarray]],
+    mass_fractions: Mapping[int, float],
+    grid_mev: np.ndarray,
+) -> np.ndarray:
+    """Mix per-element restricted collision stopping into a material by mass fraction."""
+    grid = np.asarray(grid_mev, dtype=np.float64)
+    total = np.zeros_like(grid)
+    for z, weight in mass_fractions.items():
+        energy_mev, stopping = elements[z]
+        total += weight * _interp_loglog(grid, energy_mev, stopping)
+    return total
+
+
+def _restricted_ionization_loss(
+    spectrum: list[tuple[float, np.ndarray, np.ndarray]], binding_ev: float, delta_ev: float
+) -> tuple[np.ndarray, np.ndarray]:
+    """Mean restricted energy loss per ionization vs incident energy, in eV.
+
+    For each incident energy the spectrum tabulates the ejected-electron energy density
+    ``f(W)`` (normalized). The restricted mean loss is ``integral_0^delta (B + W) f dW``
+    over sub-cut secondaries; near threshold the secondary energy is ~0 and the loss is
+    just the binding ``B``.
+    """
+    energies = np.array([e for e, _, _ in spectrum])
+    losses = np.empty(energies.shape[0])
+    for i, (_energy, w, f) in enumerate(spectrum):
+        below = w <= delta_ev
+        if int(below.sum()) < 2:
+            losses[i] = binding_ev
+        else:
+            losses[i] = float(np.trapezoid((binding_ev + w[below]) * f[below], w[below]))
+    return energies, losses
+
+
+def _resample_threshold(
+    energy_dst: np.ndarray, energy_src: np.ndarray, values: np.ndarray
+) -> np.ndarray:
+    """Log-log resample of a threshold quantity: zero below its first positive value."""
+    positive = values > 0.0
+    out = np.zeros_like(energy_dst, dtype=np.float64)
+    if int(positive.sum()) < 2:
+        return out
+    log_values = np.interp(
+        np.log(energy_dst), np.log(energy_src[positive]), np.log(values[positive])
+    )
+    out = np.asarray(np.exp(log_values), dtype=np.float64)
+    out[energy_dst < energy_src[positive][0]] = 0.0
+    return out
 
 
 def element_scattering_power(
@@ -176,11 +303,13 @@ def _mean_one_minus_mu(mu: np.ndarray, probability: np.ndarray) -> float:
 def _interp_loglog(
     energy_dst: np.ndarray, energy_src: np.ndarray, values: np.ndarray
 ) -> np.ndarray:
-    """Interpolate a strictly-positive quantity, linear in log-log; flat outside.
+    """Interpolate a mostly-positive quantity, linear in log-log; flat outside.
 
-    Radiative stopping and the mean energy loss are positive across the tabulated
-    range with no threshold, so (unlike the photon channels) no zero-support handling
-    is needed — the log-log form is exact at the shared grid points a unit test pins.
+    Radiative stopping and scattering power are positive throughout, so the log-log form
+    is exact at the shared grid points a unit test pins. Collision quantities can carry a
+    single zero at a sub-transport threshold node; the floor keeps ``log`` finite there
+    (a no-op for the strictly-positive inputs) without affecting the transport range.
     """
-    log_values = np.interp(np.log(energy_dst), np.log(energy_src), np.log(values))
+    floored = np.maximum(np.asarray(values, dtype=np.float64), 1.0e-300)
+    log_values = np.interp(np.log(energy_dst), np.log(energy_src), np.log(floored))
     return np.asarray(np.exp(log_values), dtype=np.float64)

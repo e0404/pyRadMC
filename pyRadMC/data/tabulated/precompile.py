@@ -18,15 +18,15 @@ electron **stopping**:
     cleanly by the Berger-Seltzer form. This is the shippable water configuration.
 
 ``eedl``
-    Would take stopping from EEDL. It is **not implemented**: EEDL's average-energy-loss
-    tables give *unrestricted* losses, but ``restricted_stopping`` must exclude delta
-    rays above the cut, which needs the differential electro-ionization spectra
-    (MF=26/MT=534), a separate slice. Raising here is deliberate — a silently
-    unrestricted stopping power would bias the dose.
+    Restricted collision (excitation MT=528 + ionization MT=534-572, integrating the
+    differential electro-ionization spectra below ``delta_cut``) and radiative stopping
+    from EEDL. A few percent from ESTAR (like the EEDL radiative evaluation), so it is
+    the non-default provenance-consistent option, not the accuracy default. Moller and
+    CSDA range stay analytic under both strategies.
 
-Water-only for now: the analytic electron backend is water-only (its collision and
-range formulas do not carry elemental composition), so multi-material compilation waits
-on that (deferred materials task). Photons and scattering already mix arbitrary media.
+Water-only for now: the analytic electron backend (Moller, CSDA, the berger-seltzer
+stopping) is water-only, so multi-material compilation waits on the deferred materials
+task. Photons, scattering and the EEDL electron stopping already mix arbitrary media.
 """
 
 from __future__ import annotations
@@ -74,12 +74,6 @@ def compile_water(
     :func:`pyRadMC.data.tables.build_cross_section_tables`. ``delta_cut`` defaults to
     ``ecut`` (the delta-ray production threshold the restricted quantities are built at).
     """
-    if strategy is ElectronStoppingStrategy.EEDL:
-        raise NotImplementedError(
-            "the 'eedl' stopping strategy needs restricted collision stopping from the "
-            "EEDL differential electro-ionization spectra (MF=26/MT=534); not yet built. "
-            "Use 'berger-seltzer'."
-        )
     if e_max <= max(pcut, ecut):
         raise ValueError(f"e_max={e_max} MeV does not cover the transport range")
     cut = ecut if delta_cut is None else delta_cut
@@ -106,14 +100,34 @@ def compile_water(
     scattering_elements = eedl.element_scattering_power(eedl_text, elements=set(_WATER_FORMULA))
     scattering = eedl.material_scattering_power(scattering_elements, fractions, electron_energies)
 
-    # -- electron stopping: analytic ICRU-37 on the grid (berger-seltzer) -----
+    # -- electron stopping ----------------------------------------------------
+    # Moller (discrete channel) and CSDA range stay analytic under both strategies; the
+    # strategy governs the continuous collision and radiative stopping.
     analytic = AnalyticCrossSections()
-    restricted = _evaluate(
-        lambda e: analytic.restricted_stopping_power(e, WATER, cut), electron_energies
-    )
-    radiative = _evaluate(lambda e: analytic.radiative_stopping_power(e, WATER), electron_energies)
     moller = _evaluate(lambda e: analytic.moller_cross_section(e, WATER, cut), electron_energies)
     csda = _evaluate(lambda e: analytic.csda_range(e, WATER), electron_energies)
+    if strategy is ElectronStoppingStrategy.EEDL:
+        collision_elements = eedl.element_collision_stopping(
+            eedl_text, cut, elements=set(_WATER_FORMULA)
+        )
+        restricted = eedl.material_collision_stopping(
+            collision_elements, fractions, electron_energies
+        )[np.newaxis, :]
+        radiative_elements = eedl.element_radiative_stopping(
+            eedl_text, elements=set(_WATER_FORMULA)
+        )
+        radiative = eedl.material_radiative_stopping(
+            radiative_elements, fractions, electron_energies
+        )[np.newaxis, :]
+        stopping_provenance = "EEDL restricted collision + EEDL radiative"
+    else:
+        restricted = _evaluate(
+            lambda e: analytic.restricted_stopping_power(e, WATER, cut), electron_energies
+        )
+        radiative = _evaluate(
+            lambda e: analytic.radiative_stopping_power(e, WATER), electron_energies
+        )
+        stopping_provenance = "analytic ICRU-37 on grid"
 
     return TabulatedData(
         photon_energies=photon_energies,
@@ -128,7 +142,8 @@ def compile_water(
         materials=("water",),
         provenance=(
             f"EPDL2023 photons + coherent form factors + EEDL2023 elastic scattering; "
-            f"electron stopping: {strategy.value} (analytic ICRU-37 on grid); delta_cut={cut} MeV"
+            f"electron stopping: {strategy.value} ({stopping_provenance}); "
+            f"Moller + CSDA analytic; delta_cut={cut} MeV"
         ),
         coherent_x=coherent_x,
         coherent_cumulative=coherent_cumulative[np.newaxis, :],

@@ -24,7 +24,7 @@ from pyRadMC.data.interface import PhotonProcess
 from pyRadMC.data.materials import WATER
 from pyRadMC.data.tabulated.format import load_tables, save_tables
 from pyRadMC.data.tabulated.model import TabulatedData
-from pyRadMC.data.tabulated.precompile import compile_water
+from pyRadMC.data.tabulated.precompile import ElectronStoppingStrategy, compile_water
 from pyRadMC.data.tabulated.source import TabulatedCrossSections
 from pyRadMC.geometry.grid import VoxelGrid
 from pyRadMC.geometry.source import ParallelBeamSource
@@ -137,6 +137,28 @@ def test_compiled_coherent_scattering_is_forward_peaked(water: TabulatedData) ->
     assert 0.0 < mu_soft < 0.99  # forward of Thomson (0), but not yet fully forward
     assert mu_hard > 0.999  # strongly forward at MeV energies
     assert mu_hard > mu_soft
+
+
+@pytest.mark.validation
+def test_eedl_strategy_collision_stopping_tracks_analytic() -> None:
+    """The eedl strategy's restricted collision stopping is consistent with ICRU-37.
+
+    Compiling with strategy='eedl' fills restricted collision and radiative stopping from
+    EEDL (excitation MT=528 + ionization MT=534-572 integrated below the cut) instead of
+    the analytic Berger-Seltzer form. EEDL's inelastic evaluation departs from ESTAR by a
+    few percent (like its radiative one), so this gates consistency, not sub-percent
+    accuracy; the berger-seltzer default remains the ESTAR-exact one.
+    """
+    epdl_text, eedl_text = _texts()
+    data = compile_water(epdl_text, eedl_text, strategy=ElectronStoppingStrategy.EEDL, e_max=8.0)
+    assert "eedl" in data.provenance and "EEDL restricted collision" in data.provenance
+    xs = TabulatedCrossSections(data)
+    analytic = AnalyticCrossSections()
+    for energy in (0.5, 1.0, 3.0, 6.0):
+        ratio = xs.restricted_stopping_power(energy, WATER, ECUT) / (
+            analytic.restricted_stopping_power(energy, WATER, ECUT)
+        )
+        assert 0.93 < ratio < 1.07, f"eedl collision stopping ratio {ratio:.3f} at {energy} MeV"
 
 
 @pytest.mark.validation
