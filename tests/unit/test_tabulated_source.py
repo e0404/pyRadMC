@@ -58,6 +58,63 @@ def test_declared_materials_follow_the_compiled_table() -> None:
     assert _source().n_materials == 1
 
 
+def _two_material_tables(n_p: int = 32, n_e: int = 32) -> TabulatedData:
+    """Water row plus an 'air' row at half the water values (registry prefix order)."""
+    one = _tables(n_p, n_e)
+    return TabulatedData(
+        photon_energies=one.photon_energies,
+        mu_over_rho={p: np.concatenate([t, 0.5 * t]) for p, t in one.mu_over_rho.items()},
+        electron_energies=one.electron_energies,
+        restricted_stopping=np.concatenate(
+            [one.restricted_stopping, 0.5 * one.restricted_stopping]
+        ),
+        radiative_stopping=np.concatenate([one.radiative_stopping, 0.5 * one.radiative_stopping]),
+        moller=np.concatenate([one.moller, 0.5 * one.moller]),
+        csda_range=np.concatenate([one.csda_range, 2.0 * one.csda_range]),
+        scattering_power=np.concatenate([one.scattering_power, 0.5 * one.scattering_power]),
+        delta_cut=one.delta_cut,
+        materials=("water", "air"),
+        provenance="synthetic two-material",
+    )
+
+
+class TestMaterialRowIndexing:
+    """Queries for material 1 read row 1 — the contract heterogeneous grids rely on."""
+
+    def test_declared_count(self) -> None:
+        assert TabulatedCrossSections(_two_material_tables()).n_materials == 2
+
+    def test_photon_rows_are_material_resolved(self) -> None:
+        data = _two_material_tables()
+        src = TabulatedCrossSections(data)
+        for k in (0, 15, 31):
+            e = float(data.photon_energies[k])
+            for proc in _PROC:
+                assert src.mu_over_rho(e, 1, proc) == pytest.approx(
+                    data.mu_over_rho[proc][1, k], rel=1e-6
+                )
+                assert src.mu_over_rho(e, 1, proc) == pytest.approx(
+                    0.5 * src.mu_over_rho(e, 0, proc), rel=1e-9
+                )
+
+    def test_electron_rows_are_material_resolved(self) -> None:
+        data = _two_material_tables()
+        src = TabulatedCrossSections(data)
+        e = float(data.electron_energies[10])
+        assert src.restricted_stopping_power(e, 1, DELTA_CUT) == pytest.approx(
+            0.5 * src.restricted_stopping_power(e, 0, DELTA_CUT), rel=1e-9
+        )
+        assert src.csda_range(e, 1) == pytest.approx(2.0 * src.csda_range(e, 0), rel=1e-9)
+
+    def test_majorant_covers_both_materials(self) -> None:
+        """The Woodcock majorant is the max over the declared geometry pairs."""
+        data = _two_material_tables()
+        src = TabulatedCrossSections(data, geometry_densities=((0, 1.0), (1, 1.0)))
+        e = 1.3
+        expected = max(src.mu_over_rho_total(e, 0), src.mu_over_rho_total(e, 1))
+        assert src.majorant(e) == pytest.approx(expected, rel=1e-9)
+
+
 class TestPhotonQueries:
     def test_grid_node_values_are_exact(self) -> None:
         """At a grid node the lookup returns the stored value (indexing is correct)."""

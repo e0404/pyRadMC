@@ -315,18 +315,35 @@ deferred task). The backend passes the EGSnrc PDD gate at 5%/3mm
 **Remaining Phase 5 work, reordered by the maintainer 2026-07-13** ("more important
 for a standalone MC"), in order:
 
-1. **Material elemental composition.** ``MaterialData`` gains per-element mass
-   fractions; ICRU-44/ICRP standard media (air, lung, adipose, cortical bone) enter
-   the registry; the precompiler mixes per-element EPDL/EEDL data into per-material
-   tables (the runtime ``TabulatedData`` model already stores mixed per-material
-   tables, so composition is a compile-time input). The known blocker: the analytic
-   electron path is water-hardcoded (Berger-Seltzer I-value, Moller, CSDA,
-   density-effect), so multi-material electron stopping needs per-material
-   composition through the Berger-Seltzer formula or the per-element-capable
-   ``eedl`` strategy.
+1. **Material elemental composition — DONE 2026-07-13.** ``MaterialData`` carries
+   per-element mass fractions, the ICRU-37 I-value, the exact SBS-1984 Sternheimer
+   density-effect coefficients and per-material ESTAR radiative anchors; the ICRP
+   reference media (air, lung, adipose, cortical bone — the formulations ESTAR and
+   the PDG compilation define, so every number is cross-checkable) joined the
+   registry. The water-hardcoded electron machinery moved verbatim into
+   ``data/berger_seltzer.py`` as pure functions of a ``MaterialData`` (the analytic
+   backend delegates with the water entry — delegation identity test-pinned, the
+   oracle did not move), and ``compile_materials`` mixes per-element EPDL/EEDL data
+   into a registry-prefix ``TabulatedData``. Two structural changes carried the
+   registry growth safely: ``CrossSectionSource.n_materials`` (tables flatten
+   exactly the materials a source carries; the analytic source declares water-only
+   and rejects anything else) and per-material validation gates — Berger-Seltzer vs
+   ESTAR sub-0.4 percent per medium, EPDL mixtures vs NIST XCOM sub-percent for air
+   and cortical bone, scattering-power ratios on the Z(Z+1)/A expectation, and a
+   ref/warp chi-squared through a heterogeneous slab.
+   ``examples/phase5_materials_demo.py`` is the runnable demonstration.
+   **Carried item — interface substeps:** an electron substep uses its start
+   voxel's density and material throughout; ``STEP_VOXEL_FRACTION`` bounds the
+   graze error for water-like contrast, but at CT-grade contrast (water/inflated
+   lung, rho ratio ~4) the *interface voxel's* dose-per-gram over/undershoots by
+   the density ratio times the grazing fraction — a visible single-voxel artifact
+   in the demo, documented there. Boundary-aware substep truncation (both
+   backends, test-first) must land before interface-voxel dose is trusted; the
+   macroscopic heterogeneity dose (slopes, downstream recovery) is unaffected.
 2. **CT image adapter.** CT volume + Schneider-like HU-to-density/material table
    into a ``VoxelGrid``. SimpleITK (Apache-2.0) is the candidate reader; adding it
-   is a new dependency and requires sign-off per section 5.
+   is a new dependency and requires sign-off per section 5. Needs the interface
+   substep item above resolved (or explicitly waived) for interface-voxel dose.
 3. **pyRadPlan adapter, last** (with the per-batch plan-dose sigma carried below).
 
 Phases 0 through 4 have exited. Phase 4's exit record is reproduced below — it defines
