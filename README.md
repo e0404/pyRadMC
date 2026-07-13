@@ -2,8 +2,9 @@
 
 Fast photon Monte Carlo dose engine for radiotherapy treatment planning.
 
-> **Status: Phase 4 complete, pre-alpha; Phase 5 (tabulated data, phase-space
-> source, pyRadPlan adapter) is next and gated.** The engine produces its primary
+> **Status: Phase 4 complete, pre-alpha; Phase 5 underway — the phase-space source
+> and the tabulated cross-section backend are done, the pyRadPlan adapter remains.**
+> The engine produces its primary
 > product: a **beamlet-resolved dose influence matrix (Dij)** — sparse CSC columns
 > with a per-entry statistical uncertainty, computed on CPU and CUDA by tagging
 > every history's whole secondary family with its beamlet of origin. Because RNG
@@ -155,12 +156,15 @@ repeating here because they are the ones people break:
 | 2 ✅ | Warp backend, CPU and CUDA from one source² |
 | 3 ✅ | Beamlet tagging, batched Dij assembly, basic variance reduction³ |
 | 4 ✅ | Correlated sampling; study of per-beamlet noise vs. optimized-plan bias⁴ |
-| 5 | Tabulated data, phase-space source, pyRadPlan adapter |
+| 5 🚧 | Tabulated data ✅, phase-space source ✅, pyRadPlan adapter (pending) |
 
 ¹ The nightly validation tier gates against NIST ESTAR ranges and against
-maintainer-supplied EGSnrc depth-dose curves (1, 2 and 6 MeV; gamma 5%/3mm — the
-criterion is limited by the analytic cross-sections, and Phase 5 must pass the same
-data at 2%/2mm over the full depth range).
+maintainer-supplied EGSnrc depth-dose curves (1, 2 and 6 MeV; gamma 5%/3mm). The
+Phase 5 tabulated backend (EPDL photons with coherent form factors, EEDL scattering,
+ICRU-37 stopping) passes the same gate; the tighter 2%/2mm criterion is limited by the
+benchmark's geometry/metadata (finite field, 6 mm scoring tube), not the cross-section
+data, so it awaits a fully specified benchmark (see `AGENTS.md` 7.2). See
+`examples/phase5_tabulated_demo.py` for the depth-dose comparison.
 
 ² Both Warp devices reproduce the reference within the chi-squared detection
 oracle; GPU throughput cleared the 1e6 histories/s criterion at ~1.6e7 on a laptop

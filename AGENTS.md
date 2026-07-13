@@ -294,8 +294,27 @@ removed the per-history ``SeedSequence`` construction that dominated the warp pa
 (measured ~370 ms of 450 ms per 32k chunk); the demo now runs 300k histories in
 ~0.4 s on a 4070. ``examples/phase5_phasespace_demo.py`` now defaults to Warp (GPU if
 present). The Compton-splitting ``N > 1`` turn-on this workstream was meant to
-unlock was measured and stays **off** (see the carried item below). Phases 0
-through 4 have exited. Phase 4's exit record is reproduced below — it defines
+unlock was measured and stays **off** (see the carried item below).
+
+**The tabulated cross-section backend is also done, on both backends.** The
+precompiler (``data/tabulated/precompile.py`` ``compile_water``; CLI
+``python -m pyRadMC.data.tabulated.build``) assembles a water ``TabulatedData`` from
+the EPICS libraries: **EPDL** photon cross sections (validated sub-percent against NIST
+XCOM), **EPDL MF=27 coherent form factors** (replacing the Thomson-limit Rayleigh
+angular model — sampled by inverting the form-factor cumulative, ported to the Warp
+kernel), and **EEDL** elastic scattering power. Electron *stopping* is selectable
+(``ElectronStoppingStrategy``): the default ``berger-seltzer`` keeps the analytic
+ICRU-37 form (ESTAR-exact); ``eedl`` derives restricted collision (excitation +
+ionization spectra integrated below the delta cut) and radiative stopping from EEDL,
+which sits ~4% from ESTAR — provenance-consistent, not the accuracy default; Moller and
+CSDA stay analytic. Water-only until ``MaterialData`` carries elemental composition (a
+deferred task). The backend passes the EGSnrc PDD gate at 5%/3mm
+(``test_tabulated_pdd_gamma_against_egsnrc_benchmark``) and is cross-backend consistent;
+``examples/phase5_tabulated_demo.py`` is the runnable demonstration. The **only Phase 5
+workstream left is the pyRadPlan adapter** (with the per-batch plan-dose sigma carried
+below).
+
+Phases 0 through 4 have exited. Phase 4's exit record is reproduced below — it defines
 the machinery Phase 5 builds on and carries the warnings that target Phase 5;
 earlier records live in the git history of this section.
 

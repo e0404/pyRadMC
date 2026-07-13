@@ -20,7 +20,7 @@ from pathlib import Path
 
 import numpy as np
 
-from pyRadMC import ECUT_MEV, PCUT_MEV
+from pyRadMC import ECUT_MEV, PCUT_MEV, __version__
 from pyRadMC.data.tables import TABLE_POINTS
 from pyRadMC.data.tabulated.format import save_tables
 from pyRadMC.data.tabulated.precompile import ElectronStoppingStrategy, compile_water
@@ -30,6 +30,7 @@ __all__ = ["download_library", "library_path", "main"]
 EPICS_BASE_URL = "https://www-nds.iaea.org/epics/ENDF2023/"
 LIBRARY_FILES = {"epdl": "EPDL2023.ALL", "eedl": "EEDL2023.ALL"}
 DEFAULT_CACHE_DIR = Path.home() / ".cache" / "pyRadMC" / "epics"
+_USER_AGENT = f"pyRadMC/{__version__} (EPICS library fetch)"
 
 
 def library_path(which: str, cache_dir: Path | None = None) -> Path:
@@ -50,7 +51,10 @@ def download_library(which: str, cache_dir: Path | None = None, *, force: bool =
     url = EPICS_BASE_URL + LIBRARY_FILES[which]
     temporary = destination.with_suffix(destination.suffix + ".partial")
     print(f"downloading {url} -> {destination}")
-    with urllib.request.urlopen(url) as response, temporary.open("wb") as handle:
+    # An explicit User-Agent is required: the IAEA site is behind Cloudflare, which
+    # rejects urllib's default "Python-urllib/x.y" agent with HTTP 403.
+    request = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
+    with urllib.request.urlopen(request) as response, temporary.open("wb") as handle:
         shutil.copyfileobj(response, handle)
     temporary.replace(destination)
     return destination

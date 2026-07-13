@@ -54,7 +54,7 @@ DEFAULT_PHSP = Path("D:/data/phsp/Varian_TrueBeam6MV_01.IAEAheader")
 FRONT_Z_CM = 30.0
 DEPTH_CM = 30.0
 HALF_WIDTH_CM = 15.0
-SPACING = (0.2, 0.2, 0.2)
+SPACING = (0.3, 0.3, 0.3)
 # The uncollimated divergent beam spreads fluence over a wide area, so the
 # on-axis column is starved of deposits; average the PDD over a central column a
 # few cm wide (the field is broad) to get a usable curve at demo statistics.
@@ -114,7 +114,7 @@ def main() -> None:
     parser.add_argument(
         "phsp", nargs="?", type=Path, default=DEFAULT_PHSP, help="IAEA .IAEAheader path"
     )
-    parser.add_argument("--histories", type=int, default=1_000_000)
+    parser.add_argument("--histories", type=int, default=10_000_000)
     parser.add_argument("--batches", type=int, default=10)
     parser.add_argument("--seed", type=int, default=20260711)
     parser.add_argument("--backend", choices=("auto", "warp", "ref"), default="auto")
