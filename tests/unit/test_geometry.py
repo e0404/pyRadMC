@@ -104,6 +104,44 @@ class TestVoxelGrid:
         # Would cross the z-slab but misses the box transversely.
         assert grid.distance_to_entry(10.0, 2.0, -3.0, 0.0, 0.0, 1.0) == math.inf
 
+    def test_distance_to_voxel_boundary(self) -> None:
+        """Distance to the next internal voxel face; the electron substep boundary cap.
+
+        Half-open voxels are lower-inclusive, so a point exactly on a face moving into
+        the upper voxel measures a full voxel ahead, while moving back along that axis
+        measures zero (the degenerate case the transport loop nudges across).
+        """
+        import math
+
+        from pyRadMC.geometry.grid import distance_to_voxel_boundary
+
+        o = (0.0, 0.0, 0.0)
+        sp = (1.0, 1.0, 1.0)
+        n = (4, 4, 4)
+
+        # Inside voxel (0,0,0): the +x face is 0.7 ahead, the -x face 0.3 behind.
+        assert distance_to_voxel_boundary(
+            0.3, 0.5, 0.5, 1.0, 0.0, 0.0, *o, *sp, *n
+        ) == pytest.approx(0.7)
+        assert distance_to_voxel_boundary(
+            0.3, 0.5, 0.5, -1.0, 0.0, 0.0, *o, *sp, *n
+        ) == pytest.approx(0.3)
+
+        # Diagonal in x-z: z reaches its face (0.2 away) before x (0.7 away), so z limits.
+        r = 1.0 / math.sqrt(2.0)
+        assert distance_to_voxel_boundary(0.3, 0.5, 0.8, r, 0.0, r, *o, *sp, *n) == pytest.approx(
+            0.2 / r
+        )
+
+        # On an internal face (x=1.0 -> voxel 1, lower-inclusive): +x sees a full voxel,
+        # -x sees zero (the caller biases the step just across so this cannot recur).
+        assert distance_to_voxel_boundary(
+            1.0, 0.5, 0.5, 1.0, 0.0, 0.0, *o, *sp, *n
+        ) == pytest.approx(1.0)
+        assert distance_to_voxel_boundary(
+            1.0, 0.5, 0.5, -1.0, 0.0, 0.0, *o, *sp, *n
+        ) == pytest.approx(0.0)
+
     def test_density_extrema_per_material(self) -> None:
         """The majorant declaration must see the *maximum* density in the grid."""
         from pyRadMC.data.materials import WATER

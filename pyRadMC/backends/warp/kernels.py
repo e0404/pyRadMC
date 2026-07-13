@@ -50,7 +50,11 @@ from pyRadMC import (
 from pyRadMC.backends.warp.physics import warp_physics
 from pyRadMC.data.interface import PhotonProcess
 from pyRadMC.rng.warp_shim import WarpRNGState, init_slot, spawn_stream, uniform
-from pyRadMC.transport.electron import STEP_ENERGY_FRACTION, STEP_VOXEL_FRACTION
+from pyRadMC.transport.electron import (
+    BOUNDARY_NUDGE_CM,
+    STEP_ENERGY_FRACTION,
+    STEP_VOXEL_FRACTION,
+)
 from pyRadMC.transport.particles import ELECTRON, PHOTON, POSITRON
 
 __all__ = [
@@ -105,6 +109,7 @@ lookup_2d = _p.lookup_loglinear_2d
 point_inside = _p.point_inside
 point_axis_index = _p.point_axis_index
 slab_entry_distance = _p.slab_entry_distance
+distance_to_voxel_boundary = _p.distance_to_voxel_boundary
 
 
 @wp.struct
@@ -668,14 +673,37 @@ def electron_kernel(
             lookup_2d(tab.csda_range, mat, tab.e_log_e_min, tab.e_inv_dlog, tab.n_points, e) / rho
         )
         s_max = min(STEP_ENERGY_FRACTION * range_cm, STEP_VOXEL_FRACTION * gi.min_spacing)
+        # Cap at the next voxel face (plus the nudge across it) so the substep's
+        # density and material stay those of the voxel it starts in.
+        s_boundary = (
+            distance_to_voxel_boundary(
+                x,
+                y,
+                z,
+                ux,
+                uy,
+                uz,
+                gi.x_lo,
+                gi.y_lo,
+                gi.z_lo,
+                gi.sx,
+                gi.sy,
+                gi.sz,
+                gi.nx,
+                gi.ny,
+                gi.nz,
+            )
+            + BOUNDARY_NUDGE_CM
+        )
+        s_geometry = min(s_max, s_boundary)
         sigma_moller = rho * lookup_2d(
             tab.moller, mat, tab.e_log_e_min, tab.e_inv_dlog, tab.n_points, e
         )
-        s = s_max
+        s = s_geometry
         moller_pending = False
         if sigma_moller > 0.0:
             s_interaction = sample_path_length(sigma_moller, state)
-            if s_interaction <= s_max:
+            if s_interaction <= s_geometry:
                 s = s_interaction
                 moller_pending = True
 

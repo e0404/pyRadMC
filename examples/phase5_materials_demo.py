@@ -10,15 +10,13 @@ heterogeneity signatures: extra attenuation through and beyond the bone, reduced
 attenuation (a shallower dose slope) across the low-density lung, and the water curve
 recovered downstream shifted by the radiological path difference.
 
-The sharp single-voxel features *at* each material interface are a known, documented
-transport approximation surfacing, not multi-material data errors: an electron substep
-uses its start voxel's density and material throughout, so a substep that grazes the
-boundary deposits energy computed for one medium into its neighbour's mass —
-``STEP_VOXEL_FRACTION`` bounds this for water-like contrast, but at rho 1.0 vs 0.26
-the interface voxel's dose-per-gram overshoots (entering lung) or undershoots
-(entering bone) by the density ratio times the grazing fraction. See the carried item
-in AGENTS.md 7.2: boundary-aware substep truncation is the fix, and it must land
-before interface-voxel dose from CT-grade contrast is trusted.
+The profiles run smoothly through the interfaces because each electron substep is
+capped at the next voxel face (:func:`pyRadMC.geometry.grid.distance_to_voxel_boundary`),
+so a step's density and material match the voxel it is actually in rather than plowing
+one medium's stopping power across the boundary into the neighbour's mass. Any small
+residual feature at the bone edges is second order (the multiple-scattering hinge can
+still deflect the short post-hinge segment across the face) plus genuine interface
+dosimetry, not the single-voxel spike the earlier start-voxel step produced.
 
 On first run this **downloads the ~120 MB EPDL/EEDL libraries** into
 ``~/.cache/pyRadMC/epics`` (cached thereafter). Defaults to Warp (GPU if present),

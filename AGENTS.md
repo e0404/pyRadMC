@@ -332,18 +332,22 @@ for a standalone MC"), in order:
    and cortical bone, scattering-power ratios on the Z(Z+1)/A expectation, and a
    ref/warp chi-squared through a heterogeneous slab.
    ``examples/phase5_materials_demo.py`` is the runnable demonstration.
-   **Carried item — interface substeps:** an electron substep uses its start
-   voxel's density and material throughout; ``STEP_VOXEL_FRACTION`` bounds the
-   graze error for water-like contrast, but at CT-grade contrast (water/inflated
-   lung, rho ratio ~4) the *interface voxel's* dose-per-gram over/undershoots by
-   the density ratio times the grazing fraction — a visible single-voxel artifact
-   in the demo, documented there. Boundary-aware substep truncation (both
-   backends, test-first) must land before interface-voxel dose is trusted; the
-   macroscopic heterogeneity dose (slopes, downstream recovery) is unaffected.
+   **Interface substeps — DONE 2026-07-14.** Each electron substep is now capped
+   at the next voxel face (``geometry/grid.py`` ``distance_to_voxel_boundary``,
+   compiled into the Warp kernel through the physics loader; a shared
+   ``BOUNDARY_NUDGE_CM`` biases the boundary-limited step just across the face so
+   the half-open convention cannot trap it), so a step's density and material are
+   those of the voxel it starts in instead of plowing one medium's stopping power
+   across the boundary into the neighbour's mass. The single-voxel interface spike
+   is gone on both backends (test-first: ``tests/integration/test_boundary_truncation.py``
+   pins that the mass-scaled deposit is smooth across a pure density step — 1.95x
+   before, under 1.4x after — and the geometry primitive is unit-pinned). Residual
+   interface features are second order (the multiple-scattering hinge can still
+   deflect the short post-hinge segment across the face) plus genuine interface
+   dosimetry.
 2. **CT image adapter.** CT volume + Schneider-like HU-to-density/material table
    into a ``VoxelGrid``. SimpleITK (Apache-2.0) is the candidate reader; adding it
-   is a new dependency and requires sign-off per section 5. Needs the interface
-   substep item above resolved (or explicitly waived) for interface-voxel dose.
+   is a new dependency and requires sign-off per section 5.
 3. **pyRadPlan adapter, last** (with the per-batch plan-dose sigma carried below).
 
 Phases 0 through 4 have exited. Phase 4's exit record is reproduced below — it defines

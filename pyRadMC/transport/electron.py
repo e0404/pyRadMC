@@ -40,7 +40,7 @@ from pyRadMC import (
     PHOTON_ROULETTE_WEIGHT_CAP,
 )
 from pyRadMC.data.interface import CrossSectionSource
-from pyRadMC.geometry.grid import VoxelGrid
+from pyRadMC.geometry.grid import VoxelGrid, distance_to_voxel_boundary
 from pyRadMC.physics.brems import bremsstrahlung_step_parameters, sample_bremsstrahlung_energy
 from pyRadMC.physics.direction import rotate_direction
 from pyRadMC.physics.moller import moller_direction_cosines, sample_moller_delta_energy
@@ -56,7 +56,12 @@ from pyRadMC.transport.particles import (
     annihilate_at_rest,
 )
 
-__all__ = ["STEP_ENERGY_FRACTION", "STEP_VOXEL_FRACTION", "electron_steps"]
+__all__ = [
+    "BOUNDARY_NUDGE_CM",
+    "STEP_ENERGY_FRACTION",
+    "STEP_VOXEL_FRACTION",
+    "electron_steps",
+]
 
 STEP_ENERGY_FRACTION: float = 0.05
 """Maximum fraction of the CSDA range per substep.
@@ -74,6 +79,18 @@ the error of using one voxel's density for a substep that grazes a neighbour.
 """
 
 _ENTRY_NUDGE_CM = 1.0e-9  # same convention as the photon loop
+
+BOUNDARY_NUDGE_CM: float = 1.0e-4
+"""Over-step past a voxel face when a substep is boundary-limited, in cm.
+
+Added to the distance returned by
+:func:`pyRadMC.geometry.grid.distance_to_voxel_boundary` so a boundary-capped substep
+lands just inside the next voxel rather than exactly on the face, where the half-open
+lower-inclusive convention could otherwise trap an inward-facing electron at zero
+distance. Unlike the entry nudge (which differs by backend for float32 reasons), this
+is shared verbatim with the Warp kernel so both backends truncate at identical
+positions; 1 micrometre is far below any voxel edge, and its short over-step is charged
+to the crossed voxel's stopping power, so it is physically consistent, not a leak."""
 
 
 def electron_steps(
@@ -148,12 +165,23 @@ def electron_steps(
         # --- substep length --------------------------------------------------------
         range_cm = cross_sections.csda_range(e, material) / rho
         s_max = min(STEP_ENERGY_FRACTION * range_cm, STEP_VOXEL_FRACTION * min_spacing)
+        # Cap at the next voxel face (plus the nudge across it) so the substep's
+        # density and material stay those of the voxel it starts in.
+        s_boundary = (
+            distance_to_voxel_boundary(
+                x, y, z, ux, uy, uz, *grid.origin, *grid.spacing, *grid.shape
+            )
+            + BOUNDARY_NUDGE_CM
+        )
+        s_geometry = min(s_max, s_boundary)
         sigma_moller = rho * cross_sections.moller_cross_section(e, material, ecut)
         s_interaction = (
             sample_path_length(sigma_moller, rng_state) if sigma_moller > 0.0 else math.inf
         )
-        s = min(s_interaction, s_max)
-        moller_pending = s_interaction <= s_max
+        s = min(s_interaction, s_geometry)
+        # A Moller event fires only if the sampled flight is the actual limiter — a
+        # geometry-truncated substep ends at the boundary with no interaction.
+        moller_pending = s_interaction <= s_geometry
 
         # --- continuous loss over the substep ---------------------------------------
         de = cross_sections.restricted_stopping_power(e, material, ecut) * rho * s

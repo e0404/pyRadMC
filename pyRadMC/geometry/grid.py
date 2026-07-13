@@ -23,7 +23,13 @@ import numpy as np
 
 from pyRadMC.data.materials import MATERIALS, WATER
 
-__all__ = ["VoxelGrid", "point_axis_index", "point_inside", "slab_entry_distance"]
+__all__ = [
+    "VoxelGrid",
+    "distance_to_voxel_boundary",
+    "point_axis_index",
+    "point_inside",
+    "slab_entry_distance",
+]
 
 
 def point_inside(
@@ -140,6 +146,64 @@ def slab_entry_distance(
     if t_near > t_far or t_far <= 0.0:
         return math.inf
     return t_near
+
+
+def distance_to_voxel_boundary(
+    x: float,
+    y: float,
+    z: float,
+    ux: float,
+    uy: float,
+    uz: float,
+    x_lo: float,
+    y_lo: float,
+    z_lo: float,
+    sx: float,
+    sy: float,
+    sz: float,
+    nx: int,
+    ny: int,
+    nz: int,
+) -> float:
+    """Distance along (ux, uy, uz) from an interior point to the next voxel face.
+
+    The electron condensed-history loop caps each substep at this distance so a
+    substep never spans two voxels: its density and material — which drive the
+    continuous energy loss, multiple scattering and interaction sampling — then match
+    the voxel the electron is actually in, instead of plowing one voxel's stopping
+    power across a boundary and depositing it into the neighbour's mass (the
+    single-voxel interface-dose artifact this removes). Pure and scalar so the
+    reference loop and the Warp kernel share one definition (AGENTS.md 2.5); the
+    caller guarantees the point is inside the grid, so the per-axis voxel index is in
+    range and the minimum over axes is finite for any real direction.
+
+    Half-open voxels are lower-inclusive: a point exactly on a face belongs to the
+    upper voxel, so moving further up measures a full voxel while moving back down the
+    same axis measures zero. The loop biases each boundary-limited step just past the
+    face (:data:`pyRadMC.transport.electron.BOUNDARY_NUDGE_CM`) so that degenerate
+    zero cannot recur into a stall.
+    """
+    result = math.inf
+
+    ix = point_axis_index(x, x_lo, sx, nx)
+    if ux > 0.0:
+        result = min(result, (x_lo + float(ix + 1) * sx - x) / ux)
+    elif ux < 0.0:
+        result = min(result, (x_lo + float(ix) * sx - x) / ux)
+
+    iy = point_axis_index(y, y_lo, sy, ny)
+    if uy > 0.0:
+        result = min(result, (y_lo + float(iy + 1) * sy - y) / uy)
+    elif uy < 0.0:
+        result = min(result, (y_lo + float(iy) * sy - y) / uy)
+
+    iz = point_axis_index(z, z_lo, sz, nz)
+    if uz > 0.0:
+        result = min(result, (z_lo + float(iz + 1) * sz - z) / uz)
+    elif uz < 0.0:
+        result = min(result, (z_lo + float(iz) * sz - z) / uz)
+
+    return result
 
 
 @dataclass(frozen=True)

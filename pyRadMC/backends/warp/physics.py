@@ -55,7 +55,12 @@ _KERNEL_MODULES: dict[str, tuple[str, ...] | None] = {
     "pyRadMC.physics.rayleigh": None,
     "pyRadMC.physics.roulette": None,
     "pyRadMC.data.tables": ("lookup_loglinear_1d", "lookup_loglinear_2d"),
-    "pyRadMC.geometry.grid": ("point_inside", "point_axis_index", "slab_entry_distance"),
+    "pyRadMC.geometry.grid": (
+        "point_inside",
+        "point_axis_index",
+        "slab_entry_distance",
+        "distance_to_voxel_boundary",
+    ),
 }
 
 _MISSING = object()
