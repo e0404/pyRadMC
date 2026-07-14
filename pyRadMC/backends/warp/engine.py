@@ -36,8 +36,12 @@ from pyRadMC.backends.warp import kernels
 from pyRadMC.backends.warp.kernels import ENERGY_QUANTUM_MEV, GridInfo, Queue, Tables
 from pyRadMC.data.interface import CrossSectionSource
 from pyRadMC.geometry.grid import VoxelGrid
-from pyRadMC.geometry.phasespace import PhaseSpaceSource
-from pyRadMC.geometry.source import BeamletGridSource, ParallelBeamSource, PencilBeamSource
+from pyRadMC.geometry.source import (
+    BeamletGridSource,
+    ParallelBeamSource,
+    PencilBeamSource,
+    Source,
+)
 from pyRadMC.scoring.dij import BatchedBeamletScorer, DijAssembler, DijResult
 from pyRadMC.scoring.dose import BatchedDoseScorer
 from pyRadMC.transport.particles import ELECTRON, PHOTON, POSITRON
@@ -46,7 +50,7 @@ __all__ = ["WarpEngine"]
 
 _E_MAX_MARGIN = 1.0 + 1.0e-6  # table upper edge strictly above the primary energy
 
-# IAEA particle code (from PhaseSpaceSource.sample_batch) -> transport constant,
+# IAEA particle code (from a source's sample_batch columns) -> transport constant,
 # as a lookup indexed by the code (1/2/3); slot 0 is unused.
 _IAEA_TO_TRANSPORT = np.array([-1, PHOTON, ELECTRON, POSITRON], dtype=np.int32)
 
@@ -114,7 +118,7 @@ class WarpEngine:
 
     def run(
         self,
-        source: PencilBeamSource | ParallelBeamSource | PhaseSpaceSource,
+        source: Source,
         n_histories: int,
         n_batches: int,
         seed: int,
@@ -126,11 +130,13 @@ class WarpEngine:
         """Transport ``n_histories`` primaries; same contract as the reference engine.
 
         See :meth:`pyRadMC.backends.ref.engine.ReferenceEngine.run` for parameter
-        semantics — the two signatures are deliberately identical. A
-        :class:`~pyRadMC.geometry.phasespace.PhaseSpaceSource` is transported by
-        host-sampling each chunk of primaries and seeding the photon and electron
-        queues by kind; ``primary_kind`` is then ignored (each record carries its
-        own kind), and ``energy_emitted`` is booked from the sampled records.
+        semantics — the two signatures are deliberately identical. A source with an
+        in-kernel generator (the built-in mono beams) is generated on-device from
+        analytic parameters, all of one ``primary_kind``. Any other source (a phase
+        space, or a user :class:`~pyRadMC.geometry.source.Source`) is transported by
+        host-sampling each chunk via ``sample_batch`` and seeding the photon and
+        electron queues by the per-record kind; ``primary_kind`` is then ignored and
+        ``energy_emitted`` is booked from the sampled records.
         """
         if n_histories < 1:
             raise ValueError(f"need at least one history, got {n_histories}")
@@ -139,15 +145,15 @@ class WarpEngine:
                 f"n_histories={n_histories} not divisible by n_batches={n_batches}; "
                 "unequal batches would weight batch means inconsistently"
             )
-        is_phsp = isinstance(source, PhaseSpaceSource)
-        if not is_phsp:
+        in_kernel = isinstance(source, PencilBeamSource | ParallelBeamSource)
+        if in_kernel:
             if primary_kind not in ("photon", "electron"):
                 raise ValueError(f"unknown primary_kind {primary_kind!r}")
             kind = PHOTON if primary_kind == "photon" else ELECTRON
 
         device = self.device
         gi, density, material = self._upload_grid(device)
-        table_energy = source.max_energy if is_phsp else source.energy
+        table_energy = source.max_energy
         tab = self._upload_tables(table_energy, pcut, ecut, device)
 
         chunk = min(self.chunk_size, n_histories)
@@ -158,6 +164,16 @@ class WarpEngine:
         edep = wp.zeros(n_voxels, dtype=wp.int64, device=device)
         escaped = wp.zeros(1, dtype=wp.int64, device=device)
         violations = wp.zeros(1, dtype=wp.int32, device=device)
+
+        # Advanced route: a source exposing a warp_sampler is generated in-kernel by a
+        # wrapper kernel (built once per sampler), which books emitted weight-energy
+        # into this cumulative counter (mono beams book analytically; a pre-sampled
+        # source books per chunk).
+        generator = None
+        emitted = None
+        if not in_kernel and source.warp_sampler is not None:
+            generator = kernels.make_generator_kernel(source.warp_sampler)
+            emitted = wp.zeros(1, dtype=wp.int64, device=device)
 
         scorer = BatchedDoseScorer(self.grid, n_batches)
         per_batch = n_histories // n_batches
@@ -171,9 +187,10 @@ class WarpEngine:
             remaining = per_batch
             while remaining > 0:
                 n_chunk = min(chunk, remaining)
-                if is_phsp:
-                    energy_emitted += self._transport_chunk_phsp(
+                if in_kernel:
+                    self._transport_chunk(
                         source,
+                        kind,
                         seed,
                         history,
                         n_chunk,
@@ -191,10 +208,30 @@ class WarpEngine:
                         transport_electrons,
                         device,
                     )
+                elif generator is not None:
+                    self._transport_chunk_wrapped(
+                        generator,
+                        seed,
+                        history,
+                        n_chunk,
+                        gi,
+                        density,
+                        material,
+                        tab,
+                        queues,
+                        slots,
+                        edep,
+                        escaped,
+                        violations,
+                        pcut,
+                        ecut,
+                        transport_electrons,
+                        emitted,
+                        device,
+                    )
                 else:
-                    self._transport_chunk(
+                    energy_emitted += self._transport_chunk_presampled(
                         source,
-                        kind,
                         seed,
                         history,
                         n_chunk,
@@ -226,8 +263,12 @@ class WarpEngine:
             scorer.end_batch(per_batch)
             energy_escaped += float(escaped.numpy()[0]) * ENERGY_QUANTUM_MEV
 
-        if not is_phsp:
-            energy_emitted = n_histories * source.energy
+        if in_kernel:
+            # Mono beams: every primary is one unit-weight photon at the beam energy
+            # (max_energy == energy), so the device need not report emitted energy.
+            energy_emitted = n_histories * source.max_energy
+        elif emitted is not None:
+            energy_emitted = float(emitted.numpy()[0]) * ENERGY_QUANTUM_MEV
 
         dose = scorer.finalize()
         return TransportResult(
@@ -462,7 +503,66 @@ class WarpEngine:
             device,
         )
 
-    def _transport_chunk_phsp(
+    def _transport_chunk_wrapped(
+        self,
+        generator,
+        seed,
+        history_offset,
+        n_chunk,
+        gi,
+        density,
+        material,
+        tab,
+        queues,
+        slots,
+        edep,
+        escaped,
+        violations,
+        pcut,
+        ecut,
+        transport_electrons,
+        emitted,
+        device,
+    ) -> None:
+        """Generate one chunk in-kernel via a wrapped user sampler, then drain.
+
+        The wrapped generator (:func:`~pyRadMC.backends.warp.kernels.make_generator_kernel`)
+        pushes each primary into the photon or electron queue by its kind at an atomic
+        slot and books emitted weight-energy into ``emitted``; the queue counts are then
+        whatever the pushes set, so — unlike the mono-beam path — no explicit count is
+        written.
+        """
+        q_photon, q_photon_alt, q_electron, q_electron_alt = queues
+        for q in queues:
+            _reset_count(q, device)
+
+        wp.launch(
+            generator,
+            dim=n_chunk,
+            inputs=[seed, history_offset, q_photon, q_electron, slots, emitted],
+            device=device,
+        )
+
+        self._drain_queues(
+            q_photon,
+            q_photon_alt,
+            q_electron,
+            q_electron_alt,
+            gi,
+            density,
+            material,
+            tab,
+            slots,
+            edep,
+            escaped,
+            violations,
+            pcut,
+            ecut,
+            transport_electrons,
+            device,
+        )
+
+    def _transport_chunk_presampled(
         self,
         source,
         seed,
@@ -482,12 +582,15 @@ class WarpEngine:
         transport_electrons,
         device,
     ) -> float:
-        """Host-sample a phase-space chunk, seed the queues by kind, drain.
+        """Host-sample a chunk via ``source.sample_batch``, seed queues by kind, drain.
 
-        Returns the chunk's emitted energy: sum of ``weight * energy`` over the
-        sampled records, plus ``weight * 2 m_e c^2`` for each positron whose
-        annihilation photons the device books into deposited/escaped (so the
-        emitted = deposited + escaped ledger closes, as on the reference backend).
+        The general (pre-sampling) route: works for any source with a ``sample_batch``
+        — a phase space, or a user :class:`~pyRadMC.geometry.source.Source` using the
+        emit-based default. Returns the chunk's emitted energy: sum of
+        ``weight * energy`` over the sampled records, plus ``weight * 2 m_e c^2`` for
+        each positron whose annihilation photons the device books into
+        deposited/escaped (so the emitted = deposited + escaped ledger closes, as on
+        the reference backend).
         """
         q_photon, q_photon_alt, q_electron, q_electron_alt = queues
         for q in queues:

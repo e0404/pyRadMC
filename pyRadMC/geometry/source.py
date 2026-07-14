@@ -1,19 +1,51 @@
-"""Primary photon sources.
+"""Primary sources and the interface a user implements to define their own.
 
 Host-side source models; each ``emit`` draws from the per-history RNG state so that a
-history's primary is part of its reproducible stream. Monoenergetic only in Phase 0 —
-spectra are a later, data-driven addition.
+history's primary is part of its reproducible stream. Two ABCs define the contract:
+:class:`Source` (open field, ``run``) and :class:`BeamletSource` (Dij, ``run_dij``);
+they are disjoint because their ``emit`` signatures differ. Both give a source **two
+ways onto a device backend** (see :mod:`pyRadMC.backends.warp.engine`):
+
+- the *simple* route — the default ``sample_batch`` host-samples the primaries into
+  column arrays a backend uploads; it works for any source with an ``emit``;
+- the *advanced* route — the source exposes an optional ``@wp.func`` sampler
+  (``warp_sampler`` / ``warp_beamlet_sampler``) the Warp engine wraps into a generator
+  kernel, so the primaries are generated in-kernel with no host round trip.
+
+Monoenergetic beam sources here draw from neither route's data — they are analytic.
+Spectra enter via the phase-space source (per-record energy) or a user source.
 """
 
 from __future__ import annotations
 
 import math
+from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import NamedTuple
+from typing import Any, ClassVar, NamedTuple
+
+import numpy as np
+import numpy.typing as npt
 
 from pyRadMC.rng import RNGState, uniform
 
-__all__ = ["BeamletGridSource", "ParallelBeamSource", "PencilBeamSource", "Primary"]
+__all__ = [
+    "BeamletGridSource",
+    "BeamletSource",
+    "ParallelBeamSource",
+    "PencilBeamSource",
+    "Primary",
+    "Source",
+]
+
+# Primary.kind -> IAEA particle code (photon 1, electron 2, positron 3); the pre-sampled
+# upload columns carry this so a device backend can split a mixed batch into its
+# per-kind transport queues. ``None`` means "an unqualified primary" -> photon.
+_KIND_TO_IAEA: dict[str | None, int] = {None: 1, "photon": 1, "electron": 2, "positron": 3}
+
+# The upload columns a device backend consumes (all float32 but ``particle_type``);
+# the shared contract between ``sample_batch`` and ``generate_from_upload``.
+_UPLOAD_COLUMNS: tuple[str, ...] = ("energy", "x", "y", "z", "ux", "uy", "uz", "weight")
 
 
 class Primary(NamedTuple):
@@ -38,8 +70,114 @@ class Primary(NamedTuple):
     weight: float = 1.0
 
 
+def _presample(
+    emit_one: Callable[[RNGState], Primary], seed: int, history_offset: int, n: int
+) -> dict[str, npt.NDArray[Any]]:
+    """Host-sample ``n`` primaries into the device upload columns.
+
+    Calls ``emit_one`` once per history on the same per-history ``HostRNG`` stream the
+    reference backend uses (``init_state(seed, history_index)``), so the pre-sampled
+    primaries are exactly the ones ``emit`` produces. The shared body of the default
+    ``sample_batch``/``sample_beamlet_batch``; a source with a vectorized sampler
+    (phase space) overrides those for speed.
+    """
+    from pyRadMC.rng.host import HostRNG
+
+    rng = HostRNG()
+    columns = {name: np.empty(n, dtype=np.float32) for name in _UPLOAD_COLUMNS}
+    particle_type = np.empty(n, dtype=np.int32)
+    for i in range(n):
+        p = emit_one(rng.init_state(seed, history_offset + i))
+        columns["energy"][i] = p.energy
+        columns["x"][i] = p.x
+        columns["y"][i] = p.y
+        columns["z"][i] = p.z
+        columns["ux"][i] = p.ux
+        columns["uy"][i] = p.uy
+        columns["uz"][i] = p.uz
+        columns["weight"][i] = p.weight
+        particle_type[i] = _KIND_TO_IAEA[p.kind]
+    return {"particle_type": particle_type, **columns}
+
+
+class Source(ABC):
+    """Interface for an open-field primary source (consumed by ``Engine.run``).
+
+    Implement :meth:`emit` and :attr:`max_energy` and the reference backend transports
+    it. For a device backend, the default :meth:`sample_batch` provides the *simple*
+    host-pre-sampling route for free; override :attr:`warp_sampler` with a ``@wp.func``
+    for the *advanced* in-kernel route. See the module docstring.
+    """
+
+    #: Optional ``@wp.func`` for the advanced Warp route; ``None`` selects pre-sampling.
+    #: Signature ``(history_index: int, state) -> (kind, energy, x, y, z, ux, uy, uz,
+    #: weight)``. Left untyped because it is a Warp object the core never imports.
+    warp_sampler: ClassVar[Any] = None
+
+    @property
+    @abstractmethod
+    def max_energy(self) -> float:
+        """Highest primary energy in MeV, for cross-section table sizing."""
+
+    @abstractmethod
+    def emit(self, rng_state: RNGState) -> Primary:
+        """Emit one primary, drawing from the per-history RNG ``state``."""
+
+    def sample_batch(self, seed: int, history_offset: int, n: int) -> dict[str, npt.NDArray[Any]]:
+        """Host-sample histories ``[history_offset, history_offset + n)`` into columns.
+
+        Returns the device upload columns (``particle_type`` plus
+        :data:`_UPLOAD_COLUMNS`). The default calls :meth:`emit` per history; override
+        for a vectorized sampler.
+        """
+        return _presample(self.emit, seed, history_offset, n)
+
+
+class BeamletSource(ABC):
+    """Interface for a beamlet-resolved source (consumed by ``Engine.run_dij``).
+
+    Like :class:`Source` but every emission is tagged by a beamlet index: the Dij
+    assembles one dose column per beamlet. Implement :meth:`emit`, :meth:`n_beamlets`,
+    :meth:`beamlet_bounds` and :attr:`max_energy`; :meth:`sample_beamlet_batch` is the
+    default simple route and :attr:`warp_beamlet_sampler` the advanced one.
+    """
+
+    #: Optional ``@wp.func`` for the advanced Warp Dij route; ``None`` selects
+    #: pre-sampling. Signature ``(beamlet: int, within_index: int, state) -> (...)``.
+    warp_beamlet_sampler: ClassVar[Any] = None
+
+    @property
+    @abstractmethod
+    def max_energy(self) -> float:
+        """Highest primary energy in MeV, for cross-section table sizing."""
+
+    @property
+    @abstractmethod
+    def n_beamlets(self) -> int:
+        """Number of beamlets whose columns the Dij will hold."""
+
+    @abstractmethod
+    def beamlet_bounds(self, beamlet: int) -> tuple[float, float, float, float]:
+        """Extent metadata for ``beamlet`` (implementation-defined tuple)."""
+
+    @abstractmethod
+    def emit(self, beamlet: int, rng_state: RNGState) -> Primary:
+        """Emit one primary for ``beamlet``, drawing from the per-history RNG ``state``."""
+
+    def sample_beamlet_batch(
+        self, seed: int, history_offset: int, n: int, beamlet: int
+    ) -> dict[str, npt.NDArray[Any]]:
+        """Host-sample ``n`` primaries of one ``beamlet`` into device upload columns.
+
+        The caller (the Dij engine) chooses ``seed``/``history_offset`` to realize the
+        correlated-sampling history mapping; this just emits that beamlet's primaries.
+        The default calls :meth:`emit`; override for a vectorized sampler.
+        """
+        return _presample(lambda state: self.emit(beamlet, state), seed, history_offset, n)
+
+
 @dataclass(frozen=True)
-class PencilBeamSource:
+class PencilBeamSource(Source):
     """Zero-width monoenergetic beam from a fixed point along a fixed direction.
 
     The direction is normalized at construction; a non-unit direction here would
@@ -59,6 +197,11 @@ class PencilBeamSource:
             raise ValueError("zero direction vector")
         object.__setattr__(self, "direction", tuple(c / norm for c in self.direction))
 
+    @property
+    def max_energy(self) -> float:
+        """The single beam energy."""
+        return self.energy
+
     def emit(self, rng_state: RNGState) -> Primary:
         """Emit the (deterministic) primary; consumes no random numbers."""
         return Primary(
@@ -73,7 +216,7 @@ class PencilBeamSource:
 
 
 @dataclass(frozen=True)
-class ParallelBeamSource:
+class ParallelBeamSource(Source):
     """Broad parallel beam along +z, uniform over a rectangular field at plane z.
 
     The broad-beam geometry of the Phase 0 buildup test: uniform fluence over
@@ -92,6 +235,11 @@ class ParallelBeamSource:
         if self.x_range[1] <= self.x_range[0] or self.y_range[1] <= self.y_range[0]:
             raise ValueError("empty field")
 
+    @property
+    def max_energy(self) -> float:
+        """The single beam energy."""
+        return self.energy
+
     def emit(self, rng_state: RNGState) -> Primary:
         """Emit one primary at a uniform position in the field; consumes two uniforms."""
         x = self.x_range[0] + (self.x_range[1] - self.x_range[0]) * uniform(rng_state)
@@ -100,7 +248,7 @@ class ParallelBeamSource:
 
 
 @dataclass(frozen=True)
-class BeamletGridSource:
+class BeamletGridSource(BeamletSource):
     """Parallel beamlet lattice along +z: an ``n_x`` x ``n_y`` tiling of the field.
 
     The Phase 3 Dij source. Each beamlet is one rectangle of the tiling, indexed
@@ -133,6 +281,11 @@ class BeamletGridSource:
             raise ValueError("empty field")
         if self.n_x < 1 or self.n_y < 1:
             raise ValueError(f"lattice must be at least 1x1, got {self.n_x}x{self.n_y}")
+
+    @property
+    def max_energy(self) -> float:
+        """The single beam energy."""
+        return self.energy
 
     @property
     def n_beamlets(self) -> int:

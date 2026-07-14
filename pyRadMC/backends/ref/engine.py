@@ -19,8 +19,7 @@ from pyRadMC import DIJ_TRUNCATION_RELATIVE, ECUT_MEV, ELECTRON_MASS_MEV, PCUT_M
 from pyRadMC.backends.results import TransportResult
 from pyRadMC.data.interface import CrossSectionSource
 from pyRadMC.geometry.grid import VoxelGrid
-from pyRadMC.geometry.phasespace import PhaseSpaceSource
-from pyRadMC.geometry.source import BeamletGridSource, ParallelBeamSource, PencilBeamSource
+from pyRadMC.geometry.source import BeamletSource, Source
 from pyRadMC.rng.interface import RNG
 from pyRadMC.scoring.dij import BatchedBeamletScorer, DijAssembler, DijResult
 from pyRadMC.scoring.dose import BatchedDoseScorer
@@ -45,7 +44,7 @@ class ReferenceEngine:
 
     def run(
         self,
-        source: PencilBeamSource | ParallelBeamSource | PhaseSpaceSource,
+        source: Source,
         n_histories: int,
         n_batches: int,
         seed: int,
@@ -147,7 +146,7 @@ class ReferenceEngine:
 
     def run_dij(
         self,
-        source: BeamletGridSource,
+        source: BeamletSource,
         n_histories_per_beamlet: int,
         n_batches: int,
         seed: int,

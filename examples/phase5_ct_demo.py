@@ -87,7 +87,7 @@ def make_engine(backend: str, grid, xs: TabulatedCrossSections):
 def main() -> None:
     """Build the CT, read it through the adapter, transport, and render dose on the slice."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--histories", type=int, default=20_000_000)
+    parser.add_argument("--histories", type=int, default=int(1e8))
     parser.add_argument("--batches", type=int, default=10)
     parser.add_argument("--seed", type=int, default=20260714)
     parser.add_argument("--backend", choices=("auto", "warp", "ref"), default="auto")

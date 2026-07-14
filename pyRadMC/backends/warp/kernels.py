@@ -67,6 +67,7 @@ __all__ = [
     "generate_from_upload",
     "generate_parallel_beam",
     "generate_pencil_beam",
+    "make_generator_kernel",
     "photon_kernel",
 ]
 
@@ -219,6 +220,91 @@ def _queue_push(
         q.uy[idx] = uy
         q.uz[idx] = uz
         q.rng[idx] = rng_state
+
+
+@wp.func
+def _push_source(
+    q: Queue,
+    kind: int,
+    energy: float,
+    weight: float,
+    x: float,
+    y: float,
+    z: float,
+    ux: float,
+    uy: float,
+    uz: float,
+    rng_slot: wp.uint32,
+):
+    """Atomic-append a *source* primary (``primary=1``, ``beamlet=0``) to a queue.
+
+    Mirror of :func:`_queue_push` for the wrapped-``wp.func`` generator route: the
+    generator may emit either kind, so it pushes into the matching queue at an atomic
+    slot rather than the thread's fixed index. ``primary=1`` marks it a source
+    particle (the only one that may split at first Compton).
+    """
+    idx = wp.atomic_add(q.count, 0, 1)
+    if idx < q.capacity:
+        q.kind[idx] = kind
+        q.beamlet[idx] = 0
+        q.primary[idx] = 1
+        q.energy[idx] = energy
+        q.weight[idx] = weight
+        q.x[idx] = x
+        q.y[idx] = y
+        q.z[idx] = z
+        q.ux[idx] = ux
+        q.uy[idx] = uy
+        q.uz[idx] = uz
+        q.rng[idx] = rng_slot
+
+
+_generator_cache: dict = {}
+
+
+def make_generator_kernel(sampler):
+    """Wrap a user ``@wp.func`` primary sampler into a generator kernel (cached).
+
+    ``sampler(history_index: int, state) -> (kind, energy, x, y, z, ux, uy, uz,
+    weight)`` is the advanced Warp route
+    (:attr:`pyRadMC.geometry.source.Source.warp_sampler`): the returned kernel sets up
+    the per-history RNG slot exactly as the built-in generators do (so a primary's
+    transport continues the same stream the sampler drew from), calls the user func,
+    books the emitted weight-energy (plus a positron's ``2 m_e c^2`` rest mass) into a
+    signed fixed-point counter, and pushes the primary into the photon or electron
+    queue by its kind. Memoized per sampler object so each is compiled once.
+    """
+    cached = _generator_cache.get(sampler)
+    if cached is not None:
+        return cached
+
+    @wp.kernel
+    def generate(
+        seed: int,
+        history_offset: int,
+        q_photon: Queue,
+        q_electron: Queue,
+        slots: wp.array(dtype=wp.uint32),
+        emitted: wp.array(dtype=wp.int64),
+    ):
+        tid = wp.tid()
+        h = history_offset + tid
+        slots[tid] = init_slot(seed, h)
+        state = WarpRNGState()
+        state.slots = slots
+        state.idx = tid
+        kind, energy, x, y, z, ux, uy, uz, weight = sampler(h, state)
+        latent = 0.0
+        if kind == POSITRON:
+            latent = 2.0 * ELECTRON_MASS_MEV
+        _escape(emitted, weight * (energy + latent))  # signed fixed-point accumulator
+        if kind == PHOTON:
+            _push_source(q_photon, kind, energy, weight, x, y, z, ux, uy, uz, slots[tid])
+        else:
+            _push_source(q_electron, kind, energy, weight, x, y, z, ux, uy, uz, slots[tid])
+
+    _generator_cache[sampler] = generate
+    return generate
 
 
 @wp.func

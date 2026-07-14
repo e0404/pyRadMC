@@ -40,7 +40,7 @@ from typing import BinaryIO, NamedTuple
 
 import numpy as np
 
-from pyRadMC.geometry.source import Primary
+from pyRadMC.geometry.source import Primary, Source
 from pyRadMC.rng import RNGState, uniform
 
 __all__ = [
@@ -373,7 +373,7 @@ class IAEAPhaseSpace:
             yield _decode_record(self._fh.read(length), self.header, self._struct)
 
 
-class PhaseSpaceSource:
+class PhaseSpaceSource(Source):
     """A primary source that samples particles from an IAEA phase-space file.
 
     Unlike the analytic beam sources, a phase-space file is a recorded mix of
@@ -434,7 +434,7 @@ class PhaseSpaceSource:
         codes = np.abs(view["typ"].astype(np.int16))
         energies = np.abs(view["e"].astype(np.float64))
         del view
-        self.max_energy = float(energies.max())
+        self._max_energy = float(energies.max())
         supported = (codes == IAEA_PHOTON) | (codes == IAEA_ELECTRON) | (codes == IAEA_POSITRON)
         unsupported = np.flatnonzero(~supported)
         if unsupported.size:
@@ -457,6 +457,11 @@ class PhaseSpaceSource:
         self._n_valid = n - len(self._unsupported)
         if self._n_valid == 0:
             raise ValueError(f"phase-space file {path} has no transportable particles")
+
+    @property
+    def max_energy(self) -> float:
+        """Highest particle energy in the file, in MeV (for table sizing)."""
+        return self._max_energy
 
     def _record_index(self, k: int) -> int:
         """Map the k-th *supported* record to its position in the full file.
