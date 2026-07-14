@@ -54,7 +54,7 @@ def _transport_profile() -> np.ndarray:
     rng = HostRNG()
     edep = np.zeros(NZ)
 
-    def deposit(x: float, y: float, z: float, amount: float) -> None:
+    def deposit(x: float, y: float, z: float, amount: float, scored: float) -> None:
         # Position-keyed deposits; bin by the z-voxel exactly as the grid would.
         edep[min(int(z / DZ), NZ - 1)] += amount
 

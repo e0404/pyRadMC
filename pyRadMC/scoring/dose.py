@@ -85,21 +85,31 @@ class BatchedDoseScorer:
         self._energy_deposited = 0.0
         self._energy_unscored = 0.0
 
-    def deposit(self, ix: int, iy: int, iz: int, energy: float) -> None:
-        """Add an energy deposit, in MeV, to a scoring voxel of the current batch."""
-        self._current_energy[ix, iy, iz] += energy
+    def deposit(
+        self, ix: int, iy: int, iz: int, energy: float, scored: float | None = None
+    ) -> None:
+        """Add an energy deposit, in MeV, to a scoring voxel of the current batch.
+
+        ``energy`` is the physical energy the ledger books; ``scored`` (default:
+        the same) is what the dose tally accumulates — the dose-to-water weighted
+        amount when that mode is on.
+        """
+        self._current_energy[ix, iy, iz] += energy if scored is None else scored
         self._energy_deposited += energy
 
-    def deposit_at(self, x: float, y: float, z: float, energy: float) -> None:
+    def deposit_at(
+        self, x: float, y: float, z: float, energy: float, scored: float | None = None
+    ) -> None:
         """Add a deposit at a position (cm) inside the transport grid.
 
         Routes to the containing scoring voxel, or to the unscored bucket when the
-        position lies outside the scoring grid. This is the transport loops'
+        position lies outside the scoring grid — the unscored ledger always books
+        the *physical* energy. This is the transport loops'
         :data:`~pyRadMC.transport.particles.DepositFn`.
         """
         if self._scoring.contains(x, y, z):
             ix, iy, iz = self._scoring.voxel_index(x, y, z)
-            self.deposit(ix, iy, iz, energy)
+            self.deposit(ix, iy, iz, energy, scored)
         else:
             self._energy_unscored += energy
 
@@ -107,19 +117,21 @@ class BatchedDoseScorer:
         """Book energy, in MeV, that a kernel backend tallied as unscored."""
         self._energy_unscored += energy
 
-    def deposit_grid(self, energy: np.ndarray) -> None:
+    def deposit_grid(self, energy: np.ndarray, booked: float | None = None) -> None:
         """Add a whole per-voxel energy grid, in MeV, to the current batch.
 
         The bulk entry point for kernel backends, which score device-side and hand
         back one array per batch; statistically identical to an equivalent sequence
-        of :meth:`deposit` calls.
+        of :meth:`deposit` calls. ``booked`` overrides the physical energy entered
+        into the ledger (a dose-to-water backend hands the water-weighted grid for
+        the tally but the physical total for the books); default: the grid's sum.
         """
         if energy.shape != self._current_energy.shape:
             raise ValueError(
                 f"energy grid shape {energy.shape} != dose grid {self._current_energy.shape}"
             )
         self._current_energy += energy
-        self._energy_deposited += float(energy.sum())
+        self._energy_deposited += float(energy.sum()) if booked is None else booked
 
     def end_batch(self, n_histories: int) -> None:
         """Close the current batch of ``n_histories`` emitted histories."""

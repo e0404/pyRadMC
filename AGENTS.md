@@ -388,6 +388,44 @@ chi-squared (open field and Dij, both routes), the Dij group-size invariance, an
 energy ledger are test-pinned; `examples/custom_source_demo.py` (a Gaussian pencil
 beam) is the runnable demonstration.
 
+**Decoupled dose grid + dose-to-water — DONE 2026-07-14** (maintainer-directed
+infrastructure, precedes the pyRadPlan adapter, which defines its own dose grid
+independent of the CT). Dose is *accumulated* on a
+``pyRadMC.scoring.grid.ScoringGrid`` (``scoring_grid=`` on both engines'
+``run``/``run_dij``; default None scores on the transport grid, byte-identical to
+before); transport — Woodcock tracking, stepping, all material lookups — stays on
+the transport (CT) grid and is invariant to the scoring grid (the streams never
+see it, test-pinned to the bit per device). Any origin/spacing/shape is allowed,
+**with no coverage requirement in either direction**: a deposit inside the CT but
+outside the dose grid goes to a new *unscored* energy-ledger bucket (never a
+clamped edge voxel — clamping would corrupt edge dose), so
+``emitted == deposited + unscored + escaped`` closes exactly; an uncovered dose
+voxel has zero mass and reports zero dose. Per-voxel mass is rebinned from the CT
+by exact separable 1D voxel overlap (non-aligned, non-integer ratios exact),
+which also *defines* dose-to-medium for a dose voxel overlaying several CT
+voxels. Deposits are position-keyed end to end (``DepositFn`` carries the site,
+the kernels a second ``GridInfo``); the Dij columns, ``DijResult.grid_shape``
+and the per-group device buffer all live on the scoring voxel count — the
+biggest plan-calc memory lever (2 mm CT scored at 3 mm is ~0.30x). Exact
+identities are test-pinned on both backends: aligned coarsening equals the
+summed-child energy rebin (int64 quanta are associative), subregion voxels are
+bit-equal to the covering run's (no clamping), grouping stays bit-inert, and
+cross-backend chi-squared holds on shared coarse/subregion grids.
+``scoring_mode="dose_to_water"`` (same change) weights each deposit by the
+restricted collision stopping-power ratio water/medium at the depositing
+particle's cutoff-clamped energy, per substep, from the engine's
+``CrossSectionSource`` (in-kernel from the flattened tables on Warp; Siebers et
+al. 2000, doi:10.1088/0031-9155/45/4/983). This is a **scoring-OUTPUT
+selection, not a physics toggle** (section 2.10): transport and the RNG streams
+are identical in both modes and the energy books stay physical — pinned by
+water D_w == D_m bit-identity and an exact-constant synthetic-SPR instrument on
+both backends. Stated approximations live in ``pyRadMC/scoring/dose_to_water.py``
+(sub-cutoff deposits freeze the ratio at ECUT; sub-PCUT photon deposits use the
+electron SPR in place of mass-energy-absorption ratios); KERMA mode refuses
+dose-to-water (no tracked electron to evaluate the ratio on).
+``examples/dose_grid_demo.py`` is the runnable demonstration (2 mm transport vs
+3 mm dose grid, subregion ledger, and the bone/lung D_w/D_m profile).
+
 Phases 0 through 4 have exited. Phase 4's exit record is reproduced below — it defines
 the machinery Phase 5 builds on and carries the warnings that target Phase 5;
 earlier records live in the git history of this section.

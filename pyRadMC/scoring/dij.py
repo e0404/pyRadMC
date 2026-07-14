@@ -97,22 +97,37 @@ class BatchedBeamletScorer:
         self._energy_deposited = 0.0
         self._energy_unscored = 0.0
 
-    def deposit(self, beamlet: int, ix: int, iy: int, iz: int, energy: float) -> None:
-        """Add an energy deposit, in MeV, to a voxel of one beamlet's current batch."""
+    def deposit(
+        self, beamlet: int, ix: int, iy: int, iz: int, energy: float, scored: float | None = None
+    ) -> None:
+        """Add an energy deposit, in MeV, to a voxel of one beamlet's current batch.
+
+        ``energy`` is the physical energy the ledger books; ``scored`` (default:
+        the same) is what the dose tally accumulates.
+        """
         flat = (ix * self._ny + iy) * self._nz + iz
-        self._current_energy[beamlet, flat] += energy
+        self._current_energy[beamlet, flat] += energy if scored is None else scored
         self._energy_deposited += energy
 
-    def deposit_at(self, beamlet: int, x: float, y: float, z: float, energy: float) -> None:
+    def deposit_at(
+        self,
+        beamlet: int,
+        x: float,
+        y: float,
+        z: float,
+        energy: float,
+        scored: float | None = None,
+    ) -> None:
         """Add a deposit at a position (cm) inside the transport grid.
 
         Routes to the containing scoring voxel of the beamlet's current batch, or
         to the unscored bucket when the position lies outside the scoring grid
-        (mirror of :meth:`pyRadMC.scoring.dose.BatchedDoseScorer.deposit_at`).
+        (mirror of :meth:`pyRadMC.scoring.dose.BatchedDoseScorer.deposit_at`); the
+        unscored ledger always books the physical energy.
         """
         if self._scoring.contains(x, y, z):
             ix, iy, iz = self._scoring.voxel_index(x, y, z)
-            self.deposit(beamlet, ix, iy, iz, energy)
+            self.deposit(beamlet, ix, iy, iz, energy, scored)
         else:
             self._energy_unscored += energy
 
@@ -199,6 +214,7 @@ class DijResult:
     energy_escaped: float
     energy_unscored: float = 0.0
     correlated: bool = False
+    scoring_mode: str = "dose_to_medium"
 
     @property
     def n_voxels(self) -> int:
@@ -264,6 +280,7 @@ class DijAssembler:
     n_batches: int
     truncation: float
     correlated: bool = False
+    scoring_mode: str = "dose_to_medium"
     _next_beamlet: int = 0
     _indices: list[np.ndarray] = field(default_factory=list)
     _dose: list[np.ndarray] = field(default_factory=list)
@@ -327,4 +344,5 @@ class DijAssembler:
             energy_escaped=energy_escaped,
             energy_unscored=energy_unscored,
             correlated=self.correlated,
+            scoring_mode=self.scoring_mode,
         )

@@ -45,6 +45,7 @@ from pyRadMC.geometry.source import (
 )
 from pyRadMC.scoring.dij import BatchedBeamletScorer, DijAssembler, DijResult
 from pyRadMC.scoring.dose import BatchedDoseScorer
+from pyRadMC.scoring.dose_to_water import validate_scoring_mode
 from pyRadMC.scoring.grid import ScoringGrid
 from pyRadMC.transport.particles import ELECTRON, PHOTON, POSITRON
 
@@ -146,13 +147,16 @@ class WarpEngine:
         transport_electrons: bool = True,
         primary_kind: str = "photon",
         scoring_grid: ScoringGrid | None = None,
+        scoring_mode: str = "dose_to_medium",
     ) -> TransportResult:
         """Transport ``n_histories`` primaries; same contract as the reference engine.
 
         See :meth:`pyRadMC.backends.ref.engine.ReferenceEngine.run` for parameter
         semantics — the two signatures are deliberately identical (``scoring_grid``
         included: the dose grid deposits accumulate on, default the transport grid,
-        with off-grid deposits booked to ``energy_unscored``). A source with an
+        with off-grid deposits booked to ``energy_unscored``; and ``scoring_mode``:
+        dose-to-water weights each deposit in-kernel by the stopping-power ratio
+        from the flattened tables while the books stay physical). A source with an
         in-kernel generator (the built-in mono beams) is generated on-device from
         analytic parameters, all of one ``primary_kind``. Any other source (a phase
         space, or a user :class:`~pyRadMC.geometry.source.Source`) is transported by
@@ -173,6 +177,8 @@ class WarpEngine:
                 raise ValueError(f"unknown primary_kind {primary_kind!r}")
             kind = PHOTON if primary_kind == "photon" else ELECTRON
 
+        dose_to_water = 1 if validate_scoring_mode(scoring_mode, transport_electrons) else 0
+
         device = self.device
         gi, density, material = self._upload_grid(device)
         scoring = scoring_grid if scoring_grid is not None else ScoringGrid.for_grid(self.grid)
@@ -187,6 +193,7 @@ class WarpEngine:
         edep = wp.zeros(scoring.n_voxels, dtype=wp.int64, device=device)
         escaped = wp.zeros(1, dtype=wp.int64, device=device)
         unscored = wp.zeros(1, dtype=wp.int64, device=device)
+        deposited = wp.zeros(1, dtype=wp.int64, device=device)
         violations = wp.zeros(1, dtype=wp.int32, device=device)
 
         # Advanced route: a source exposing a warp_sampler is generated in-kernel by a
@@ -209,6 +216,7 @@ class WarpEngine:
             edep.zero_()
             escaped.zero_()
             unscored.zero_()
+            deposited.zero_()
             remaining = per_batch
             while remaining > 0:
                 n_chunk = min(chunk, remaining)
@@ -229,10 +237,12 @@ class WarpEngine:
                         edep,
                         escaped,
                         unscored,
+                        deposited,
                         violations,
                         pcut,
                         ecut,
                         transport_electrons,
+                        dose_to_water,
                         device,
                     )
                 elif generator is not None:
@@ -251,10 +261,12 @@ class WarpEngine:
                         edep,
                         escaped,
                         unscored,
+                        deposited,
                         violations,
                         pcut,
                         ecut,
                         transport_electrons,
+                        dose_to_water,
                         emitted,
                         device,
                     )
@@ -274,10 +286,12 @@ class WarpEngine:
                         edep,
                         escaped,
                         unscored,
+                        deposited,
                         violations,
                         pcut,
                         ecut,
                         transport_electrons,
+                        dose_to_water,
                         device,
                     )
                 history += n_chunk
@@ -290,7 +304,12 @@ class WarpEngine:
                     "declaration did not cover."
                 )
             batch_energy = edep.numpy().astype(np.float64) * ENERGY_QUANTUM_MEV
-            scorer.deposit_grid(batch_energy.reshape(scoring.shape))
+            # Under dose-to-water the tally map is water-weighted; the ledger books
+            # the physical energy from the kernel's dedicated counter instead.
+            booked = (
+                float(deposited.numpy()[0]) * ENERGY_QUANTUM_MEV if dose_to_water != 0 else None
+            )
+            scorer.deposit_grid(batch_energy.reshape(scoring.shape), booked=booked)
             scorer.end_batch(per_batch)
             scorer.add_unscored(float(unscored.numpy()[0]) * ENERGY_QUANTUM_MEV)
             energy_escaped += float(escaped.numpy()[0]) * ENERGY_QUANTUM_MEV
@@ -312,6 +331,7 @@ class WarpEngine:
             energy_unscored=dose.energy_unscored,
             n_histories=n_histories,
             n_batches=n_batches,
+            scoring_mode=scoring_mode,
         )
 
     def run_dij(
@@ -327,6 +347,7 @@ class WarpEngine:
         correlated: bool = True,
         beamlet_group_size: int = 32,
         scoring_grid: ScoringGrid | None = None,
+        scoring_mode: str = "dose_to_medium",
     ) -> DijResult:
         """Compute the Dij over the lattice; same contract as the reference engine.
 
@@ -350,7 +371,8 @@ class WarpEngine:
         ``scoring_grid`` (semantics as in :meth:`run`) is the memory lever here:
         ``n_voxels`` above is the *scoring* voxel count, so a coarser dose grid
         shrinks the per-group device buffer and the sparse Dij cubically while
-        transport keeps the full CT resolution.
+        transport keeps the full CT resolution. ``scoring_mode`` weights the
+        column tallies as in :meth:`run`; the energy books stay physical.
         """
         if n_histories_per_beamlet < 1:
             raise ValueError(
@@ -363,6 +385,7 @@ class WarpEngine:
             )
         if beamlet_group_size < 1:
             raise ValueError(f"need a positive beamlet group size, got {beamlet_group_size}")
+        dose_to_water = 1 if validate_scoring_mode(scoring_mode, transport_electrons) else 0
 
         device = self.device
         gi, density, material = self._upload_grid(device)
@@ -386,6 +409,7 @@ class WarpEngine:
 
         escaped = wp.zeros(1, dtype=wp.int64, device=device)
         unscored = wp.zeros(1, dtype=wp.int64, device=device)
+        deposited = wp.zeros(1, dtype=wp.int64, device=device)
         violations = wp.zeros(1, dtype=wp.int32, device=device)
         assembler = DijAssembler(
             grid_shape=scoring.shape,
@@ -394,6 +418,7 @@ class WarpEngine:
             n_batches=n_batches,
             truncation=truncation,
             correlated=correlated,
+            scoring_mode=scoring_mode,
         )
         # Energy books in exact integer quanta (Python ints, unbounded), converted
         # to MeV once at the end: float accumulation order would otherwise make
@@ -414,6 +439,7 @@ class WarpEngine:
             scorer = BatchedBeamletScorer(scoring, n_batches, group)
             escaped.zero_()
             unscored.zero_()
+            deposited.zero_()
 
             if use_lattice:
                 self._generate_group_lattice(
@@ -437,10 +463,12 @@ class WarpEngine:
                     edep,
                     escaped,
                     unscored,
+                    deposited,
                     violations,
                     pcut,
                     ecut,
                     transport_electrons,
+                    dose_to_water,
                     device,
                 )
             elif beamlet_generator is not None:
@@ -465,10 +493,12 @@ class WarpEngine:
                     edep,
                     escaped,
                     unscored,
+                    deposited,
                     violations,
                     pcut,
                     ecut,
                     transport_electrons,
+                    dose_to_water,
                     emitted_counter,
                     device,
                 )
@@ -493,10 +523,12 @@ class WarpEngine:
                     edep,
                     escaped,
                     unscored,
+                    deposited,
                     violations,
                     pcut,
                     ecut,
                     transport_electrons,
+                    dose_to_water,
                     device,
                 )
 
@@ -508,7 +540,12 @@ class WarpEngine:
                     "declaration did not cover."
                 )
             group_quanta = edep.numpy()
-            deposited_quanta += int(group_quanta.sum())
+            # Under dose-to-water the edep map is water-weighted; the physical
+            # ledger comes from the kernel's dedicated counter instead.
+            if dose_to_water != 0:
+                deposited_quanta += int(deposited.numpy()[0])
+            else:
+                deposited_quanta += int(group_quanta.sum())
             escaped_quanta += int(escaped.numpy()[0])
             unscored_quanta += int(unscored.numpy()[0])
             group_energy = group_quanta.astype(np.float64) * ENERGY_QUANTUM_MEV
@@ -550,10 +587,12 @@ class WarpEngine:
         edep,
         escaped,
         unscored,
+        deposited,
         violations,
         pcut,
         ecut,
         transport_electrons,
+        dose_to_water,
         device,
     ) -> None:
         """Generate one chunk of primaries and drain all queues."""
@@ -587,10 +626,12 @@ class WarpEngine:
             edep,
             escaped,
             unscored,
+            deposited,
             violations,
             pcut,
             ecut,
             transport_electrons,
+            dose_to_water,
             device,
         )
 
@@ -610,10 +651,12 @@ class WarpEngine:
         edep,
         escaped,
         unscored,
+        deposited,
         violations,
         pcut,
         ecut,
         transport_electrons,
+        dose_to_water,
         emitted,
         device,
     ) -> None:
@@ -650,10 +693,12 @@ class WarpEngine:
             edep,
             escaped,
             unscored,
+            deposited,
             violations,
             pcut,
             ecut,
             transport_electrons,
+            dose_to_water,
             device,
         )
 
@@ -673,10 +718,12 @@ class WarpEngine:
         edep,
         escaped,
         unscored,
+        deposited,
         violations,
         pcut,
         ecut,
         transport_electrons,
+        dose_to_water,
         device,
     ) -> float:
         """Host-sample a chunk via ``source.sample_batch``, seed queues by kind, drain.
@@ -736,10 +783,12 @@ class WarpEngine:
             edep,
             escaped,
             unscored,
+            deposited,
             violations,
             pcut,
             ecut,
             transport_electrons,
+            dose_to_water,
             device,
         )
 
@@ -797,10 +846,12 @@ class WarpEngine:
         edep,
         escaped,
         unscored,
+        deposited,
         violations,
         pcut,
         ecut,
         transport_electrons,
+        dose_to_water,
         device,
     ) -> None:
         """Ping-pong the photon and electron kernels until every queue is empty."""
@@ -823,9 +874,11 @@ class WarpEngine:
                         edep,
                         escaped,
                         unscored,
+                        deposited,
                         pcut,
                         ecut,
                         1 if transport_electrons else 0,
+                        dose_to_water,
                         violations,
                     ],
                     device=device,
@@ -851,8 +904,10 @@ class WarpEngine:
                         edep,
                         escaped,
                         unscored,
+                        deposited,
                         pcut,
                         ecut,
+                        dose_to_water,
                     ],
                     device=device,
                 )
@@ -926,10 +981,12 @@ class WarpEngine:
         edep,
         escaped,
         unscored,
+        deposited,
         violations,
         pcut,
         ecut,
         transport_electrons,
+        dose_to_water,
         device,
     ) -> None:
         """Built-in lattice: generate the whole group's block in-kernel, in flat chunks."""
@@ -986,10 +1043,12 @@ class WarpEngine:
                 edep,
                 escaped,
                 unscored,
+                deposited,
                 violations,
                 pcut,
                 ecut,
                 transport_electrons,
+                dose_to_water,
                 device,
             )
             t += n_chunk
@@ -1016,10 +1075,12 @@ class WarpEngine:
         edep,
         escaped,
         unscored,
+        deposited,
         violations,
         pcut,
         ecut,
         transport_electrons,
+        dose_to_water,
         emitted,
         device,
     ) -> None:
@@ -1067,10 +1128,12 @@ class WarpEngine:
                 edep,
                 escaped,
                 unscored,
+                deposited,
                 violations,
                 pcut,
                 ecut,
                 transport_electrons,
+                dose_to_water,
                 device,
             )
             t += n_chunk
@@ -1096,10 +1159,12 @@ class WarpEngine:
         edep,
         escaped,
         unscored,
+        deposited,
         violations,
         pcut,
         ecut,
         transport_electrons,
+        dose_to_water,
         device,
     ) -> float:
         """Host pre-sample each beamlet's primaries and upload them, tagged for the Dij.
@@ -1156,10 +1221,12 @@ class WarpEngine:
                     edep,
                     escaped,
                     unscored,
+                    deposited,
                     violations,
                     pcut,
                     ecut,
                     transport_electrons,
+                    dose_to_water,
                     device,
                 )
                 r0 = r1

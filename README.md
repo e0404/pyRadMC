@@ -3,8 +3,10 @@
 Fast photon Monte Carlo dose engine for radiotherapy treatment planning.
 
 > **Status: Phase 4 complete, pre-alpha; Phase 5 underway — the phase-space source,
-> the tabulated cross-section backend, multi-material data (ICRP media), and a CT image
-> adapter are done; the pyRadPlan adapter is the last remaining workstream.**
+> the tabulated cross-section backend, multi-material data (ICRP media), a CT image
+> adapter, and the decoupled dose grid (arbitrary/subregion scoring grids with
+> selectable dose-to-water) are done; the pyRadPlan adapter is the last remaining
+> workstream.**
 > The engine produces its primary
 > product: a **beamlet-resolved dose influence matrix (Dij)** — sparse CSC columns
 > with a per-entry statistical uncertainty, computed on CPU and CUDA by tagging
@@ -157,7 +159,7 @@ repeating here because they are the ones people break:
 | 2 ✅ | Warp backend, CPU and CUDA from one source² |
 | 3 ✅ | Beamlet tagging, batched Dij assembly, basic variance reduction³ |
 | 4 ✅ | Correlated sampling; study of per-beamlet noise vs. optimized-plan bias⁴ |
-| 5 🚧 | Tabulated data ✅, phase-space source ✅, multi-material media ✅, CT image adapter ✅, pyRadPlan adapter (last) |
+| 5 🚧 | Tabulated data ✅, phase-space source ✅, multi-material media ✅, CT image adapter ✅, decoupled dose grid + dose-to-water ✅⁵, pyRadPlan adapter (last) |
 
 ¹ The nightly validation tier gates against NIST ESTAR ranges and against
 maintainer-supplied EGSnrc depth-dose curves (1, 2 and 6 MeV; gamma 5%/3mm). The
@@ -206,6 +208,21 @@ low-dose tail, so the tested mechanism is retained for the Phase 5 phase-space
 source rather than run now. Roulette stays always-on. Carried into Phase 5: a
 per-batch plan-dose sigma (correlated columns forbid a quadrature one), built
 with the adapter that consumes it.
+
+⁵ Dose is accumulated on a **scoring grid decoupled from the transport (CT)
+grid** (`pyRadMC.scoring.grid.ScoringGrid`; `scoring_grid=` on both engines'
+`run`/`run_dij`): any origin/spacing/shape, including subregions — deposits the
+dose grid does not cover go to an *unscored* energy-ledger bucket, never a
+clamped edge voxel, and `emitted == deposited + unscored + escaped` stays exact.
+Per-voxel mass is rebinned from the CT by exact separable voxel overlap, which
+also defines dose-to-medium for mixed voxels. Scoring a 2 mm CT on a 3 mm dose
+grid shrinks the Dij and the per-group device buffers by ~0.30x with better
+per-voxel statistics; transport physics is invariant (test-pinned to the bit
+per device). `scoring_mode="dose_to_water"` additionally weights each deposit
+by the restricted collision stopping-power ratio water/medium at the depositing
+particle's energy (Siebers et al. 2000) — a scoring-output selection, not a
+physics toggle: transport and the energy books are identical in both modes.
+See `examples/dose_grid_demo.py`.
 
 ## License
 

@@ -45,3 +45,6 @@ class TransportResult:
     n_histories: int
     n_batches: int
     energy_unscored: float = 0.0
+    scoring_mode: str = "dose_to_medium"
+    """Tally weighting the dose was produced under (Phase 5): ``"dose_to_medium"``
+    or ``"dose_to_water"``. The energy books are physical in both modes."""

@@ -52,8 +52,10 @@ from pyRadMC.transport.particles import (
     ELECTRON,
     PHOTON,
     DepositFn,
+    DepositWeightFn,
     SpawnFn,
     annihilate_at_rest,
+    unit_weight,
 )
 
 __all__ = [
@@ -110,6 +112,7 @@ def electron_steps(
     spawn: SpawnFn,
     pcut: float,
     ecut: float,
+    deposit_weight: DepositWeightFn = unit_weight,
 ) -> float:
     """Transport one electron or positron; secondaries go to ``spawn``.
 
@@ -120,6 +123,12 @@ def electron_steps(
     electron itself never plays; its ``weight`` is constant and scales every
     deposit, so the engine's exact energy balance extends over this loop
     unchanged.
+
+    ``deposit_weight`` (dose-to-water SPR; default dose-to-medium) is evaluated
+    once per substep at the substep's *initial* energy and voxel material — the
+    same (E, material) the restricted stopping power charged the continuous loss
+    with, so the conversion undoes exactly the weighting the medium applied —
+    and at the cutoff-clamped energy for local sub-threshold deposits.
     """
     escaped = 0.0
     e = energy
@@ -139,25 +148,38 @@ def electron_steps(
         if not grid.contains(x, y, z):
             return w * (e + latent)
 
-    def deposit_or_escape(px: float, py: float, pz: float, amount: float) -> float:
+    def deposit_or_escape(px: float, py: float, pz: float, amount: float, factor: float) -> float:
         """Deposit at a point if it is inside the transport grid; else escaped.
 
         The scoring callback receives the position, not a voxel index: routing
         into the (possibly decoupled) scoring grid is the scorer's job.
+        ``factor`` is the caller's deposit weight; escape stays physical.
         """
         if amount <= 0.0:
             return 0.0
         if grid.contains(px, py, pz):
-            deposit(px, py, pz, amount)
+            deposit(px, py, pz, amount, factor * amount)
             return 0.0
         return amount
 
     while True:
         if e <= ecut:
             # Terminal: local deposit; the current position is inside the grid.
-            deposit(x, y, z, w * e)
+            ix, iy, iz = grid.voxel_index(x, y, z)
+            terminal_material = int(grid.material[ix, iy, iz])
+            deposit(x, y, z, w * e, deposit_weight(e, terminal_material) * w * e)
             if is_positron:
-                annihilate_at_rest(x, y, z, rng_state, deposit, spawn, pcut, w)
+                annihilate_at_rest(
+                    x,
+                    y,
+                    z,
+                    rng_state,
+                    deposit,
+                    spawn,
+                    pcut,
+                    w,
+                    deposit_weight(ELECTRON_MASS_MEV, terminal_material),
+                )
             return escaped
 
         ix, iy, iz = grid.voxel_index(x, y, z)
@@ -197,6 +219,9 @@ def electron_steps(
         )
         continuous = de + local_brems
         emit_brems = uniform(rng_state) < emit_probability
+        # Dose-to-water: one factor per substep, at the (E, material) that set the
+        # stopping power above; 1.0 exactly under the dose-to-medium default.
+        substep_factor = deposit_weight(e, material)
 
         # --- random hinge: move, deflect, move --------------------------------------
         s1 = uniform(rng_state) * s
@@ -205,7 +230,7 @@ def electron_steps(
         d2 = continuous - d1
 
         escaped += deposit_or_escape(
-            x + ux * s1 / 2.0, y + uy * s1 / 2.0, z + uz * s1 / 2.0, w * d1
+            x + ux * s1 / 2.0, y + uy * s1 / 2.0, z + uz * s1 / 2.0, w * d1, substep_factor
         )
         e -= d1
         x += ux * s1
@@ -235,11 +260,11 @@ def electron_steps(
                 if photon_w > 0.0:
                     spawn((PHOTON, k, photon_w, x, y, z, ux, uy, uz))  # forward
             else:
-                escaped += deposit_or_escape(x, y, z, w * k)
+                escaped += deposit_or_escape(x, y, z, w * k, deposit_weight(k, material))
             e -= k
 
         escaped += deposit_or_escape(
-            x + ux * s2 / 2.0, y + uy * s2 / 2.0, z + uz * s2 / 2.0, w * d2
+            x + ux * s2 / 2.0, y + uy * s2 / 2.0, z + uz * s2 / 2.0, w * d2, substep_factor
         )
         e -= d2
         x += ux * s2

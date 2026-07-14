@@ -32,7 +32,7 @@ class _FirstDepositDepth:
         self.dz = dz
         self.depth: float | None = None
 
-    def __call__(self, x: float, y: float, z: float, energy: float) -> None:
+    def __call__(self, x: float, y: float, z: float, energy: float, scored: float) -> None:
         if self.depth is None:
             # Deposits are position-keyed; quantize to the voxel-centre depth the
             # binned exponential comparison below was calibrated against.

@@ -49,6 +49,7 @@ from pyRadMC import (
 )
 from pyRadMC.backends.warp.physics import warp_physics
 from pyRadMC.data.interface import PhotonProcess
+from pyRadMC.data.materials import WATER
 from pyRadMC.rng.warp_shim import WarpRNGState, init_slot, spawn_stream, uniform
 from pyRadMC.transport.electron import (
     BOUNDARY_NUDGE_CM,
@@ -375,8 +376,37 @@ def make_beamlet_generator_kernel(sampler):
 
 
 @wp.func
+def _spr_factor(
+    tab: Tables,
+    dose_to_water: int,
+    energy: float,
+    mat: int,
+    ecut: float,
+) -> float:
+    """Dose-to-water deposit weight from the flattened stopping tables.
+
+    In-kernel mirror of :func:`pyRadMC.scoring.dose_to_water.water_spr`: the
+    restricted collision stopping-power ratio water/medium at the deposit's
+    cutoff-clamped energy (the lookup additionally clamps to the table domain).
+    Exactly 1.0 under dose-to-medium — and for water deposits, where it is the
+    ratio of two identical lookups.
+    """
+    if dose_to_water == 0:
+        return 1.0
+    e = wp.max(energy, ecut)
+    s_water = lookup_2d(
+        tab.stopping_restricted, WATER, tab.e_log_e_min, tab.e_inv_dlog, tab.n_points, e
+    )
+    s_medium = lookup_2d(
+        tab.stopping_restricted, mat, tab.e_log_e_min, tab.e_inv_dlog, tab.n_points, e
+    )
+    return s_water / s_medium
+
+
+@wp.func
 def _deposit(
     edep: wp.array(dtype=wp.int64),
+    deposited: wp.array(dtype=wp.int64),
     unscored: wp.array(dtype=wp.int64),
     si: GridInfo,
     base: int,
@@ -384,6 +414,8 @@ def _deposit(
     y: float,
     z: float,
     energy: float,
+    factor: float,
+    dose_to_water: int,
 ):
     """Round-to-nearest fixed-point deposit at a position inside the transport grid.
 
@@ -399,15 +431,29 @@ def _deposit(
     single column. When the scoring grid is the transport grid (the default),
     the routing math is the identical ``point_axis_index`` arithmetic the
     transport loop used, so behaviour is byte-identical to indexed deposits.
+
+    ``factor`` is the dose-to-water weight of this deposit (``_spr_factor``;
+    exactly 1.0 under dose-to-medium, where multiplying by it is a bit-exact
+    identity): the *tally* accumulates the weighted quanta, while the ledger —
+    the unscored bucket, and under dose-to-water the ``deposited`` counter —
+    books physical quanta, so the energy balance is scoring-mode invariant.
+    Under dose-to-medium the host derives deposited energy from ``edep``
+    directly and the counter is skipped.
     """
-    quanta = wp.int64(wp.float64(energy) * wp.float64(_INV_QUANTUM) + wp.float64(0.5))
     if point_inside(x, y, z, si.x_lo, si.y_lo, si.z_lo, si.x_hi, si.y_hi, si.z_hi):
+        quanta = wp.int64(
+            wp.float64(energy) * wp.float64(factor) * wp.float64(_INV_QUANTUM) + wp.float64(0.5)
+        )
         ix = point_axis_index(x, si.x_lo, si.sx, si.nx)
         iy = point_axis_index(y, si.y_lo, si.sy, si.ny)
         iz = point_axis_index(z, si.z_lo, si.sz, si.nz)
         wp.atomic_add(edep, base + (ix * si.ny + iy) * si.nz + iz, quanta)
+        if dose_to_water != 0:
+            physical = wp.int64(wp.float64(energy) * wp.float64(_INV_QUANTUM) + wp.float64(0.5))
+            wp.atomic_add(deposited, 0, physical)
     else:
-        wp.atomic_add(unscored, 0, quanta)
+        physical = wp.int64(wp.float64(energy) * wp.float64(_INV_QUANTUM) + wp.float64(0.5))
+        wp.atomic_add(unscored, 0, physical)
 
 
 @wp.func
@@ -426,6 +472,7 @@ def _escape(escaped: wp.array(dtype=wp.int64), energy: float):
 def _deposit_or_escape(
     edep: wp.array(dtype=wp.int64),
     escaped: wp.array(dtype=wp.int64),
+    deposited: wp.array(dtype=wp.int64),
     unscored: wp.array(dtype=wp.int64),
     gi: GridInfo,
     si: GridInfo,
@@ -434,17 +481,20 @@ def _deposit_or_escape(
     y: float,
     z: float,
     amount: float,
+    factor: float,
+    dose_to_water: int,
 ):
     """Mirror of the reference electron loop's midpoint deposit helper.
 
     Escape is decided against the *transport* grid ``gi`` (outside it is
     vacuum); a deposit inside it then routes by position into the scoring grid
-    ``si`` or the unscored bucket, exactly as on the reference backend.
+    ``si`` or the unscored bucket, exactly as on the reference backend. The
+    escaped ledger books the physical amount; ``factor`` weights the tally only.
     """
     if amount <= 0.0:
         return
     if point_inside(x, y, z, gi.x_lo, gi.y_lo, gi.z_lo, gi.x_hi, gi.y_hi, gi.z_hi):
-        _deposit(edep, unscored, si, base, x, y, z, amount)
+        _deposit(edep, deposited, unscored, si, base, x, y, z, amount, factor, dose_to_water)
     else:
         _escape(escaped, amount)
 
@@ -458,20 +508,36 @@ def _annihilate_at_rest(
     state: WarpRNGState,
     q_photon: Queue,
     edep: wp.array(dtype=wp.int64),
+    deposited: wp.array(dtype=wp.int64),
     unscored: wp.array(dtype=wp.int64),
     pcut: float,
     beamlet: int,
     base: int,
     weight: float,
+    factor: float,
+    dose_to_water: int,
 ):
     """Positron annihilation at rest; mirror of transport.particles.annihilate_at_rest.
 
     Called only for positions inside the transport grid. Each annihilation photon
     gets its own child stream, since the pair are transported by independent
     threads; both inherit the positron's beamlet tag and statistical weight.
+    ``factor`` is the caller's dose-to-water weight at the deposit site.
     """
     if pcut >= ELECTRON_MASS_MEV:
-        _deposit(edep, unscored, si, base, x, y, z, weight * 2.0 * ELECTRON_MASS_MEV)
+        _deposit(
+            edep,
+            deposited,
+            unscored,
+            si,
+            base,
+            x,
+            y,
+            z,
+            weight * 2.0 * ELECTRON_MASS_MEV,
+            factor,
+            dose_to_water,
+        )
         return
     ax, ay, az = sample_isotropic_direction(state)
     _queue_push(
@@ -518,9 +584,11 @@ def photon_kernel(
     edep: wp.array(dtype=wp.int64),
     escaped: wp.array(dtype=wp.int64),
     unscored: wp.array(dtype=wp.int64),
+    deposited: wp.array(dtype=wp.int64),
     pcut: float,
     ecut: float,
     transport_electrons: int,
+    dose_to_water: int,
     majorant_violations: wp.array(dtype=wp.int32),
 ):
     """One thread transports one photon to termination; Woodcock tracking.
@@ -528,6 +596,8 @@ def photon_kernel(
     Sequencing mirrors ``transport.photon.photon_steps`` statement for statement;
     consult that loop for the physics commentary. ``gi`` is the transport grid;
     ``si`` the scoring grid deposits route into (equal to ``gi`` by default).
+    ``dose_to_water`` selects the tally weighting (``_spr_factor``); the books
+    stay physical either way.
     """
     tid = wp.tid()
     e = q_in.energy[tid]
@@ -641,12 +711,38 @@ def photon_kernel(
                             spawn_stream(state),
                         )
                     else:
-                        _deposit(edep, unscored, si, base, x, y, z, split_w * recoil)
+                        f = _spr_factor(tab, dose_to_water, recoil, mat, ecut)
+                        _deposit(
+                            edep,
+                            deposited,
+                            unscored,
+                            si,
+                            base,
+                            x,
+                            y,
+                            z,
+                            split_w * recoil,
+                            f,
+                            dose_to_water,
+                        )
                     cos_gamma = compton_cos_theta(e, ratio)
                     gx, gy, gz = rotate_direction(ux, uy, uz, cos_gamma, phi)
                     e_scatter = e * ratio
                     if e_scatter <= pcut:
-                        _deposit(edep, unscored, si, base, x, y, z, split_w * e_scatter)
+                        f = _spr_factor(tab, dose_to_water, e_scatter, mat, ecut)
+                        _deposit(
+                            edep,
+                            deposited,
+                            unscored,
+                            si,
+                            base,
+                            x,
+                            y,
+                            z,
+                            split_w * e_scatter,
+                            f,
+                            dose_to_water,
+                        )
                     else:
                         copy_w = split_w
                         keep = True
@@ -697,12 +793,25 @@ def photon_kernel(
                     spawn_stream(state),
                 )
             else:
-                _deposit(edep, unscored, si, base, x, y, z, w * recoil)
+                f = _spr_factor(tab, dose_to_water, recoil, mat, ecut)
+                _deposit(edep, deposited, unscored, si, base, x, y, z, w * recoil, f, dose_to_water)
             cos_gamma = compton_cos_theta(e, ratio)
             ux, uy, uz = rotate_direction(ux, uy, uz, cos_gamma, phi)
             e *= ratio
             if e <= pcut:
-                _deposit(edep, unscored, si, base, x, y, z, w * e)
+                _deposit(
+                    edep,
+                    deposited,
+                    unscored,
+                    si,
+                    base,
+                    x,
+                    y,
+                    z,
+                    w * e,
+                    _spr_factor(tab, dose_to_water, e, mat, ecut),
+                    dose_to_water,
+                )
                 return
             if e < PHOTON_ROULETTE_MEV and w < PHOTON_ROULETTE_WEIGHT_CAP:
                 # Basic VR, mirror of the reference loop: roulette the softened
@@ -718,7 +827,19 @@ def photon_kernel(
                     q_electron, ELECTRON, beamlet, e, w, x, y, z, ux, uy, uz, spawn_stream(state)
                 )
             else:
-                _deposit(edep, unscored, si, base, x, y, z, w * e)
+                _deposit(
+                    edep,
+                    deposited,
+                    unscored,
+                    si,
+                    base,
+                    x,
+                    y,
+                    z,
+                    w * e,
+                    _spr_factor(tab, dose_to_water, e, mat, ecut),
+                    dose_to_water,
+                )
             return
         else:  # pair production
             kinetic = e - 2.0 * ELECTRON_MASS_MEV
@@ -742,7 +863,10 @@ def photon_kernel(
                         spawn_stream(state),
                     )
                 else:
-                    _deposit(edep, unscored, si, base, x, y, z, w * share_e)
+                    f = _spr_factor(tab, dose_to_water, share_e, mat, ecut)
+                    _deposit(
+                        edep, deposited, unscored, si, base, x, y, z, w * share_e, f, dose_to_water
+                    )
                 if share_p > ecut:
                     _queue_push(
                         q_electron,
@@ -759,14 +883,48 @@ def photon_kernel(
                         spawn_stream(state),
                     )
                 else:
-                    _deposit(edep, unscored, si, base, x, y, z, w * share_p)
+                    f = _spr_factor(tab, dose_to_water, share_p, mat, ecut)
+                    _deposit(
+                        edep, deposited, unscored, si, base, x, y, z, w * share_p, f, dose_to_water
+                    )
                     _annihilate_at_rest(
-                        x, y, z, si, state, q_photon_out, edep, unscored, pcut, beamlet, base, w
+                        x,
+                        y,
+                        z,
+                        si,
+                        state,
+                        q_photon_out,
+                        edep,
+                        deposited,
+                        unscored,
+                        pcut,
+                        beamlet,
+                        base,
+                        w,
+                        _spr_factor(tab, dose_to_water, ELECTRON_MASS_MEV, mat, ecut),
+                        dose_to_water,
                     )
             else:
-                _deposit(edep, unscored, si, base, x, y, z, w * kinetic)
+                f = _spr_factor(tab, dose_to_water, kinetic, mat, ecut)
+                _deposit(
+                    edep, deposited, unscored, si, base, x, y, z, w * kinetic, f, dose_to_water
+                )
                 _annihilate_at_rest(
-                    x, y, z, si, state, q_photon_out, edep, unscored, pcut, beamlet, base, w
+                    x,
+                    y,
+                    z,
+                    si,
+                    state,
+                    q_photon_out,
+                    edep,
+                    deposited,
+                    unscored,
+                    pcut,
+                    beamlet,
+                    base,
+                    w,
+                    _spr_factor(tab, dose_to_water, ELECTRON_MASS_MEV, mat, ecut),
+                    dose_to_water,
                 )
             return
 
@@ -785,8 +943,10 @@ def electron_kernel(
     edep: wp.array(dtype=wp.int64),
     escaped: wp.array(dtype=wp.int64),
     unscored: wp.array(dtype=wp.int64),
+    deposited: wp.array(dtype=wp.int64),
     pcut: float,
     ecut: float,
+    dose_to_water: int,
 ):
     """One thread transports one electron or positron; Class II condensed history.
 
@@ -794,6 +954,9 @@ def electron_kernel(
     statement; delta rays go to the electron out-queue instead of a stack, and
     bremsstrahlung/annihilation photons to the photon queue. ``gi`` is the
     transport grid; ``si`` the scoring grid deposits route into.
+    ``dose_to_water`` selects the tally weighting (``_spr_factor``): one factor
+    per substep, at the substep's initial energy and voxel material — the same
+    (E, material) the restricted stopping power charged the loss with.
     """
     tid = wp.tid()
     is_positron = q_in.kind[tid] == POSITRON
@@ -833,10 +996,32 @@ def electron_kernel(
 
     while True:
         if e <= ecut:
-            _deposit(edep, unscored, si, base, x, y, z, w * e)
+            # Terminal: local deposit; the material lookup is needed for the
+            # dose-to-water factor (a source may inject a sub-cutoff electron,
+            # so the loop body's lookup may not have run yet).
+            t_ix = point_axis_index(x, gi.x_lo, gi.sx, gi.nx)
+            t_iy = point_axis_index(y, gi.y_lo, gi.sy, gi.ny)
+            t_iz = point_axis_index(z, gi.z_lo, gi.sz, gi.nz)
+            t_mat = material[t_ix, t_iy, t_iz]
+            f = _spr_factor(tab, dose_to_water, e, t_mat, ecut)
+            _deposit(edep, deposited, unscored, si, base, x, y, z, w * e, f, dose_to_water)
             if is_positron:
                 _annihilate_at_rest(
-                    x, y, z, si, state, q_photon, edep, unscored, pcut, beamlet, base, w
+                    x,
+                    y,
+                    z,
+                    si,
+                    state,
+                    q_photon,
+                    edep,
+                    deposited,
+                    unscored,
+                    pcut,
+                    beamlet,
+                    base,
+                    w,
+                    _spr_factor(tab, dose_to_water, ELECTRON_MASS_MEV, t_mat, ecut),
+                    dose_to_water,
                 )
             return
 
@@ -908,6 +1093,7 @@ def electron_kernel(
         )
         continuous = de + local_brems
         emit_brems = uniform(state) < emit_probability
+        substep_factor = _spr_factor(tab, dose_to_water, e, mat, ecut)
 
         # --- random hinge: move, deflect, move ----------------------------------
         s1 = uniform(state) * s
@@ -920,6 +1106,7 @@ def electron_kernel(
         _deposit_or_escape(
             edep,
             escaped,
+            deposited,
             unscored,
             gi,
             si,
@@ -928,6 +1115,8 @@ def electron_kernel(
             y + uy * s1 / 2.0,
             z + uz * s1 / 2.0,
             w * d1,
+            substep_factor,
+            dose_to_water,
         )
         e -= d1
         x += ux * s1
@@ -972,12 +1161,27 @@ def electron_kernel(
                         spawn_stream(state),
                     )
             else:
-                _deposit_or_escape(edep, escaped, unscored, gi, si, base, x, y, z, w * k)
+                _deposit_or_escape(
+                    edep,
+                    escaped,
+                    deposited,
+                    unscored,
+                    gi,
+                    si,
+                    base,
+                    x,
+                    y,
+                    z,
+                    w * k,
+                    _spr_factor(tab, dose_to_water, k, mat, ecut),
+                    dose_to_water,
+                )
             e -= k
 
         _deposit_or_escape(
             edep,
             escaped,
+            deposited,
             unscored,
             gi,
             si,
@@ -986,6 +1190,8 @@ def electron_kernel(
             y + uy * s2 / 2.0,
             z + uz * s2 / 2.0,
             w * d2,
+            substep_factor,
+            dose_to_water,
         )
         e -= d2
         x += ux * s2

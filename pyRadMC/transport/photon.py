@@ -78,9 +78,11 @@ from pyRadMC.transport.particles import (
     PHOTON,
     POSITRON,
     DepositFn,
+    DepositWeightFn,
     SpawnFn,
     StackEntry,
     annihilate_at_rest,
+    unit_weight,
 )
 
 __all__ = ["DepositFn", "photon_steps", "transport_photon"]
@@ -113,6 +115,7 @@ def photon_steps(
     ecut: float,
     transport_electrons: bool,
     is_primary: bool,
+    deposit_weight: DepositWeightFn = unit_weight,
 ) -> float:
     """Transport one photon; secondaries go to ``spawn``. Returns removed energy.
 
@@ -135,6 +138,11 @@ def photon_steps(
     physical escape plus the net effect of Russian roulette (a killed photon's
     weight-energy enters positively, a survivor's boost negatively, so the game
     leaves the per-run balance exact and the expectation unchanged).
+
+    ``deposit_weight`` is the scoring-output weight (dose-to-water SPR; the
+    default books dose-to-medium): every local deposit passes both the physical
+    amount and ``deposit_weight(E, material) * amount`` to the scorer, evaluated
+    at the deposited particle's energy in the interaction voxel's material.
     """
     escaped = 0.0
     e = energy
@@ -208,12 +216,14 @@ def photon_steps(
                     edir = rotate_direction(ux, uy, uz, cos_electron, phi + math.pi)
                     spawn((ELECTRON, recoil, split_w, x, y, z, *edir))
                 else:
-                    deposit(x, y, z, split_w * recoil)
+                    amount = split_w * recoil
+                    deposit(x, y, z, amount, deposit_weight(recoil, material) * amount)
                 cos_gamma = compton_cos_theta(e, ratio)
                 gx, gy, gz = rotate_direction(ux, uy, uz, cos_gamma, phi)
                 e_scatter = e * ratio
                 if e_scatter <= pcut:
-                    deposit(x, y, z, split_w * e_scatter)
+                    amount = split_w * e_scatter
+                    deposit(x, y, z, amount, deposit_weight(e_scatter, material) * amount)
                     continue
                 copy_w = split_w
                 if e_scatter < PHOTON_ROULETTE_MEV and copy_w < PHOTON_ROULETTE_WEIGHT_CAP:
@@ -230,7 +240,7 @@ def photon_steps(
             if transport_electrons and e > ecut:
                 spawn((ELECTRON, e, w, x, y, z, ux, uy, uz))  # forward, no fluorescence
             else:
-                deposit(x, y, z, w * e)
+                deposit(x, y, z, w * e, deposit_weight(e, material) * w * e)
             return escaped
         else:  # pair production
             kinetic = e - 2.0 * ELECTRON_MASS_MEV
@@ -243,12 +253,32 @@ def photon_steps(
                     if share > ecut:
                         spawn((kind, share, w, x, y, z, ux, uy, uz))  # forward
                     else:
-                        deposit(x, y, z, w * share)
+                        deposit(x, y, z, w * share, deposit_weight(share, material) * w * share)
                         if kind == POSITRON:
-                            annihilate_at_rest(x, y, z, rng_state, deposit, spawn, pcut, w)
+                            annihilate_at_rest(
+                                x,
+                                y,
+                                z,
+                                rng_state,
+                                deposit,
+                                spawn,
+                                pcut,
+                                w,
+                                deposit_weight(ELECTRON_MASS_MEV, material),
+                            )
             else:
-                deposit(x, y, z, w * kinetic)
-                annihilate_at_rest(x, y, z, rng_state, deposit, spawn, pcut, w)
+                deposit(x, y, z, w * kinetic, deposit_weight(kinetic, material) * w * kinetic)
+                annihilate_at_rest(
+                    x,
+                    y,
+                    z,
+                    rng_state,
+                    deposit,
+                    spawn,
+                    pcut,
+                    w,
+                    deposit_weight(ELECTRON_MASS_MEV, material),
+                )
             return escaped
 
 

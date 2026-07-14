@@ -15,7 +15,14 @@ from pyRadMC.data.interface import CrossSectionSource
 from pyRadMC.geometry.grid import VoxelGrid
 from pyRadMC.rng import RNGState
 from pyRadMC.transport.electron import electron_steps
-from pyRadMC.transport.particles import PHOTON, POSITRON, DepositFn, StackEntry
+from pyRadMC.transport.particles import (
+    PHOTON,
+    POSITRON,
+    DepositFn,
+    DepositWeightFn,
+    StackEntry,
+    unit_weight,
+)
 from pyRadMC.transport.photon import photon_steps
 
 __all__ = ["transport_history"]
@@ -38,6 +45,7 @@ def transport_history(
     ecut: float,
     transport_electrons: bool = True,
     weight: float = 1.0,
+    deposit_weight: DepositWeightFn = unit_weight,
 ) -> float:
     """Transport one primary and all its descendants; returns the escaped energy.
 
@@ -64,6 +72,10 @@ def transport_history(
         sees weight-scaled (expected) energy throughout, so the returned escaped
         energy is weight-scaled too — callers must weight the emitted-energy book
         the same way for the energy ledger to balance.
+    deposit_weight
+        Scoring-output weight per deposit (dose-to-water SPR; the default books
+        dose-to-medium). Applied by the step loops; see
+        :mod:`pyRadMC.scoring.dose_to_water`.
     """
     stack: list[StackEntry] = [(kind, energy, weight, x, y, z, ux, uy, uz)]
     escaped = 0.0
@@ -97,6 +109,7 @@ def transport_history(
                 ecut,
                 transport_electrons,
                 is_primary=is_primary,
+                deposit_weight=deposit_weight,
             )
         else:
             escaped += electron_steps(
@@ -116,5 +129,6 @@ def transport_history(
                 stack.append,
                 pcut,
                 ecut,
+                deposit_weight=deposit_weight,
             )
     return escaped

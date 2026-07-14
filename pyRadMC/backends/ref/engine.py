@@ -23,9 +23,16 @@ from pyRadMC.geometry.source import BeamletSource, Source
 from pyRadMC.rng.interface import RNG
 from pyRadMC.scoring.dij import BatchedBeamletScorer, DijAssembler, DijResult
 from pyRadMC.scoring.dose import BatchedDoseScorer
+from pyRadMC.scoring.dose_to_water import validate_scoring_mode, water_spr
 from pyRadMC.scoring.grid import ScoringGrid
 from pyRadMC.transport.history import transport_history
-from pyRadMC.transport.particles import ELECTRON, PHOTON, POSITRON
+from pyRadMC.transport.particles import (
+    ELECTRON,
+    PHOTON,
+    POSITRON,
+    DepositWeightFn,
+    unit_weight,
+)
 
 __all__ = ["ReferenceEngine", "TransportResult"]
 
@@ -33,6 +40,23 @@ __all__ = ["ReferenceEngine", "TransportResult"]
 # phase-space source sets ``kind`` per record; beam sources leave it None and the
 # run's ``primary_kind`` argument decides.
 _KIND_TO_PARTICLE = {"photon": PHOTON, "electron": ELECTRON, "positron": POSITRON}
+
+
+def _deposit_weight_for(
+    scoring_mode: str, cross_sections: CrossSectionSource, ecut: float, transport_electrons: bool
+) -> DepositWeightFn:
+    """Validate the scoring mode and build the per-deposit weight it selects.
+
+    ``scoring_mode`` is a scoring-OUTPUT selection, not a physics toggle
+    (AGENTS.md 2.10): transport is identical in both modes — the RNG streams,
+    interaction sampling and stepping never see it — only the tally weighting of
+    each deposit differs, exactly like the choice of scoring grid. Dose-to-water
+    is refused in KERMA mode: with no tracked electron the stopping-power ratio
+    has nothing to be evaluated on (see :mod:`pyRadMC.scoring.dose_to_water`).
+    """
+    if not validate_scoring_mode(scoring_mode, transport_electrons):
+        return unit_weight
+    return partial(water_spr, cross_sections=cross_sections, ecut=ecut)
 
 
 @dataclass(frozen=True)
@@ -54,6 +78,7 @@ class ReferenceEngine:
         transport_electrons: bool = True,
         primary_kind: str = "photon",
         scoring_grid: ScoringGrid | None = None,
+        scoring_mode: str = "dose_to_medium",
     ) -> TransportResult:
         """Transport ``n_histories`` primaries in ``n_batches`` equal batches.
 
@@ -94,6 +119,12 @@ class ReferenceEngine:
             ``emitted == deposited + unscored + escaped`` stays exact. Transport
             never sees this grid: the streams, and hence the physics, are
             invariant to it.
+        scoring_mode
+            ``"dose_to_medium"`` (default) or ``"dose_to_water"`` — a
+            scoring-OUTPUT selection (see :func:`_deposit_weight_for` and
+            :mod:`pyRadMC.scoring.dose_to_water`): transport is identical, only
+            the per-deposit tally weighting differs, and the energy books stay
+            physical in both modes. Requires ``transport_electrons=True``.
         """
         if n_histories < 1:
             raise ValueError(f"need at least one history, got {n_histories}")
@@ -104,6 +135,9 @@ class ReferenceEngine:
             )
         if primary_kind not in ("photon", "electron"):
             raise ValueError(f"unknown primary_kind {primary_kind!r}")
+        deposit_weight = _deposit_weight_for(
+            scoring_mode, self.cross_sections, ecut, transport_electrons
+        )
 
         scorer = BatchedDoseScorer(
             scoring_grid if scoring_grid is not None else self.grid, n_batches
@@ -144,6 +178,7 @@ class ReferenceEngine:
                     ecut,
                     transport_electrons,
                     weight=primary.weight,
+                    deposit_weight=deposit_weight,
                 )
             scorer.end_batch(per_batch)
 
@@ -157,6 +192,7 @@ class ReferenceEngine:
             energy_unscored=dose.energy_unscored,
             n_histories=n_histories,
             n_batches=n_batches,
+            scoring_mode=scoring_mode,
         )
 
     def run_dij(
@@ -171,6 +207,7 @@ class ReferenceEngine:
         truncation: float = DIJ_TRUNCATION_RELATIVE,
         correlated: bool = True,
         scoring_grid: ScoringGrid | None = None,
+        scoring_mode: str = "dose_to_medium",
     ) -> DijResult:
         """Compute the beamlet-resolved dose influence matrix over the lattice.
 
@@ -228,6 +265,9 @@ class ReferenceEngine:
             the sparse Dij all scale with the *scoring* voxel count, so a coarser
             dose grid shrinks them cubically while transport keeps the full CT
             resolution.
+        scoring_mode
+            Tally weighting of the columns, as in :meth:`run`; recorded in
+            ``DijResult.scoring_mode``.
         """
         if n_histories_per_beamlet < 1:
             raise ValueError(
@@ -239,6 +279,9 @@ class ReferenceEngine:
                 f"n_batches={n_batches}; unequal batches would weight batch means inconsistently"
             )
 
+        deposit_weight = _deposit_weight_for(
+            scoring_mode, self.cross_sections, ecut, transport_electrons
+        )
         n_beamlets = source.n_beamlets
         per_batch = n_histories_per_beamlet // n_batches
         scoring = scoring_grid if scoring_grid is not None else ScoringGrid.for_grid(self.grid)
@@ -271,6 +314,7 @@ class ReferenceEngine:
                         pcut,
                         ecut,
                         transport_electrons,
+                        deposit_weight=deposit_weight,
                     )
             scorer.end_batch(per_batch)
 
@@ -282,6 +326,7 @@ class ReferenceEngine:
             n_batches=n_batches,
             truncation=truncation,
             correlated=correlated,
+            scoring_mode=scoring_mode,
         )
         assembler.add_block(0, block.dose, block.sigma)
         return assembler.finalize(
