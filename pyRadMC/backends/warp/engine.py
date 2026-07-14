@@ -38,6 +38,7 @@ from pyRadMC.data.interface import CrossSectionSource
 from pyRadMC.geometry.grid import VoxelGrid
 from pyRadMC.geometry.source import (
     BeamletGridSource,
+    BeamletSource,
     ParallelBeamSource,
     PencilBeamSource,
     Source,
@@ -283,7 +284,7 @@ class WarpEngine:
 
     def run_dij(
         self,
-        source: BeamletGridSource,
+        source: BeamletSource,
         n_histories_per_beamlet: int,
         n_batches: int,
         seed: int,
@@ -327,10 +328,21 @@ class WarpEngine:
 
         device = self.device
         gi, density, material = self._upload_grid(device)
-        tab = self._upload_tables(source.energy, pcut, ecut, device)
+        tab = self._upload_tables(source.max_energy, pcut, ecut, device)
         n_beamlets = source.n_beamlets
         per_batch = n_histories_per_beamlet // n_batches
         n_voxels = int(np.prod(self.grid.shape))
+        # Route by capability: the built-in lattice generates in-kernel from analytic
+        # bounds; a source with a warp_beamlet_sampler is generated in-kernel by a
+        # wrapped kernel; any other source is host pre-sampled per beamlet and uploaded.
+        # All three transport each beamlet primary as a unit-weight photon (the
+        # reference Dij contract).
+        use_lattice = isinstance(source, BeamletGridSource)
+        beamlet_generator = None
+        emitted_counter = None
+        if not use_lattice and source.warp_beamlet_sampler is not None:
+            beamlet_generator = kernels.make_beamlet_generator_kernel(source.warp_beamlet_sampler)
+            emitted_counter = wp.zeros(1, dtype=wp.int64, device=device)
 
         escaped = wp.zeros(1, dtype=wp.int64, device=device)
         violations = wp.zeros(1, dtype=wp.int32, device=device)
@@ -347,22 +359,10 @@ class WarpEngine:
         # the tallies — unlike the matrix — depend on the group size.
         deposited_quanta = 0
         escaped_quanta = 0
+        emitted_energy = 0.0
 
         for group_start in range(0, n_beamlets, beamlet_group_size):
             group = min(beamlet_group_size, n_beamlets - group_start)
-            bounds = np.array(
-                [source.beamlet_bounds(group_start + k) for k in range(group)],
-                dtype=np.float64,
-            )
-            x_lo = wp.array(bounds[:, 0].astype(np.float32), dtype=float, device=device)
-            x_extent = wp.array(
-                (bounds[:, 1] - bounds[:, 0]).astype(np.float32), dtype=float, device=device
-            )
-            y_lo = wp.array(bounds[:, 2].astype(np.float32), dtype=float, device=device)
-            y_extent = wp.array(
-                (bounds[:, 3] - bounds[:, 2]).astype(np.float32), dtype=float, device=device
-            )
-
             block_histories = group * n_histories_per_beamlet  # all batches at once
             chunk = min(self.chunk_size, block_histories)
             capacity = chunk * self.queue_factor
@@ -370,45 +370,25 @@ class WarpEngine:
             slots = wp.zeros(capacity, dtype=wp.uint32, device=device)
             edep = wp.zeros(group * n_batches * n_voxels, dtype=wp.int64, device=device)
             scorer = BatchedBeamletScorer(self.grid, n_batches, group)
-
             escaped.zero_()
-            t = 0
-            while t < block_histories:
-                n_chunk = min(chunk, block_histories - t)
-                for q in queues:
-                    _reset_count(q, device)
-                wp.launch(
-                    kernels.generate_beamlet_lattice,
-                    dim=n_chunk,
-                    inputs=[
-                        seed,
-                        group_start,
-                        n_histories_per_beamlet,
-                        per_batch,
-                        n_batches,
-                        t,
-                        1 if correlated else 0,
-                        source.energy,
-                        source.z,
-                        x_lo,
-                        x_extent,
-                        y_lo,
-                        y_extent,
-                        slots,
-                        queues[0],
-                    ],
-                    device=device,
-                )
-                _set_count(queues[0], n_chunk, device)
-                self._drain_queues(
-                    queues[0],
-                    queues[1],
-                    queues[2],
-                    queues[3],
+
+            if use_lattice:
+                self._generate_group_lattice(
+                    source,
+                    group_start,
+                    group,
+                    seed,
+                    n_histories_per_beamlet,
+                    per_batch,
+                    n_batches,
+                    correlated,
+                    chunk,
+                    block_histories,
                     gi,
                     density,
                     material,
                     tab,
+                    queues,
                     slots,
                     edep,
                     escaped,
@@ -418,7 +398,59 @@ class WarpEngine:
                     transport_electrons,
                     device,
                 )
-                t += n_chunk
+            elif beamlet_generator is not None:
+                self._generate_group_beamlet_wrapped(
+                    beamlet_generator,
+                    group_start,
+                    group,
+                    seed,
+                    n_histories_per_beamlet,
+                    per_batch,
+                    n_batches,
+                    correlated,
+                    chunk,
+                    block_histories,
+                    gi,
+                    density,
+                    material,
+                    tab,
+                    queues,
+                    slots,
+                    edep,
+                    escaped,
+                    violations,
+                    pcut,
+                    ecut,
+                    transport_electrons,
+                    emitted_counter,
+                    device,
+                )
+            else:
+                emitted_energy += self._generate_group_presampled(
+                    source,
+                    group_start,
+                    group,
+                    seed,
+                    n_histories_per_beamlet,
+                    per_batch,
+                    n_batches,
+                    correlated,
+                    chunk,
+                    gi,
+                    density,
+                    material,
+                    tab,
+                    queues,
+                    slots,
+                    edep,
+                    escaped,
+                    violations,
+                    pcut,
+                    ecut,
+                    transport_electrons,
+                    device,
+                )
+
             wp.synchronize_device(device)
             if int(violations.numpy()[0]) != 0:
                 raise RuntimeError(
@@ -438,8 +470,12 @@ class WarpEngine:
             block = scorer.finalize()
             assembler.add_block(group_start, block.dose, block.sigma)
 
+        if use_lattice:
+            emitted_energy = n_beamlets * n_histories_per_beamlet * source.max_energy
+        elif emitted_counter is not None:
+            emitted_energy = float(emitted_counter.numpy()[0]) * ENERGY_QUANTUM_MEV
         return assembler.finalize(
-            energy_emitted=n_beamlets * n_histories_per_beamlet * source.energy,
+            energy_emitted=emitted_energy,
             energy_deposited=deposited_quanta * ENERGY_QUANTUM_MEV,
             energy_escaped=escaped_quanta * ENERGY_QUANTUM_MEV,
         )
@@ -603,11 +639,26 @@ class WarpEngine:
 
         photon = pt == 1  # IAEA photon; electrons (2) and positrons (3) share the e- queue
         charged = ~photon
+        zero_tag = np.zeros(n_chunk, dtype=np.int32)  # a plain run scores one column
         self._seed_queue(
-            q_photon, seed, hist[photon], transport_kind[photon], batch, photon, device
+            q_photon,
+            seed,
+            hist[photon],
+            zero_tag[photon],
+            transport_kind[photon],
+            batch,
+            photon,
+            device,
         )
         self._seed_queue(
-            q_electron, seed, hist[charged], transport_kind[charged], batch, charged, device
+            q_electron,
+            seed,
+            hist[charged],
+            zero_tag[charged],
+            transport_kind[charged],
+            batch,
+            charged,
+            device,
         )
 
         self._drain_queues(
@@ -636,8 +687,8 @@ class WarpEngine:
             )
         )
 
-    def _seed_queue(self, queue, seed, hist_g, kind_g, batch, mask, device) -> None:
-        """Upload one kind-group's primaries and write them into ``queue``."""
+    def _seed_queue(self, queue, seed, hist_g, beamlet_g, kind_g, batch, mask, device) -> None:
+        """Upload one kind-group's primaries (tagged by ``beamlet_g``) into ``queue``."""
         n = int(hist_g.shape[0])
         if n == 0:
             _set_count(queue, 0, device)
@@ -652,6 +703,7 @@ class WarpEngine:
             inputs=[
                 seed,
                 wp.array(hist_g, dtype=wp.int32, device=device),
+                wp.array(beamlet_g, dtype=wp.int32, device=device),
                 wp.array(kind_g, dtype=wp.int32, device=device),
                 cols["energy"],
                 cols["x"],
@@ -782,6 +834,255 @@ class WarpEngine:
             )
         else:
             raise ValueError(f"unsupported source type {type(source).__name__}")
+
+    def _generate_group_lattice(
+        self,
+        source,
+        group_start,
+        group,
+        seed,
+        n_per,
+        per_batch,
+        n_batches,
+        correlated,
+        chunk,
+        block_histories,
+        gi,
+        density,
+        material,
+        tab,
+        queues,
+        slots,
+        edep,
+        escaped,
+        violations,
+        pcut,
+        ecut,
+        transport_electrons,
+        device,
+    ) -> None:
+        """Built-in lattice: generate the whole group's block in-kernel, in flat chunks."""
+        bounds = np.array(
+            [source.beamlet_bounds(group_start + k) for k in range(group)], dtype=np.float64
+        )
+        x_lo = wp.array(bounds[:, 0].astype(np.float32), dtype=float, device=device)
+        x_extent = wp.array(
+            (bounds[:, 1] - bounds[:, 0]).astype(np.float32), dtype=float, device=device
+        )
+        y_lo = wp.array(bounds[:, 2].astype(np.float32), dtype=float, device=device)
+        y_extent = wp.array(
+            (bounds[:, 3] - bounds[:, 2]).astype(np.float32), dtype=float, device=device
+        )
+        t = 0
+        while t < block_histories:
+            n_chunk = min(chunk, block_histories - t)
+            for q in queues:
+                _reset_count(q, device)
+            wp.launch(
+                kernels.generate_beamlet_lattice,
+                dim=n_chunk,
+                inputs=[
+                    seed,
+                    group_start,
+                    n_per,
+                    per_batch,
+                    n_batches,
+                    t,
+                    1 if correlated else 0,
+                    source.energy,
+                    source.z,
+                    x_lo,
+                    x_extent,
+                    y_lo,
+                    y_extent,
+                    slots,
+                    queues[0],
+                ],
+                device=device,
+            )
+            _set_count(queues[0], n_chunk, device)
+            self._drain_queues(
+                queues[0],
+                queues[1],
+                queues[2],
+                queues[3],
+                gi,
+                density,
+                material,
+                tab,
+                slots,
+                edep,
+                escaped,
+                violations,
+                pcut,
+                ecut,
+                transport_electrons,
+                device,
+            )
+            t += n_chunk
+
+    def _generate_group_beamlet_wrapped(
+        self,
+        generator,
+        group_start,
+        group,
+        seed,
+        n_per,
+        per_batch,
+        n_batches,
+        correlated,
+        chunk,
+        block_histories,
+        gi,
+        density,
+        material,
+        tab,
+        queues,
+        slots,
+        edep,
+        escaped,
+        violations,
+        pcut,
+        ecut,
+        transport_electrons,
+        emitted,
+        device,
+    ) -> None:
+        """Advanced Dij route: generate the group's block in-kernel via a wrapped sampler.
+
+        Same flat-block chunking as the built-in lattice, but the per-primary position
+        comes from the user's ``warp_beamlet_sampler`` (wrapped by
+        :func:`~pyRadMC.backends.warp.kernels.make_beamlet_generator_kernel`) instead of
+        analytic bounds; the wrapper books emitted energy into ``emitted``.
+        """
+        t = 0
+        while t < block_histories:
+            n_chunk = min(chunk, block_histories - t)
+            for q in queues:
+                _reset_count(q, device)
+            wp.launch(
+                generator,
+                dim=n_chunk,
+                inputs=[
+                    seed,
+                    group_start,
+                    n_per,
+                    per_batch,
+                    n_batches,
+                    t,
+                    1 if correlated else 0,
+                    slots,
+                    emitted,
+                    queues[0],
+                ],
+                device=device,
+            )
+            _set_count(queues[0], n_chunk, device)
+            self._drain_queues(
+                queues[0],
+                queues[1],
+                queues[2],
+                queues[3],
+                gi,
+                density,
+                material,
+                tab,
+                slots,
+                edep,
+                escaped,
+                violations,
+                pcut,
+                ecut,
+                transport_electrons,
+                device,
+            )
+            t += n_chunk
+
+    def _generate_group_presampled(
+        self,
+        source,
+        group_start,
+        group,
+        seed,
+        n_per,
+        per_batch,
+        n_batches,
+        correlated,
+        chunk,
+        gi,
+        density,
+        material,
+        tab,
+        queues,
+        slots,
+        edep,
+        escaped,
+        violations,
+        pcut,
+        ecut,
+        transport_electrons,
+        device,
+    ) -> float:
+        """Host pre-sample each beamlet's primaries and upload them, tagged for the Dij.
+
+        For beamlet ``j`` the within-beamlet index ``r`` keys the transport RNG on ``r``
+        (correlated) or ``h = j*n_per + r`` (independent) — the mapping
+        ``ReferenceEngine.run_dij`` defines — and the column tag is
+        ``local * n_batches + (r // per_batch)`` into the group's dense buffer, so the
+        result is bit-invariant to grouping/chunking. Every beamlet primary is a
+        unit-weight photon at the sampled energy/position, matching the reference Dij.
+        Returns the group's emitted energy.
+        """
+        emitted = 0.0
+        for local in range(group):
+            beamlet = group_start + local
+            offset = 0 if correlated else beamlet * n_per
+            cols = source.sample_beamlet_batch(seed, offset, n_per, beamlet)
+            emitted += float(np.sum(cols["energy"].astype(np.float64)))  # photon, weight 1
+            r = np.arange(n_per, dtype=np.int64)
+            key = (offset + r).astype(np.int32)
+            tag = (local * n_batches + (r // per_batch)).astype(np.int32)
+            r0 = 0
+            while r0 < n_per:
+                r1 = min(r0 + chunk, n_per)
+                nc = r1 - r0
+                sub = slice(r0, r1)
+                sub_batch = {
+                    name: cols[name][sub] for name in ("energy", "x", "y", "z", "ux", "uy", "uz")
+                }
+                sub_batch["weight"] = np.ones(nc, dtype=np.float32)
+                for q in queues:
+                    _reset_count(q, device)
+                self._seed_queue(
+                    queues[0],
+                    seed,
+                    key[sub],
+                    tag[sub],
+                    np.full(nc, PHOTON, dtype=np.int32),
+                    sub_batch,
+                    np.ones(nc, dtype=bool),
+                    device,
+                )
+                self._drain_queues(
+                    queues[0],
+                    queues[1],
+                    queues[2],
+                    queues[3],
+                    gi,
+                    density,
+                    material,
+                    tab,
+                    slots,
+                    edep,
+                    escaped,
+                    violations,
+                    pcut,
+                    ecut,
+                    transport_electrons,
+                    device,
+                )
+                r0 = r1
+        return emitted
 
     def _upload_grid(self, device: str):
         gi = GridInfo()

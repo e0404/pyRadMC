@@ -166,10 +166,11 @@ silent misconfiguration downstream. Concretely:
 pyRadMC/
   physics/     pure scalar functions: sampling, kinematics, energy loss
   data/        CrossSectionSource interface; analytic and tabulated backends; materials
-  geometry/    rectilinear voxel grid, Woodcock majorant, source models
+  geometry/    rectilinear voxel grid, Woodcock majorant, Source/BeamletSource interface
   transport/   photon and electron step loops, particle queues
   scoring/     dose scoring, batched Dij assembly
   rng/         RNG interface and per-target shims
+  adapters/    optional, out-of-core bridges (CT image; the pyRadPlan adapter, later)
   backends/
     ref/       pure NumPy oracle; never optimized
     warp/      production; targets cpu and cuda from one source
@@ -177,6 +178,13 @@ pyRadMC/
 
 Backend code contains **launch and memory management only**. Physics lives in `physics/`.
 If you are writing a sampling routine inside `backends/`, stop.
+
+**Sources are user-extensible** (`geometry/source.py`): the sanctioned extension point is
+subclassing `Source` (open field) or `BeamletSource` (Dij) and implementing `emit` +
+`max_energy`. The reference backend runs it directly; a device backend gets it for free
+via the default `sample_batch` host **pre-sampling** route, or in-kernel via an optional
+`warp_sampler`/`warp_beamlet_sampler` `@wp.func`. Do **not** re-add closed
+`isinstance` dispatch that rejects unknown sources.
 
 ---
 
@@ -365,6 +373,20 @@ for a standalone MC"), in order:
    not an interface bias.
 3. **pyRadPlan adapter — the last remaining Phase 5 workstream** (with the per-batch
    plan-dose sigma carried below).
+
+**Public source interface — DONE 2026-07-14** (maintainer-directed infrastructure,
+precedes the pyRadPlan adapter which will hand the engine beamlet sources). `Source`
+and `BeamletSource` ABCs (`geometry/source.py`) are the extension point: a user
+implements `emit` + `max_energy` and the reference backend runs it. On Warp both emit
+modes have **both routes** — the *simple* host pre-sampling (`sample_batch` /
+`sample_beamlet_batch` → `generate_from_upload`, the phase-space path generalized) and
+the *advanced* in-kernel wrapping of an optional `warp_sampler`/`warp_beamlet_sampler`
+`@wp.func` (`make_generator_kernel` / `make_beamlet_generator_kernel`). The built-in
+beam/lattice sources keep their validated in-kernel generators; the engines route by
+capability, no longer raising on unknown types. A custom source's cross-backend
+chi-squared (open field and Dij, both routes), the Dij group-size invariance, and the
+energy ledger are test-pinned; `examples/custom_source_demo.py` (a Gaussian pencil
+beam) is the runnable demonstration.
 
 Phases 0 through 4 have exited. Phase 4's exit record is reproduced below — it defines
 the machinery Phase 5 builds on and carries the warnings that target Phase 5;

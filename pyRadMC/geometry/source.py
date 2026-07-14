@@ -137,9 +137,11 @@ class BeamletSource(ABC):
     """Interface for a beamlet-resolved source (consumed by ``Engine.run_dij``).
 
     Like :class:`Source` but every emission is tagged by a beamlet index: the Dij
-    assembles one dose column per beamlet. Implement :meth:`emit`, :meth:`n_beamlets`,
-    :meth:`beamlet_bounds` and :attr:`max_energy`; :meth:`sample_beamlet_batch` is the
-    default simple route and :attr:`warp_beamlet_sampler` the advanced one.
+    assembles one dose column per beamlet. Implement :meth:`emit`, :meth:`n_beamlets`
+    and :attr:`max_energy`; :meth:`sample_beamlet_batch` is the default simple route
+    and :attr:`warp_beamlet_sampler` the advanced one. (Beamlet *geometry* — a
+    rectangle, a lattice, an arbitrary aperture — is the source's private business; the
+    engine only ever asks for the count and per-beamlet emissions.)
     """
 
     #: Optional ``@wp.func`` for the advanced Warp Dij route; ``None`` selects
@@ -155,10 +157,6 @@ class BeamletSource(ABC):
     @abstractmethod
     def n_beamlets(self) -> int:
         """Number of beamlets whose columns the Dij will hold."""
-
-    @abstractmethod
-    def beamlet_bounds(self, beamlet: int) -> tuple[float, float, float, float]:
-        """Extent metadata for ``beamlet`` (implementation-defined tuple)."""
 
     @abstractmethod
     def emit(self, beamlet: int, rng_state: RNGState) -> Primary:

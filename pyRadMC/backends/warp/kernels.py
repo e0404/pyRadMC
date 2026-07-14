@@ -67,6 +67,7 @@ __all__ = [
     "generate_from_upload",
     "generate_parallel_beam",
     "generate_pencil_beam",
+    "make_beamlet_generator_kernel",
     "make_generator_kernel",
     "photon_kernel",
 ]
@@ -304,6 +305,72 @@ def make_generator_kernel(sampler):
             _push_source(q_electron, kind, energy, weight, x, y, z, ux, uy, uz, slots[tid])
 
     _generator_cache[sampler] = generate
+    return generate
+
+
+_beamlet_generator_cache: dict = {}
+
+
+def make_beamlet_generator_kernel(sampler):
+    """Wrap a user ``@wp.func`` beamlet sampler into a Dij generator kernel (cached).
+
+    ``sampler(beamlet: int, within_index: int, state) -> (energy, x, y, z, ux, uy, uz)``
+    is the advanced Warp Dij route
+    (:attr:`pyRadMC.geometry.source.BeamletSource.warp_beamlet_sampler`): the returned
+    kernel bakes the same flat-block history mapping as
+    :func:`generate_beamlet_lattice` — group-local beamlet ``t // n_per``, within-beamlet
+    index ``r``, batch ``r // per_batch``, global history ``h = beamlet*n_per + r``,
+    correlated key ``r`` — calls the sampler for the primary's position, and writes a
+    unit-weight photon tagged with the batch-resolved column ``local*n_batches + batch``.
+    Emitted energy is booked into a signed fixed-point counter. Memoized per sampler.
+    """
+    cached = _beamlet_generator_cache.get(sampler)
+    if cached is not None:
+        return cached
+
+    @wp.kernel
+    def generate(
+        seed: int,
+        group_start: int,
+        n_per: int,
+        per_batch: int,
+        n_batches: int,
+        t_offset: int,
+        correlated: int,
+        slots: wp.array(dtype=wp.uint32),
+        emitted: wp.array(dtype=wp.int64),
+        q: Queue,
+    ):
+        tid = wp.tid()
+        t = t_offset + tid
+        local = t // n_per
+        r = t - local * n_per
+        batch = r // per_batch
+        beamlet = group_start + local
+        h = beamlet * n_per + r
+        key = h
+        if correlated != 0:
+            key = r
+        slots[tid] = init_slot(seed, key)
+        state = WarpRNGState()
+        state.slots = slots
+        state.idx = tid
+        energy, x, y, z, ux, uy, uz = sampler(beamlet, r, state)
+        _escape(emitted, energy)  # unit-weight photon; no positron latent in a Dij
+        q.kind[tid] = PHOTON
+        q.beamlet[tid] = local * n_batches + batch
+        q.primary[tid] = 1
+        q.energy[tid] = energy
+        q.weight[tid] = 1.0
+        q.x[tid] = x
+        q.y[tid] = y
+        q.z[tid] = z
+        q.ux[tid] = ux
+        q.uy[tid] = uy
+        q.uz[tid] = uz
+        q.rng[tid] = slots[tid]
+
+    _beamlet_generator_cache[sampler] = generate
     return generate
 
 
@@ -961,6 +1028,7 @@ def generate_pencil_beam(
 def generate_from_upload(
     seed: int,
     hist: wp.array(dtype=wp.int32),
+    beamlet: wp.array(dtype=wp.int32),
     kind: wp.array(dtype=wp.int32),
     energy: wp.array(dtype=float),
     px: wp.array(dtype=float),
@@ -972,17 +1040,19 @@ def generate_from_upload(
     weight: wp.array(dtype=float),
     q: Queue,
 ):
-    """Write host-sampled primaries (a phase-space chunk) at fixed slots.
+    """Write host-sampled primaries at fixed slots.
 
-    Mirror of :func:`generate_pencil_beam` for a phase-space source: kind, energy,
-    weight, position and direction come per-particle from uploaded arrays instead of
-    analytic parameters. The transport rng is seeded from the primary's own history
-    index (``hist``), so it is a pure function of ``(seed, history)`` and independent
-    of chunk boundaries — the host draws the record from a separate stream.
+    Mirror of :func:`generate_pencil_beam` for host-sampled sources (a phase space, or
+    a user pre-sampled source): kind, energy, weight, position and direction come
+    per-particle from uploaded arrays instead of analytic parameters. ``beamlet`` is
+    the per-particle Dij column tag (all zero for a plain ``run``). The transport rng
+    is seeded from the uploaded ``hist`` key (the history index for a plain run, the
+    correlated-sampling key for a Dij), so it is a pure function of ``(seed, key)`` and
+    independent of chunk boundaries — the host drew the position from a separate stream.
     """
     tid = wp.tid()
     q.kind[tid] = kind[tid]
-    q.beamlet[tid] = 0
+    q.beamlet[tid] = beamlet[tid]
     q.primary[tid] = 1  # source particle: the only one that may split
     q.energy[tid] = energy[tid]
     q.weight[tid] = weight[tid]
