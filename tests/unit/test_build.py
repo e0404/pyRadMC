@@ -7,7 +7,11 @@ library caches, and that an already-cached file is returned without a download.
 
 from __future__ import annotations
 
+import io
+import logging
 from pathlib import Path
+
+import pytest
 
 from pyRadMC.data.tabulated import build
 
@@ -25,3 +29,27 @@ def test_download_returns_cached_file_without_network(tmp_path: Path) -> None:
     result = build.download_library("epdl", tmp_path)
     assert result == cached
     assert result.read_text() == "already here"
+
+
+def test_download_progress_goes_through_logging_not_stdout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Library output policy: progress is a logger INFO record, never a print.
+
+    The consumer (pyRadPlan, a notebook) controls verbosity via the standard
+    ``logging`` hierarchy, so an un-configured import must stay silent on stdout.
+    """
+    monkeypatch.setattr(
+        build.urllib.request, "urlopen", lambda request: io.BytesIO(b"library bytes")
+    )
+    with caplog.at_level(logging.INFO, logger="pyRadMC"):
+        result = build.download_library("epdl", tmp_path, force=True)
+    assert result.read_bytes() == b"library bytes"
+    assert any(
+        record.levelno == logging.INFO and "downloading" in record.getMessage()
+        for record in caplog.records
+    )
+    assert capsys.readouterr().out == ""

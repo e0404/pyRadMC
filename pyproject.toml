@@ -101,7 +101,7 @@ line-length = 100
 target-version = "py310"
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I", "N", "UP", "B", "SIM", "NPY", "RUF", "D"]
+select = ["E", "F", "W", "I", "N", "UP", "B", "SIM", "NPY", "RUF", "D", "T20"]
 ignore = [
     "D203",  # conflicts with D211
     "D213",  # conflicts with D212
@@ -110,7 +110,8 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/*" = ["D"]
+"tests/*" = ["D", "T20"]
+"examples/*" = ["T20"]  # demos are scripts; print is their interface. The library never prints.
 "pyRadMC/backends/warp/*" = ["N803", "N806"]  # kernel arg naming follows physics notation
 "pyRadMC/adapters/ct.py" = ["N813"]  # `import SimpleITK as sitk` is the library's own convention
 

@@ -14,6 +14,7 @@ only, so no dependency is added). Re-running reuses the cache unless ``--force-d
 from __future__ import annotations
 
 import argparse
+import logging
 import shutil
 import urllib.request
 from pathlib import Path
@@ -31,6 +32,8 @@ EPICS_BASE_URL = "https://www-nds.iaea.org/epics/ENDF2023/"
 LIBRARY_FILES = {"epdl": "EPDL2023.ALL", "eedl": "EEDL2023.ALL"}
 DEFAULT_CACHE_DIR = Path.home() / ".cache" / "pyRadMC" / "epics"
 _USER_AGENT = f"pyRadMC/{__version__} (EPICS library fetch)"
+
+logger = logging.getLogger(__name__)
 
 
 def library_path(which: str, cache_dir: Path | None = None) -> Path:
@@ -50,7 +53,7 @@ def download_library(which: str, cache_dir: Path | None = None, *, force: bool =
     destination.parent.mkdir(parents=True, exist_ok=True)
     url = EPICS_BASE_URL + LIBRARY_FILES[which]
     temporary = destination.with_suffix(destination.suffix + ".partial")
-    print(f"downloading {url} -> {destination}")
+    logger.info("downloading %s -> %s", url, destination)
     # An explicit User-Agent is required: the IAEA site is behind Cloudflare, which
     # rejects urllib's default "Python-urllib/x.y" agent with HTTP 403.
     request = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
@@ -90,9 +93,12 @@ def main(argv: list[str] | None = None) -> None:
         n_points=args.n_points,
     )
     written = save_tables(data, args.output, dtype=getattr(np, args.dtype))
-    print(f"compiled {data.provenance}")
-    print(f"wrote {written}")
+    logger.info("compiled %s", data.provenance)
+    logger.info("wrote %s", written)
 
 
 if __name__ == "__main__":
+    # Handler configuration belongs to the application; this CLI entry is the
+    # application. Library import paths never call basicConfig.
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     main()

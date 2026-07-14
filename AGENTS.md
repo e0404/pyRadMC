@@ -240,6 +240,9 @@ This ordering was established empirically, not assumed. Do not reorder it withou
 - Type annotations everywhere outside kernels. `mypy --strict` gates non-kernel code.
   Warp kernels are exempt; mark them.
 - `ruff` for lint and format. No manual formatting debates.
+- Library output goes through `logging.getLogger(__name__)`; `warnings.warn` is reserved for
+  result caveats and API misuse. No `print` in `pyRadMC/` (ruff `T20` enforces this), and no
+  handlers/`basicConfig` outside a `__main__` CLI entry — verbosity belongs to the consumer.
 - Do not add a dependency without asking. The permissive-licensing constraint is the reason this
   project exists; **check the license of anything you propose to add**, and say what it is.
 - Do not add features that are not on the phase plan. If something seems necessary, say so and
