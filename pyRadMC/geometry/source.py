@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import math
 from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any, ClassVar, NamedTuple
 
@@ -32,6 +32,8 @@ from pyRadMC.rng import RNGState, uniform
 __all__ = [
     "BeamletGridSource",
     "BeamletSource",
+    "CompositeBeamletSource",
+    "CompositeSource",
     "ParallelBeamSource",
     "PencilBeamSource",
     "Primary",
@@ -172,6 +174,92 @@ class BeamletSource(ABC):
         The default calls :meth:`emit`; override for a vectorized sampler.
         """
         return _presample(lambda state: self.emit(beamlet, state), seed, history_offset, n)
+
+
+def _selection_cdf(weights: Sequence[float]) -> npt.NDArray[np.float64]:
+    """Build the normalized cumulative weights for choosing a mixture component."""
+    w = np.asarray(weights, dtype=np.float64)
+    if w.size == 0:
+        raise ValueError("a composite source needs at least one component")
+    if np.any(w < 0.0):
+        raise ValueError("component weights must be non-negative")
+    total = float(w.sum())
+    if total <= 0.0:
+        raise ValueError("component weights must sum to a positive value")
+    return np.cumsum(w) / total
+
+
+class CompositeSource(Source):
+    """A mixture of open-field sources — the virtual-source-model building block.
+
+    Each history is emitted by one component, chosen with probability proportional to
+    its weight (a single uniform draw), then that component's ``emit`` runs. So a beam
+    modelled as, e.g., a narrow Gaussian core plus a broad scatter tail is
+    ``CompositeSource([(core, 0.85), (tail, 0.15)])``. ``weight`` is the *selection*
+    probability, which equals the fluence fraction for unit-weight components; a
+    component that itself carries a per-primary weight (a phase space) has that weight
+    multiplied on top.
+
+    Composites transport on both backends through the pre-sampling route (they carry no
+    ``warp_sampler``); a mixture wanting the in-kernel route writes a single
+    ``warp_sampler`` that branches internally.
+    """
+
+    def __init__(self, components: Sequence[tuple[Source, float]]) -> None:
+        if not components:
+            raise ValueError("a composite source needs at least one component")
+        self._sources = tuple(source for source, _ in components)
+        self._cdf = _selection_cdf([weight for _, weight in components])
+        self._max_energy = max(source.max_energy for source in self._sources)
+
+    @property
+    def max_energy(self) -> float:
+        """Highest energy any component can emit, for cross-section table sizing."""
+        return self._max_energy
+
+    def emit(self, rng_state: RNGState) -> Primary:
+        """Choose a component by weight (one uniform), then emit from it."""
+        index = min(int(np.searchsorted(self._cdf, uniform(rng_state))), len(self._sources) - 1)
+        return self._sources[index].emit(rng_state)
+
+
+class CompositeBeamletSource(BeamletSource):
+    """A per-beamlet mixture of beamlet sources — a VSM for beamlet-resolved dose.
+
+    Every component describes the *same* beamlets (identical ``n_beamlets``), so beamlet
+    ``j`` is a mixture: :meth:`emit` chooses a component by weight (one uniform) and
+    emits that component's beamlet ``j``. Assembling the Dij then gives each beamlet's
+    column as the virtual-source-model dose. Like :class:`CompositeSource`, it runs on
+    both backends through the pre-sampling Dij route; ``weight`` is the selection
+    probability. (The Dij transports each beamlet primary as a unit-weight photon, so
+    components should be photon beamlet sources.)
+    """
+
+    def __init__(self, components: Sequence[tuple[BeamletSource, float]]) -> None:
+        if not components:
+            raise ValueError("a composite beamlet source needs at least one component")
+        self._sources = tuple(source for source, _ in components)
+        counts = {source.n_beamlets for source in self._sources}
+        if len(counts) != 1:
+            raise ValueError(f"all components must share n_beamlets, got {sorted(counts)}")
+        self._n_beamlets = counts.pop()
+        self._cdf = _selection_cdf([weight for _, weight in components])
+        self._max_energy = max(source.max_energy for source in self._sources)
+
+    @property
+    def max_energy(self) -> float:
+        """Highest energy any component can emit, for cross-section table sizing."""
+        return self._max_energy
+
+    @property
+    def n_beamlets(self) -> int:
+        """The shared beamlet count of every component."""
+        return self._n_beamlets
+
+    def emit(self, beamlet: int, rng_state: RNGState) -> Primary:
+        """Choose a component by weight (one uniform), then emit its ``beamlet``."""
+        index = min(int(np.searchsorted(self._cdf, uniform(rng_state))), len(self._sources) - 1)
+        return self._sources[index].emit(beamlet, rng_state)
 
 
 @dataclass(frozen=True)
