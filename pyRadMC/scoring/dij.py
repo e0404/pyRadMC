@@ -309,6 +309,35 @@ class DijAssembler:
             self._counts.append(int(idx.size))
         self._next_beamlet += dose.shape[0]
 
+    def add_sparse_block(
+        self,
+        start: int,
+        counts: np.ndarray,
+        indices: np.ndarray,
+        dose: np.ndarray,
+        sigma: np.ndarray,
+    ) -> None:
+        """Append an **already-truncated** sparse block of ``len(counts)`` columns.
+
+        The device backend truncates and compacts each group on the GPU and hands
+        back the CSC arrays directly (``indices``/``dose``/``sigma`` concatenated in
+        column order, each column's row indices sorted ascending) with the per-column
+        entry ``counts``. This assembler then only concatenates groups — the same
+        result :meth:`add_block` would build from the dense dose maps, without the
+        dense readback. ``counts`` sums to the block's entry total; the caller is
+        responsible for having applied :attr:`truncation`.
+        """
+        if start != self._next_beamlet:
+            raise RuntimeError(f"block starts at {start}, expected {self._next_beamlet}")
+        counts = np.asarray(counts, dtype=np.int64)
+        if int(counts.sum()) != int(indices.size):
+            raise ValueError("counts do not sum to the number of sparse entries")
+        self._indices.append(np.asarray(indices, dtype=np.int64))
+        self._dose.append(np.asarray(dose, dtype=np.float64))
+        self._sigma.append(np.asarray(sigma, dtype=np.float64))
+        self._counts.extend(int(c) for c in counts)
+        self._next_beamlet += int(counts.size)
+
     def finalize(
         self,
         energy_emitted: float,

@@ -63,7 +63,11 @@ __all__ = [
     "GridInfo",
     "Queue",
     "Tables",
+    "accumulate_run_batch",
+    "compact_column",
+    "count_kept_per_column",
     "electron_kernel",
+    "finalize_run",
     "generate_beamlet_lattice",
     "generate_from_upload",
     "generate_parallel_beam",
@@ -71,6 +75,7 @@ __all__ = [
     "make_beamlet_generator_kernel",
     "make_generator_kernel",
     "photon_kernel",
+    "reduce_dij_group",
 ]
 
 ENERGY_QUANTUM_MEV: float = 1.0e-9
@@ -568,6 +573,202 @@ def _annihilate_at_rest(
         -az,
         spawn_stream(state),
     )
+
+
+# --- batch reduction: fixed-point energy maps -> per-voxel dose mean & sigma ------
+#
+# Moves the scoring finalize (the mass divide and the batch mean/variance) onto the
+# device, so only the reduced dose maps — not the dense per-group fixed-point buffer —
+# cross back to the host. The two helpers below are shared by the open-field ``run``
+# and the ``run_dij`` reductions so those two paths stay **bit-identical within a
+# device** (AGENTS 2.3): a 1x1 Dij column reduces to the open-field dose bit for bit
+# because both fold the same per-batch doses, in the same order, through the same
+# float64 arithmetic. They deliberately mirror ``BatchedDoseScorer`` (host, NumPy
+# float64); across host and device only statistical equivalence is claimed, never bit
+# equality, so ``ref`` is unaffected.
+
+
+@wp.func
+def _batch_dose(
+    q: wp.int64, mass: wp.float64, nhist: wp.float64, quantum: wp.float64
+) -> wp.float64:
+    """One voxel's per-batch dose, float64, matching ``BatchedDoseScorer.end_batch``.
+
+    ``energy = quanta * quantum``; ``dose = energy / (mass * n_histories)``; exactly
+    zero where the scoring voxel carries no mass (uncovered — the masked divide on the
+    host). The operation order is fixed so the host and device agree bitwise on one
+    target.
+    """
+    if mass <= wp.float64(0.0):
+        return wp.float64(0.0)
+    energy = wp.float64(q) * quantum
+    return energy / (mass * nhist)
+
+
+@wp.func
+def _mean_sigma(s1: wp.float64, s2: wp.float64, n_batches: int):
+    """Batch-mean dose and its standard error, mirror of ``BatchedDoseScorer.finalize``.
+
+    ``mean = S1/n``; the sample variance of the batch means, clamped at zero against
+    float cancellation; ``sigma = sqrt(var/n)``. A single batch has no spread, so its
+    sigma is zero (degenerate, as on the host).
+    """
+    n = wp.float64(n_batches)
+    mean = s1 / n
+    if n_batches == 1:
+        return mean, wp.float64(0.0)
+    var = wp.max(wp.float64(0.0), s2 / n - mean * mean) * n / (n - wp.float64(1.0))
+    return mean, wp.sqrt(var / n)
+
+
+@wp.kernel
+def reduce_dij_group(
+    edep: wp.array(dtype=wp.int64),
+    voxel_mass: wp.array(dtype=wp.float64),
+    n_batches: int,
+    n_voxels: int,
+    nhist: wp.float64,
+    quantum: wp.float64,
+    mean_out: wp.array(dtype=wp.float64),
+    sigma_out: wp.array(dtype=wp.float64),
+    total_quanta: wp.array(dtype=wp.int64),
+):
+    """Reduce one beamlet group's ``(local, batch, voxel)`` map to per-column dose.
+
+    One thread per ``(local, voxel)`` folds the batch axis (edep is tagged
+    ``local * n_batches + batch``), writing ``mean_out``/``sigma_out`` flat over
+    ``(local, voxel)`` and accumulating the group's total fixed-point quanta (the
+    dose-to-medium deposited-energy book; dose-to-water uses its physical counter).
+    """
+    tid = wp.tid()
+    local = tid // n_voxels
+    vox = tid - local * n_voxels
+    mass = voxel_mass[vox]
+    s1 = wp.float64(0.0)
+    s2 = wp.float64(0.0)
+    col_quanta = wp.int64(0)
+    for b in range(n_batches):
+        q = edep[(local * n_batches + b) * n_voxels + vox]
+        col_quanta += q
+        d = _batch_dose(q, mass, nhist, quantum)
+        s1 += d
+        s2 += d * d
+    mean, sigma = _mean_sigma(s1, s2, n_batches)
+    mean_out[tid] = mean
+    sigma_out[tid] = sigma
+    wp.atomic_add(total_quanta, 0, col_quanta)
+
+
+@wp.kernel
+def accumulate_run_batch(
+    edep: wp.array(dtype=wp.int64),
+    voxel_mass: wp.array(dtype=wp.float64),
+    nhist: wp.float64,
+    quantum: wp.float64,
+    s1: wp.array(dtype=wp.float64),
+    s2: wp.array(dtype=wp.float64),
+    total_quanta: wp.array(dtype=wp.int64),
+):
+    """Fold one open-field batch into the running per-voxel dose sums.
+
+    Launched once per statistical batch (one thread per voxel, no race — a voxel is
+    touched by a single thread per launch, and launches are sequential), so ``s1``
+    accumulates ``sum_b dose_b`` in batch order — the same left fold, term for term,
+    that :func:`reduce_dij_group` performs for a 1x1 column, hence the bitwise
+    equality between ``run`` and ``run_dij`` on one device.
+    """
+    vox = wp.tid()
+    q = edep[vox]
+    d = _batch_dose(q, voxel_mass[vox], nhist, quantum)
+    s1[vox] = s1[vox] + d
+    s2[vox] = s2[vox] + d * d
+    wp.atomic_add(total_quanta, 0, q)
+
+
+@wp.kernel
+def finalize_run(
+    s1: wp.array(dtype=wp.float64),
+    s2: wp.array(dtype=wp.float64),
+    n_batches: int,
+    mean_out: wp.array(dtype=wp.float64),
+    sigma_out: wp.array(dtype=wp.float64),
+):
+    """Turn the accumulated open-field sums into per-voxel dose mean and sigma."""
+    vox = wp.tid()
+    mean, sigma = _mean_sigma(s1[vox], s2[vox], n_batches)
+    mean_out[vox] = mean
+    sigma_out[vox] = sigma
+
+
+# --- device truncation + compaction: dense dose maps -> sparse CSC columns --------
+#
+# The per-column truncation (AGENTS 2.8) and the CSC compaction run on the device, so
+# only the surviving sparse entries — not the dense per-column dose maps — read back.
+# Determinism (AGENTS 2.3): each column is handled by a single thread that scans
+# voxels in ascending index order, so the kept indices come out sorted with no
+# atomics and the layout is bit-reproducible. ``col_max`` is a plain maximum (no
+# arithmetic), and the keep test ``mean >= truncation * col_max and mean > 0`` uses
+# the same float64 product as ``DijAssembler.add_block``, so the sparse pattern and
+# values are byte-identical to the host truncation on the same dose maps.
+
+
+@wp.kernel
+def count_kept_per_column(
+    mean: wp.array(dtype=wp.float64),
+    n_voxels: int,
+    truncation: wp.float64,
+    counts: wp.array(dtype=wp.int32),
+):
+    """Per-column count of voxels surviving truncation (one thread per column)."""
+    local = wp.tid()
+    base = local * n_voxels
+    col_max = wp.float64(0.0)
+    for v in range(n_voxels):
+        m = mean[base + v]
+        if m > col_max:
+            col_max = m
+    thr = truncation * col_max
+    c = int(0)  # noqa: UP018, RUF046 - Warp needs a dynamic int var for the loop counter
+    for v in range(n_voxels):
+        m = mean[base + v]
+        if m > wp.float64(0.0) and m >= thr:
+            c += 1
+    counts[local] = c
+
+
+@wp.kernel
+def compact_column(
+    mean: wp.array(dtype=wp.float64),
+    sigma: wp.array(dtype=wp.float64),
+    n_voxels: int,
+    truncation: wp.float64,
+    offsets: wp.array(dtype=wp.int32),
+    out_indices: wp.array(dtype=wp.int64),
+    out_dose: wp.array(dtype=wp.float64),
+    out_sigma: wp.array(dtype=wp.float64),
+):
+    """Scatter each column's surviving entries into the compact CSC arrays.
+
+    ``offsets`` is the exclusive prefix sum of the counts, so column ``local`` writes
+    a contiguous run; scanning voxels ascending makes the row indices sorted, exactly
+    like ``np.flatnonzero`` on the host.
+    """
+    local = wp.tid()
+    base = local * n_voxels
+    col_max = wp.float64(0.0)
+    for v in range(n_voxels):
+        m = mean[base + v]
+        if m > col_max:
+            col_max = m
+    thr = truncation * col_max
+    cursor = offsets[local]
+    for v in range(n_voxels):
+        m = mean[base + v]
+        if m > wp.float64(0.0) and m >= thr:
+            out_indices[cursor] = wp.int64(v)
+            out_dose[cursor] = m
+            out_sigma[cursor] = sigma[base + v]
+            cursor += 1
 
 
 @wp.kernel

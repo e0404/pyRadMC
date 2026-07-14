@@ -9,9 +9,12 @@ nothing physical lives here). The run loop is:
    spawn charged secondaries into the electron queue; electrons spawn
    bremsstrahlung and annihilation photons back, and delta rays into the next
    electron round.
-3. Read back the int64 fixed-point energy map per batch and feed the shared
-   ``BatchedDoseScorer``, so sigma comes from batch statistics exactly as in the
-   reference backend (AGENTS.md 2.4).
+3. Reduce the int64 fixed-point energy maps to per-voxel dose mean and sigma **on
+   the device** (``kernels.accumulate_run_batch``/``reduce_dij_group``), so only the
+   reduced maps — not the dense per-group buffer — read back. The reduction mirrors
+   the reference ``BatchedDoseScorer`` batch statistics (AGENTS.md 2.4) and is shared
+   by the open-field and Dij paths, so a 1x1 Dij column reduces to the open-field
+   dose bit for bit on one device.
 
 Reproducibility (AGENTS.md 2.3): streams are pure functions of
 ``(seed, history_index)`` with child streams derived from parent draws, and scoring
@@ -43,8 +46,7 @@ from pyRadMC.geometry.source import (
     PencilBeamSource,
     Source,
 )
-from pyRadMC.scoring.dij import BatchedBeamletScorer, DijAssembler, DijResult
-from pyRadMC.scoring.dose import BatchedDoseScorer
+from pyRadMC.scoring.dij import DijAssembler, DijResult
 from pyRadMC.scoring.dose_to_water import validate_scoring_mode
 from pyRadMC.scoring.grid import ScoringGrid
 from pyRadMC.transport.particles import ELECTRON, PHOTON, POSITRON
@@ -206,9 +208,19 @@ class WarpEngine:
             generator = kernels.make_generator_kernel(source.warp_sampler)
             emitted = wp.zeros(1, dtype=wp.int64, device=device)
 
-        scorer = BatchedDoseScorer(scoring, n_batches)
+        n_voxels = scoring.n_voxels
+        voxel_mass = wp.array(scoring.voxel_mass.reshape(n_voxels), dtype=wp.float64, device=device)
+        # Dose finalize on the device: per-voxel batch sums of dose and dose^2, folded
+        # in batch order so the open-field reduction matches a 1x1 Dij column bitwise
+        # on one device (kernels.accumulate_run_batch). Only the reduced maps read
+        # back, not the dense per-batch fixed-point buffer.
+        s1 = wp.zeros(n_voxels, dtype=wp.float64, device=device)
+        s2 = wp.zeros(n_voxels, dtype=wp.float64, device=device)
+        dep_total = wp.zeros(1, dtype=wp.int64, device=device)  # dose-to-medium quanta
         per_batch = n_histories // n_batches
         energy_escaped = 0.0
+        energy_unscored = 0.0
+        energy_deposited = 0.0  # dose-to-water physical book (summed per-batch counter)
         energy_emitted = 0.0
 
         history = 0
@@ -303,16 +315,27 @@ class WarpEngine:
                     "The geometry contains material or density the majorant "
                     "declaration did not cover."
                 )
-            batch_energy = edep.numpy().astype(np.float64) * ENERGY_QUANTUM_MEV
-            # Under dose-to-water the tally map is water-weighted; the ledger books
-            # the physical energy from the kernel's dedicated counter instead.
-            booked = (
-                float(deposited.numpy()[0]) * ENERGY_QUANTUM_MEV if dose_to_water != 0 else None
+            # Fold this batch into the running dose sums on the device; the dense
+            # fixed-point map never leaves the GPU. dep_total sums the physical
+            # quanta (dose-to-medium book); dose-to-water reads its own counter.
+            wp.launch(
+                kernels.accumulate_run_batch,
+                dim=n_voxels,
+                inputs=[
+                    edep,
+                    voxel_mass,
+                    float(per_batch),
+                    float(ENERGY_QUANTUM_MEV),
+                    s1,
+                    s2,
+                    dep_total,
+                ],
+                device=device,
             )
-            scorer.deposit_grid(batch_energy.reshape(scoring.shape), booked=booked)
-            scorer.end_batch(per_batch)
-            scorer.add_unscored(float(unscored.numpy()[0]) * ENERGY_QUANTUM_MEV)
             energy_escaped += float(escaped.numpy()[0]) * ENERGY_QUANTUM_MEV
+            energy_unscored += float(unscored.numpy()[0]) * ENERGY_QUANTUM_MEV
+            if dose_to_water != 0:
+                energy_deposited += float(deposited.numpy()[0]) * ENERGY_QUANTUM_MEV
 
         if in_kernel:
             # Mono beams: every primary is one unit-weight photon at the beam energy
@@ -321,14 +344,24 @@ class WarpEngine:
         elif emitted is not None:
             energy_emitted = float(emitted.numpy()[0]) * ENERGY_QUANTUM_MEV
 
-        dose = scorer.finalize()
+        mean_dev = wp.zeros(n_voxels, dtype=wp.float64, device=device)
+        sigma_dev = wp.zeros(n_voxels, dtype=wp.float64, device=device)
+        wp.launch(
+            kernels.finalize_run,
+            dim=n_voxels,
+            inputs=[s1, s2, n_batches, mean_dev, sigma_dev],
+            device=device,
+        )
+        wp.synchronize_device(device)
+        if dose_to_water == 0:
+            energy_deposited = float(dep_total.numpy()[0]) * ENERGY_QUANTUM_MEV
         return TransportResult(
-            dose=dose.dose,
-            dose_sigma=dose.dose_sigma,
+            dose=mean_dev.numpy().reshape(scoring.shape),
+            dose_sigma=sigma_dev.numpy().reshape(scoring.shape),
             energy_emitted=energy_emitted,
-            energy_deposited=dose.energy_deposited,
+            energy_deposited=energy_deposited,
             energy_escaped=energy_escaped,
-            energy_unscored=dose.energy_unscored,
+            energy_unscored=energy_unscored,
             n_histories=n_histories,
             n_batches=n_batches,
             scoring_mode=scoring_mode,
@@ -407,6 +440,7 @@ class WarpEngine:
             beamlet_generator = kernels.make_beamlet_generator_kernel(source.warp_beamlet_sampler)
             emitted_counter = wp.zeros(1, dtype=wp.int64, device=device)
 
+        voxel_mass = wp.array(scoring.voxel_mass.reshape(n_voxels), dtype=wp.float64, device=device)
         escaped = wp.zeros(1, dtype=wp.int64, device=device)
         unscored = wp.zeros(1, dtype=wp.int64, device=device)
         deposited = wp.zeros(1, dtype=wp.int64, device=device)
@@ -436,7 +470,6 @@ class WarpEngine:
             queues = [_upload_queue(capacity, device) for _ in range(4)]
             slots = wp.zeros(capacity, dtype=wp.uint32, device=device)
             edep = wp.zeros(group * n_batches * n_voxels, dtype=wp.int64, device=device)
-            scorer = BatchedBeamletScorer(scoring, n_batches, group)
             escaped.zero_()
             unscored.zero_()
             deposited.zero_()
@@ -539,23 +572,81 @@ class WarpEngine:
                     "The geometry contains material or density the majorant "
                     "declaration did not cover."
                 )
-            group_quanta = edep.numpy()
-            # Under dose-to-water the edep map is water-weighted; the physical
-            # ledger comes from the kernel's dedicated counter instead.
+            # Reduce the group's dense (local, batch, voxel) fixed-point map to
+            # per-column dose mean and sigma on the device; only those two dense
+            # maps read back, not the full per-batch buffer. total_q sums the
+            # physical quanta (dose-to-medium book); dose-to-water uses its counter.
+            mean_dev = wp.zeros(group * n_voxels, dtype=wp.float64, device=device)
+            sigma_dev = wp.zeros(group * n_voxels, dtype=wp.float64, device=device)
+            total_q = wp.zeros(1, dtype=wp.int64, device=device)
+            wp.launch(
+                kernels.reduce_dij_group,
+                dim=group * n_voxels,
+                inputs=[
+                    edep,
+                    voxel_mass,
+                    n_batches,
+                    n_voxels,
+                    float(per_batch),
+                    float(ENERGY_QUANTUM_MEV),
+                    mean_dev,
+                    sigma_dev,
+                    total_q,
+                ],
+                device=device,
+            )
+            wp.synchronize_device(device)
             if dose_to_water != 0:
                 deposited_quanta += int(deposited.numpy()[0])
             else:
-                deposited_quanta += int(group_quanta.sum())
+                deposited_quanta += int(total_q.numpy()[0])
             escaped_quanta += int(escaped.numpy()[0])
             unscored_quanta += int(unscored.numpy()[0])
-            group_energy = group_quanta.astype(np.float64) * ENERGY_QUANTUM_MEV
-            group_energy = group_energy.reshape(group, n_batches, n_voxels)
-            for batch in range(n_batches):
-                scorer.deposit_block(group_energy[:, batch, :])
-                scorer.end_batch(per_batch)
 
-            block = scorer.finalize()
-            assembler.add_block(group_start, block.dose, block.sigma)
+            # Truncate + compact each column on the device; only the surviving sparse
+            # CSC entries read back, never the dense per-column dose maps. col_max is
+            # a maximum and the keep test uses the same float64 threshold product as
+            # DijAssembler.add_block, so this is byte-identical to host truncation on
+            # these maps — and deterministic (one thread per column, ascending scan).
+            counts_dev = wp.zeros(group, dtype=wp.int32, device=device)
+            wp.launch(
+                kernels.count_kept_per_column,
+                dim=group,
+                inputs=[mean_dev, n_voxels, float(truncation), counts_dev],
+                device=device,
+            )
+            wp.synchronize_device(device)
+            counts = counts_dev.numpy()
+            offsets = np.zeros(group, dtype=np.int32)
+            np.cumsum(counts[:-1], out=offsets[1:])  # exclusive prefix sum
+            nnz = int(counts.sum())
+            offsets_dev = wp.array(offsets, dtype=wp.int32, device=device)
+            out_indices = wp.zeros(nnz, dtype=wp.int64, device=device)
+            out_dose = wp.zeros(nnz, dtype=wp.float64, device=device)
+            out_sigma = wp.zeros(nnz, dtype=wp.float64, device=device)
+            wp.launch(
+                kernels.compact_column,
+                dim=group,
+                inputs=[
+                    mean_dev,
+                    sigma_dev,
+                    n_voxels,
+                    float(truncation),
+                    offsets_dev,
+                    out_indices,
+                    out_dose,
+                    out_sigma,
+                ],
+                device=device,
+            )
+            wp.synchronize_device(device)
+            assembler.add_sparse_block(
+                group_start,
+                counts,
+                out_indices.numpy(),
+                out_dose.numpy(),
+                out_sigma.numpy(),
+            )
 
         if use_lattice:
             emitted_energy = n_beamlets * n_histories_per_beamlet * source.max_energy
