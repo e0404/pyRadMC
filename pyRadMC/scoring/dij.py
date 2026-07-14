@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from pyRadMC.geometry.grid import VoxelGrid
+from pyRadMC.scoring.grid import ScoringGrid
 
 if TYPE_CHECKING:
     from scipy.sparse import csc_array
@@ -45,18 +46,22 @@ class BeamletDoseBlock:
     ----------
     dose
         ``(n_beamlets, n_voxels)`` mean dose per emitted history of each beamlet,
-        MeV/g, voxels flattened C-order.
+        MeV/g, scoring-grid voxels flattened C-order.
     sigma
         Matching 1-sigma standard error from the batch spread; zero where no batch
         deposited and, degenerately, for a single batch.
     energy_deposited
-        Total energy deposited by the group over all batches, MeV. Exact
-        bookkeeping for conservation checks, not an estimate.
+        Total energy deposited by the group into the scoring grid over all
+        batches, MeV. Exact bookkeeping for conservation checks, not an estimate.
+    energy_unscored
+        Total energy deposited inside the transport grid but outside the scoring
+        grid, MeV. Exactly zero when the scoring grid covers the transport grid.
     """
 
     dose: np.ndarray
     sigma: np.ndarray
     energy_deposited: float
+    energy_unscored: float
 
 
 class BatchedBeamletScorer:
@@ -69,30 +74,51 @@ class BatchedBeamletScorer:
     column positions.
     """
 
-    def __init__(self, grid: VoxelGrid, n_batches: int, n_beamlets: int) -> None:
+    def __init__(self, grid: VoxelGrid | ScoringGrid, n_batches: int, n_beamlets: int) -> None:
         if n_batches < 1:
             raise ValueError(f"need at least one batch, got {n_batches}")
         if n_beamlets < 1:
             raise ValueError(f"need at least one beamlet, got {n_beamlets}")
+        scoring = grid if isinstance(grid, ScoringGrid) else ScoringGrid.for_grid(grid)
         self._n_batches = n_batches
         self._n_beamlets = n_beamlets
         self._closed = 0
-        self._grid_shape = grid.shape
-        self._ny = grid.shape[1]
-        self._nz = grid.shape[2]
-        n_voxels = int(np.prod(grid.shape))
+        self._scoring = scoring
+        self._grid_shape = scoring.shape
+        self._ny = scoring.shape[1]
+        self._nz = scoring.shape[2]
+        n_voxels = scoring.n_voxels
         # Row of per-voxel masses, flattened C-order like the deposits.
-        self._voxel_mass = (grid.density * grid.voxel_volume).reshape(n_voxels)  # g
+        self._voxel_mass = scoring.voxel_mass.reshape(n_voxels)  # g
+        self._covered = self._voxel_mass > 0.0
         self._current_energy = np.zeros((n_beamlets, n_voxels), dtype=np.float64)
         self._batch_sum = np.zeros((n_beamlets, n_voxels), dtype=np.float64)
         self._batch_sum_sq = np.zeros((n_beamlets, n_voxels), dtype=np.float64)
         self._energy_deposited = 0.0
+        self._energy_unscored = 0.0
 
     def deposit(self, beamlet: int, ix: int, iy: int, iz: int, energy: float) -> None:
         """Add an energy deposit, in MeV, to a voxel of one beamlet's current batch."""
         flat = (ix * self._ny + iy) * self._nz + iz
         self._current_energy[beamlet, flat] += energy
         self._energy_deposited += energy
+
+    def deposit_at(self, beamlet: int, x: float, y: float, z: float, energy: float) -> None:
+        """Add a deposit at a position (cm) inside the transport grid.
+
+        Routes to the containing scoring voxel of the beamlet's current batch, or
+        to the unscored bucket when the position lies outside the scoring grid
+        (mirror of :meth:`pyRadMC.scoring.dose.BatchedDoseScorer.deposit_at`).
+        """
+        if self._scoring.contains(x, y, z):
+            ix, iy, iz = self._scoring.voxel_index(x, y, z)
+            self.deposit(beamlet, ix, iy, iz, energy)
+        else:
+            self._energy_unscored += energy
+
+    def add_unscored(self, energy: float) -> None:
+        """Book energy, in MeV, that a kernel backend tallied as unscored."""
+        self._energy_unscored += energy
 
     def deposit_block(self, energy: np.ndarray) -> None:
         """Add a whole ``(n_beamlets, n_voxels)`` energy block to the current batch.
@@ -111,7 +137,14 @@ class BatchedBeamletScorer:
             raise RuntimeError("all batches already closed")
         if n_histories < 1:
             raise ValueError(f"empty batch ({n_histories} histories per beamlet)")
-        batch_dose = self._current_energy / (self._voxel_mass[np.newaxis, :] * n_histories)
+        # Uncovered scoring voxels (zero mass) have zero dose by definition; the
+        # masked divide leaves them at exactly 0 instead of 0/0 = NaN.
+        batch_dose = np.divide(
+            self._current_energy,
+            self._voxel_mass[np.newaxis, :] * n_histories,
+            out=np.zeros_like(self._current_energy),
+            where=self._covered[np.newaxis, :],
+        )
         self._batch_sum += batch_dose
         self._batch_sum_sq += batch_dose**2
         self._current_energy[:] = 0.0
@@ -129,7 +162,12 @@ class BatchedBeamletScorer:
             # Same clamped estimator as BatchedDoseScorer.finalize.
             variance = np.maximum(0.0, self._batch_sum_sq / n - mean**2) * n / (n - 1)
             sigma = np.sqrt(variance / n)
-        return BeamletDoseBlock(dose=mean, sigma=sigma, energy_deposited=self._energy_deposited)
+        return BeamletDoseBlock(
+            dose=mean,
+            sigma=sigma,
+            energy_deposited=self._energy_deposited,
+            energy_unscored=self._energy_unscored,
+        )
 
 
 @dataclass(frozen=True)
@@ -159,6 +197,7 @@ class DijResult:
     energy_emitted: float
     energy_deposited: float
     energy_escaped: float
+    energy_unscored: float = 0.0
     correlated: bool = False
 
     @property
@@ -254,7 +293,11 @@ class DijAssembler:
         self._next_beamlet += dose.shape[0]
 
     def finalize(
-        self, energy_emitted: float, energy_deposited: float, energy_escaped: float
+        self,
+        energy_emitted: float,
+        energy_deposited: float,
+        energy_escaped: float,
+        energy_unscored: float = 0.0,
     ) -> DijResult:
         """Concatenate the columns into CSC arrays and close the books.
 
@@ -282,5 +325,6 @@ class DijAssembler:
             energy_emitted=energy_emitted,
             energy_deposited=energy_deposited,
             energy_escaped=energy_escaped,
+            energy_unscored=energy_unscored,
             correlated=self.correlated,
         )

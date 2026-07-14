@@ -23,6 +23,7 @@ from pyRadMC.geometry.source import BeamletSource, Source
 from pyRadMC.rng.interface import RNG
 from pyRadMC.scoring.dij import BatchedBeamletScorer, DijAssembler, DijResult
 from pyRadMC.scoring.dose import BatchedDoseScorer
+from pyRadMC.scoring.grid import ScoringGrid
 from pyRadMC.transport.history import transport_history
 from pyRadMC.transport.particles import ELECTRON, PHOTON, POSITRON
 
@@ -52,6 +53,7 @@ class ReferenceEngine:
         ecut: float = ECUT_MEV,
         transport_electrons: bool = True,
         primary_kind: str = "photon",
+        scoring_grid: ScoringGrid | None = None,
     ) -> TransportResult:
         """Transport ``n_histories`` primaries in ``n_batches`` equal batches.
 
@@ -82,6 +84,16 @@ class ReferenceEngine:
             it per record, so this argument is ignored for that source. The electron
             option exists for validating electron transport against ranges; electron
             *beams* as a clinical modality remain out of scope (AGENTS.md 6).
+        scoring_grid
+            Dose grid to accumulate on (Phase 5 decoupled scoring). ``None``
+            (default) scores on the transport grid — byte-identical to the
+            engine before scoring grids existed. Build a coarser, offset or
+            subregion grid with :meth:`pyRadMC.scoring.grid.ScoringGrid.rebin`
+            **from the same transport grid handed to this engine**; deposits it
+            does not cover are booked to ``TransportResult.energy_unscored``, so
+            ``emitted == deposited + unscored + escaped`` stays exact. Transport
+            never sees this grid: the streams, and hence the physics, are
+            invariant to it.
         """
         if n_histories < 1:
             raise ValueError(f"need at least one history, got {n_histories}")
@@ -93,7 +105,9 @@ class ReferenceEngine:
         if primary_kind not in ("photon", "electron"):
             raise ValueError(f"unknown primary_kind {primary_kind!r}")
 
-        scorer = BatchedDoseScorer(self.grid, n_batches)
+        scorer = BatchedDoseScorer(
+            scoring_grid if scoring_grid is not None else self.grid, n_batches
+        )
         per_batch = n_histories // n_batches
         energy_emitted = 0.0
         energy_escaped = 0.0
@@ -125,7 +139,7 @@ class ReferenceEngine:
                     self.grid,
                     self.cross_sections,
                     state,
-                    scorer.deposit,
+                    scorer.deposit_at,
                     pcut,
                     ecut,
                     transport_electrons,
@@ -140,6 +154,7 @@ class ReferenceEngine:
             energy_emitted=energy_emitted,
             energy_deposited=dose.energy_deposited,
             energy_escaped=energy_escaped,
+            energy_unscored=dose.energy_unscored,
             n_histories=n_histories,
             n_batches=n_batches,
         )
@@ -155,6 +170,7 @@ class ReferenceEngine:
         transport_electrons: bool = True,
         truncation: float = DIJ_TRUNCATION_RELATIVE,
         correlated: bool = True,
+        scoring_grid: ScoringGrid | None = None,
     ) -> DijResult:
         """Compute the beamlet-resolved dose influence matrix over the lattice.
 
@@ -206,6 +222,12 @@ class ReferenceEngine:
             per-column sigmas stay valid, but never combine sigmas across
             columns in quadrature. The result records the mode in
             ``DijResult.correlated``.
+        scoring_grid
+            Dose grid the Dij columns live on; semantics as in :meth:`run`. The
+            memory lever for plan-scale problems: the dense per-group buffers and
+            the sparse Dij all scale with the *scoring* voxel count, so a coarser
+            dose grid shrinks them cubically while transport keeps the full CT
+            resolution.
         """
         if n_histories_per_beamlet < 1:
             raise ValueError(
@@ -219,13 +241,14 @@ class ReferenceEngine:
 
         n_beamlets = source.n_beamlets
         per_batch = n_histories_per_beamlet // n_batches
-        scorer = BatchedBeamletScorer(self.grid, n_batches, n_beamlets)
+        scoring = scoring_grid if scoring_grid is not None else ScoringGrid.for_grid(self.grid)
+        scorer = BatchedBeamletScorer(scoring, n_batches, n_beamlets)
         energy_emitted = 0.0
         energy_escaped = 0.0
 
         for batch in range(n_batches):
             for beamlet in range(n_beamlets):
-                deposit = partial(scorer.deposit, beamlet)
+                deposit = partial(scorer.deposit_at, beamlet)
                 for r in range(per_batch):
                     rw = batch * per_batch + r
                     h = beamlet * n_histories_per_beamlet + rw
@@ -253,7 +276,7 @@ class ReferenceEngine:
 
         block = scorer.finalize()
         assembler = DijAssembler(
-            grid_shape=self.grid.shape,
+            grid_shape=scoring.shape,
             n_beamlets=n_beamlets,
             n_histories_per_beamlet=n_histories_per_beamlet,
             n_batches=n_batches,
@@ -265,4 +288,5 @@ class ReferenceEngine:
             energy_emitted=energy_emitted,
             energy_deposited=block.energy_deposited,
             energy_escaped=energy_escaped,
+            energy_unscored=block.energy_unscored,
         )

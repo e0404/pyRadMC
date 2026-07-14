@@ -92,6 +92,27 @@ class TestBatchedBeamletScorer:
         with pytest.raises(RuntimeError):
             scorer.end_batch(n_histories=1)
 
+    def test_deposit_at_routes_by_position_with_unscored_bucket(self) -> None:
+        """Position-based deposits: inside the scoring grid they land in the
+        beamlet's column at the C-order flat index; outside (but inside the CT)
+        they go to the unscored ledger, never clamped into an edge voxel."""
+        from pyRadMC.scoring.grid import ScoringGrid
+
+        grid = _grid()  # transport: [0, 2)^3
+        sg = ScoringGrid.rebin(
+            grid, shape=(1, 2, 2), spacing=(1.0, 1.0, 1.0), origin=(0.0, 0.0, 0.0)
+        )
+        scorer = BatchedBeamletScorer(sg, n_batches=1, n_beamlets=2)
+        scorer.deposit_at(1, 0.5, 1.5, 0.5, 3.0)  # scoring voxel (0,1,0) -> flat 2
+        scorer.deposit_at(0, 1.5, 0.5, 0.5, 5.0)  # x >= 1: outside the scoring grid
+        scorer.end_batch(n_histories=1)
+        block = scorer.finalize()
+
+        assert block.dose[1, 2] == pytest.approx(3.0)
+        assert np.count_nonzero(block.dose) == 1
+        assert block.energy_deposited == pytest.approx(3.0)
+        assert block.energy_unscored == pytest.approx(5.0)
+
 
 class TestDijAssembler:
     def _assemble(self, dose: np.ndarray, sigma: np.ndarray, truncation: float):

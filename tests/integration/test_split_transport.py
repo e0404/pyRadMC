@@ -160,7 +160,7 @@ class TestFairCopies:
             grid,
             xs,
             state,
-            lambda ix, iy, iz, en: deposits.append(en),
+            lambda x, y, z, en: deposits.append(en),
             spawned.append,
             PCUT_MEV,
             0.2,

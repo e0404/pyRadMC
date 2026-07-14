@@ -208,12 +208,12 @@ def photon_steps(
                     edir = rotate_direction(ux, uy, uz, cos_electron, phi + math.pi)
                     spawn((ELECTRON, recoil, split_w, x, y, z, *edir))
                 else:
-                    deposit(ix, iy, iz, split_w * recoil)
+                    deposit(x, y, z, split_w * recoil)
                 cos_gamma = compton_cos_theta(e, ratio)
                 gx, gy, gz = rotate_direction(ux, uy, uz, cos_gamma, phi)
                 e_scatter = e * ratio
                 if e_scatter <= pcut:
-                    deposit(ix, iy, iz, split_w * e_scatter)
+                    deposit(x, y, z, split_w * e_scatter)
                     continue
                 copy_w = split_w
                 if e_scatter < PHOTON_ROULETTE_MEV and copy_w < PHOTON_ROULETTE_WEIGHT_CAP:
@@ -230,7 +230,7 @@ def photon_steps(
             if transport_electrons and e > ecut:
                 spawn((ELECTRON, e, w, x, y, z, ux, uy, uz))  # forward, no fluorescence
             else:
-                deposit(ix, iy, iz, w * e)
+                deposit(x, y, z, w * e)
             return escaped
         else:  # pair production
             kinetic = e - 2.0 * ELECTRON_MASS_MEV
@@ -243,12 +243,12 @@ def photon_steps(
                     if share > ecut:
                         spawn((kind, share, w, x, y, z, ux, uy, uz))  # forward
                     else:
-                        deposit(ix, iy, iz, w * share)
+                        deposit(x, y, z, w * share)
                         if kind == POSITRON:
-                            annihilate_at_rest(x, y, z, grid, rng_state, deposit, spawn, pcut, w)
+                            annihilate_at_rest(x, y, z, rng_state, deposit, spawn, pcut, w)
             else:
-                deposit(ix, iy, iz, w * kinetic)
-                annihilate_at_rest(x, y, z, grid, rng_state, deposit, spawn, pcut, w)
+                deposit(x, y, z, w * kinetic)
+                annihilate_at_rest(x, y, z, rng_state, deposit, spawn, pcut, w)
             return escaped
 
 

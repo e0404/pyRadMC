@@ -7,6 +7,8 @@ bookkeeping) from the data. The data itself is pinned against NIST in the unit t
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 from scipy import stats
 
@@ -30,9 +32,11 @@ class _FirstDepositDepth:
         self.dz = dz
         self.depth: float | None = None
 
-    def __call__(self, ix: int, iy: int, iz: int, energy: float) -> None:
+    def __call__(self, x: float, y: float, z: float, energy: float) -> None:
         if self.depth is None:
-            self.depth = (iz + 0.5) * self.dz
+            # Deposits are position-keyed; quantize to the voxel-centre depth the
+            # binned exponential comparison below was calibrated against.
+            self.depth = (math.floor(z / self.dz) + 0.5) * self.dz
 
 
 def _first_interaction_depths(

@@ -4,6 +4,13 @@ Dose and dose-squared are accumulated per batch so that a per-voxel sigma is alw
 available (AGENTS.md section 2.4). This is required infrastructure: a Monte Carlo
 estimate without an uncertainty is not an estimate.
 
+Scoring happens on a :class:`~pyRadMC.scoring.grid.ScoringGrid`, which by default is
+the transport grid itself but may be any coarser, offset or subregion dose grid.
+Position-based deposits (:meth:`BatchedDoseScorer.deposit_at`) that fall inside the
+transport grid but outside the scoring grid are booked to the **unscored** energy
+bucket — never clamped into an edge voxel, which would corrupt edge dose — so the
+engine ledger ``emitted == deposited + unscored + escaped`` stays exact.
+
 Doses are per emitted history, in MeV/g. Absolute-dose conversion (Gy per MU or per
 particle) is a calibration concern that does not belong in the scorer.
 """
@@ -15,6 +22,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from pyRadMC.geometry.grid import VoxelGrid
+from pyRadMC.scoring.grid import ScoringGrid
 
 __all__ = ["BatchedDoseScorer", "DoseResult"]
 
@@ -26,14 +34,20 @@ class DoseResult:
     Attributes
     ----------
     dose
-        Per-voxel mean dose over batches, MeV/g per emitted history.
+        Per-voxel mean dose over batches, MeV/g per emitted history, on the
+        scoring grid. Zero in scoring voxels the transport grid does not cover
+        (their mass is zero and no energy can arrive there).
     dose_sigma
         Per-voxel 1-sigma standard error of that mean, from the spread of the batch
         means. Zero in voxels no batch touched — and, degenerately, for a single
         batch, where no spread estimate exists.
     energy_deposited
-        Total energy deposited over all batches, MeV. Exact bookkeeping, not an
-        estimate; used for energy-conservation checks.
+        Total energy deposited *into the scoring grid* over all batches, MeV.
+        Exact bookkeeping, not an estimate; used for energy-conservation checks.
+    energy_unscored
+        Total energy deposited inside the transport grid but outside the scoring
+        grid, MeV. Exactly zero when the scoring grid covers the transport grid
+        (in particular for the default transport-grid scoring).
     n_batches
         Number of batches combined.
     """
@@ -41,31 +55,57 @@ class DoseResult:
     dose: np.ndarray
     dose_sigma: np.ndarray
     energy_deposited: float
+    energy_unscored: float
     n_batches: int
 
 
 class BatchedDoseScorer:
     """Accumulates energy deposits into per-batch dose grids.
 
-    Usage: ``deposit`` any number of times, ``end_batch`` after each batch,
-    ``finalize`` once, exactly ``n_batches`` batches later.
+    Usage: ``deposit``/``deposit_at`` any number of times, ``end_batch`` after each
+    batch, ``finalize`` once, exactly ``n_batches`` batches later.
+
+    Accepts either a :class:`~pyRadMC.scoring.grid.ScoringGrid` or, as a
+    convenience for the score-on-the-transport-grid case, the transport
+    :class:`~pyRadMC.geometry.grid.VoxelGrid` itself.
     """
 
-    def __init__(self, grid: VoxelGrid, n_batches: int) -> None:
+    def __init__(self, grid: VoxelGrid | ScoringGrid, n_batches: int) -> None:
         if n_batches < 1:
             raise ValueError(f"need at least one batch, got {n_batches}")
+        scoring = grid if isinstance(grid, ScoringGrid) else ScoringGrid.for_grid(grid)
         self._n_batches = n_batches
         self._closed = 0
-        self._voxel_mass = grid.density * grid.voxel_volume  # g
-        self._current_energy = np.zeros(grid.shape, dtype=np.float64)
-        self._batch_sum = np.zeros(grid.shape, dtype=np.float64)
-        self._batch_sum_sq = np.zeros(grid.shape, dtype=np.float64)
+        self._scoring = scoring
+        self._voxel_mass = scoring.voxel_mass  # g
+        self._covered = scoring.voxel_mass > 0.0
+        self._current_energy = np.zeros(scoring.shape, dtype=np.float64)
+        self._batch_sum = np.zeros(scoring.shape, dtype=np.float64)
+        self._batch_sum_sq = np.zeros(scoring.shape, dtype=np.float64)
         self._energy_deposited = 0.0
+        self._energy_unscored = 0.0
 
     def deposit(self, ix: int, iy: int, iz: int, energy: float) -> None:
-        """Add an energy deposit, in MeV, to a voxel of the current batch."""
+        """Add an energy deposit, in MeV, to a scoring voxel of the current batch."""
         self._current_energy[ix, iy, iz] += energy
         self._energy_deposited += energy
+
+    def deposit_at(self, x: float, y: float, z: float, energy: float) -> None:
+        """Add a deposit at a position (cm) inside the transport grid.
+
+        Routes to the containing scoring voxel, or to the unscored bucket when the
+        position lies outside the scoring grid. This is the transport loops'
+        :data:`~pyRadMC.transport.particles.DepositFn`.
+        """
+        if self._scoring.contains(x, y, z):
+            ix, iy, iz = self._scoring.voxel_index(x, y, z)
+            self.deposit(ix, iy, iz, energy)
+        else:
+            self._energy_unscored += energy
+
+    def add_unscored(self, energy: float) -> None:
+        """Book energy, in MeV, that a kernel backend tallied as unscored."""
+        self._energy_unscored += energy
 
     def deposit_grid(self, energy: np.ndarray) -> None:
         """Add a whole per-voxel energy grid, in MeV, to the current batch.
@@ -87,7 +127,14 @@ class BatchedDoseScorer:
             raise RuntimeError("all batches already closed")
         if n_histories < 1:
             raise ValueError(f"empty batch ({n_histories} histories)")
-        batch_dose = self._current_energy / (self._voxel_mass * n_histories)
+        # Uncovered voxels (zero mass) have zero dose by definition; the masked
+        # divide leaves them at exactly 0 instead of 0/0 = NaN.
+        batch_dose = np.divide(
+            self._current_energy,
+            self._voxel_mass * n_histories,
+            out=np.zeros_like(self._current_energy),
+            where=self._covered,
+        )
         self._batch_sum += batch_dose
         self._batch_sum_sq += batch_dose**2
         self._current_energy[:] = 0.0
@@ -110,5 +157,6 @@ class BatchedDoseScorer:
             dose=mean,
             dose_sigma=sigma,
             energy_deposited=self._energy_deposited,
+            energy_unscored=self._energy_unscored,
             n_batches=n,
         )

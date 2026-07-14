@@ -84,7 +84,7 @@ def test_coherent_channel_is_sampled_and_conserves_energy() -> None:
 
     deposits: list[float] = []
 
-    def deposit(ix: int, iy: int, iz: int, e: float) -> None:
+    def deposit(x: float, y: float, z: float, e: float) -> None:
         deposits.append(e)
 
     n = 400

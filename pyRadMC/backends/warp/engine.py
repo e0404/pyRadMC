@@ -45,6 +45,7 @@ from pyRadMC.geometry.source import (
 )
 from pyRadMC.scoring.dij import BatchedBeamletScorer, DijAssembler, DijResult
 from pyRadMC.scoring.dose import BatchedDoseScorer
+from pyRadMC.scoring.grid import ScoringGrid
 from pyRadMC.transport.particles import ELECTRON, PHOTON, POSITRON
 
 __all__ = ["WarpEngine"]
@@ -54,6 +55,23 @@ _E_MAX_MARGIN = 1.0 + 1.0e-6  # table upper edge strictly above the primary ener
 # IAEA particle code (from a source's sample_batch columns) -> transport constant,
 # as a lookup indexed by the code (1/2/3); slot 0 is unused.
 _IAEA_TO_TRANSPORT = np.array([-1, PHOTON, ELECTRON, POSITRON], dtype=np.int32)
+
+
+def _scoring_info(scoring: ScoringGrid) -> GridInfo:
+    """Scalar metadata of the scoring grid, in the same struct as the transport grid.
+
+    The kernels' ``_deposit`` routes positions through this exactly as the host
+    scorer's ``deposit_at`` does; only the scalars travel — the mass map stays on
+    the host, where the dose normalization happens.
+    """
+    si = GridInfo()
+    si.x_lo, si.y_lo, si.z_lo = scoring.origin
+    si.x_hi, si.y_hi, si.z_hi = scoring.upper_corner
+    si.sx, si.sy, si.sz = scoring.spacing
+    si.nx, si.ny, si.nz = scoring.shape
+    si.n_voxels = scoring.n_voxels
+    si.min_spacing = min(scoring.spacing)  # unused for scoring; kept coherent
+    return si
 
 
 def _upload_queue(capacity: int, device: str) -> Queue:
@@ -127,11 +145,14 @@ class WarpEngine:
         ecut: float = ECUT_MEV,
         transport_electrons: bool = True,
         primary_kind: str = "photon",
+        scoring_grid: ScoringGrid | None = None,
     ) -> TransportResult:
         """Transport ``n_histories`` primaries; same contract as the reference engine.
 
         See :meth:`pyRadMC.backends.ref.engine.ReferenceEngine.run` for parameter
-        semantics — the two signatures are deliberately identical. A source with an
+        semantics — the two signatures are deliberately identical (``scoring_grid``
+        included: the dose grid deposits accumulate on, default the transport grid,
+        with off-grid deposits booked to ``energy_unscored``). A source with an
         in-kernel generator (the built-in mono beams) is generated on-device from
         analytic parameters, all of one ``primary_kind``. Any other source (a phase
         space, or a user :class:`~pyRadMC.geometry.source.Source`) is transported by
@@ -154,6 +175,8 @@ class WarpEngine:
 
         device = self.device
         gi, density, material = self._upload_grid(device)
+        scoring = scoring_grid if scoring_grid is not None else ScoringGrid.for_grid(self.grid)
+        si = _scoring_info(scoring)
         table_energy = source.max_energy
         tab = self._upload_tables(table_energy, pcut, ecut, device)
 
@@ -161,9 +184,9 @@ class WarpEngine:
         capacity = chunk * self.queue_factor
         queues = [_upload_queue(capacity, device) for _ in range(4)]
         slots = wp.zeros(capacity, dtype=wp.uint32, device=device)
-        n_voxels = int(np.prod(self.grid.shape))
-        edep = wp.zeros(n_voxels, dtype=wp.int64, device=device)
+        edep = wp.zeros(scoring.n_voxels, dtype=wp.int64, device=device)
         escaped = wp.zeros(1, dtype=wp.int64, device=device)
+        unscored = wp.zeros(1, dtype=wp.int64, device=device)
         violations = wp.zeros(1, dtype=wp.int32, device=device)
 
         # Advanced route: a source exposing a warp_sampler is generated in-kernel by a
@@ -176,7 +199,7 @@ class WarpEngine:
             generator = kernels.make_generator_kernel(source.warp_sampler)
             emitted = wp.zeros(1, dtype=wp.int64, device=device)
 
-        scorer = BatchedDoseScorer(self.grid, n_batches)
+        scorer = BatchedDoseScorer(scoring, n_batches)
         per_batch = n_histories // n_batches
         energy_escaped = 0.0
         energy_emitted = 0.0
@@ -185,6 +208,7 @@ class WarpEngine:
         for _ in range(n_batches):
             edep.zero_()
             escaped.zero_()
+            unscored.zero_()
             remaining = per_batch
             while remaining > 0:
                 n_chunk = min(chunk, remaining)
@@ -196,6 +220,7 @@ class WarpEngine:
                         history,
                         n_chunk,
                         gi,
+                        si,
                         density,
                         material,
                         tab,
@@ -203,6 +228,7 @@ class WarpEngine:
                         slots,
                         edep,
                         escaped,
+                        unscored,
                         violations,
                         pcut,
                         ecut,
@@ -216,6 +242,7 @@ class WarpEngine:
                         history,
                         n_chunk,
                         gi,
+                        si,
                         density,
                         material,
                         tab,
@@ -223,6 +250,7 @@ class WarpEngine:
                         slots,
                         edep,
                         escaped,
+                        unscored,
                         violations,
                         pcut,
                         ecut,
@@ -237,6 +265,7 @@ class WarpEngine:
                         history,
                         n_chunk,
                         gi,
+                        si,
                         density,
                         material,
                         tab,
@@ -244,6 +273,7 @@ class WarpEngine:
                         slots,
                         edep,
                         escaped,
+                        unscored,
                         violations,
                         pcut,
                         ecut,
@@ -260,8 +290,9 @@ class WarpEngine:
                     "declaration did not cover."
                 )
             batch_energy = edep.numpy().astype(np.float64) * ENERGY_QUANTUM_MEV
-            scorer.deposit_grid(batch_energy.reshape(self.grid.shape))
+            scorer.deposit_grid(batch_energy.reshape(scoring.shape))
             scorer.end_batch(per_batch)
+            scorer.add_unscored(float(unscored.numpy()[0]) * ENERGY_QUANTUM_MEV)
             energy_escaped += float(escaped.numpy()[0]) * ENERGY_QUANTUM_MEV
 
         if in_kernel:
@@ -278,6 +309,7 @@ class WarpEngine:
             energy_emitted=energy_emitted,
             energy_deposited=dose.energy_deposited,
             energy_escaped=energy_escaped,
+            energy_unscored=dose.energy_unscored,
             n_histories=n_histories,
             n_batches=n_batches,
         )
@@ -294,6 +326,7 @@ class WarpEngine:
         truncation: float = DIJ_TRUNCATION_RELATIVE,
         correlated: bool = True,
         beamlet_group_size: int = 32,
+        scoring_grid: ScoringGrid | None = None,
     ) -> DijResult:
         """Compute the Dij over the lattice; same contract as the reference engine.
 
@@ -313,6 +346,11 @@ class WarpEngine:
             pure functions of ``(seed, history)`` and scoring is associative, so
             the result is bit-identical for any value (test-pinned), exactly
             like ``chunk_size``.
+
+        ``scoring_grid`` (semantics as in :meth:`run`) is the memory lever here:
+        ``n_voxels`` above is the *scoring* voxel count, so a coarser dose grid
+        shrinks the per-group device buffer and the sparse Dij cubically while
+        transport keeps the full CT resolution.
         """
         if n_histories_per_beamlet < 1:
             raise ValueError(
@@ -328,10 +366,12 @@ class WarpEngine:
 
         device = self.device
         gi, density, material = self._upload_grid(device)
+        scoring = scoring_grid if scoring_grid is not None else ScoringGrid.for_grid(self.grid)
+        si = _scoring_info(scoring)
         tab = self._upload_tables(source.max_energy, pcut, ecut, device)
         n_beamlets = source.n_beamlets
         per_batch = n_histories_per_beamlet // n_batches
-        n_voxels = int(np.prod(self.grid.shape))
+        n_voxels = scoring.n_voxels
         # Route by capability: the built-in lattice generates in-kernel from analytic
         # bounds; a source with a warp_beamlet_sampler is generated in-kernel by a
         # wrapped kernel; any other source is host pre-sampled per beamlet and uploaded.
@@ -345,9 +385,10 @@ class WarpEngine:
             emitted_counter = wp.zeros(1, dtype=wp.int64, device=device)
 
         escaped = wp.zeros(1, dtype=wp.int64, device=device)
+        unscored = wp.zeros(1, dtype=wp.int64, device=device)
         violations = wp.zeros(1, dtype=wp.int32, device=device)
         assembler = DijAssembler(
-            grid_shape=self.grid.shape,
+            grid_shape=scoring.shape,
             n_beamlets=n_beamlets,
             n_histories_per_beamlet=n_histories_per_beamlet,
             n_batches=n_batches,
@@ -359,6 +400,7 @@ class WarpEngine:
         # the tallies — unlike the matrix — depend on the group size.
         deposited_quanta = 0
         escaped_quanta = 0
+        unscored_quanta = 0
         emitted_energy = 0.0
 
         for group_start in range(0, n_beamlets, beamlet_group_size):
@@ -369,8 +411,9 @@ class WarpEngine:
             queues = [_upload_queue(capacity, device) for _ in range(4)]
             slots = wp.zeros(capacity, dtype=wp.uint32, device=device)
             edep = wp.zeros(group * n_batches * n_voxels, dtype=wp.int64, device=device)
-            scorer = BatchedBeamletScorer(self.grid, n_batches, group)
+            scorer = BatchedBeamletScorer(scoring, n_batches, group)
             escaped.zero_()
+            unscored.zero_()
 
             if use_lattice:
                 self._generate_group_lattice(
@@ -385,6 +428,7 @@ class WarpEngine:
                     chunk,
                     block_histories,
                     gi,
+                    si,
                     density,
                     material,
                     tab,
@@ -392,6 +436,7 @@ class WarpEngine:
                     slots,
                     edep,
                     escaped,
+                    unscored,
                     violations,
                     pcut,
                     ecut,
@@ -411,6 +456,7 @@ class WarpEngine:
                     chunk,
                     block_histories,
                     gi,
+                    si,
                     density,
                     material,
                     tab,
@@ -418,6 +464,7 @@ class WarpEngine:
                     slots,
                     edep,
                     escaped,
+                    unscored,
                     violations,
                     pcut,
                     ecut,
@@ -437,6 +484,7 @@ class WarpEngine:
                     correlated,
                     chunk,
                     gi,
+                    si,
                     density,
                     material,
                     tab,
@@ -444,6 +492,7 @@ class WarpEngine:
                     slots,
                     edep,
                     escaped,
+                    unscored,
                     violations,
                     pcut,
                     ecut,
@@ -461,6 +510,7 @@ class WarpEngine:
             group_quanta = edep.numpy()
             deposited_quanta += int(group_quanta.sum())
             escaped_quanta += int(escaped.numpy()[0])
+            unscored_quanta += int(unscored.numpy()[0])
             group_energy = group_quanta.astype(np.float64) * ENERGY_QUANTUM_MEV
             group_energy = group_energy.reshape(group, n_batches, n_voxels)
             for batch in range(n_batches):
@@ -478,6 +528,7 @@ class WarpEngine:
             energy_emitted=emitted_energy,
             energy_deposited=deposited_quanta * ENERGY_QUANTUM_MEV,
             energy_escaped=escaped_quanta * ENERGY_QUANTUM_MEV,
+            energy_unscored=unscored_quanta * ENERGY_QUANTUM_MEV,
         )
 
     # -- internals --------------------------------------------------------------
@@ -490,6 +541,7 @@ class WarpEngine:
         history_offset,
         n_chunk,
         gi,
+        si,
         density,
         material,
         tab,
@@ -497,6 +549,7 @@ class WarpEngine:
         slots,
         edep,
         escaped,
+        unscored,
         violations,
         pcut,
         ecut,
@@ -526,12 +579,14 @@ class WarpEngine:
             q_electron,
             q_electron_alt,
             gi,
+            si,
             density,
             material,
             tab,
             slots,
             edep,
             escaped,
+            unscored,
             violations,
             pcut,
             ecut,
@@ -546,6 +601,7 @@ class WarpEngine:
         history_offset,
         n_chunk,
         gi,
+        si,
         density,
         material,
         tab,
@@ -553,6 +609,7 @@ class WarpEngine:
         slots,
         edep,
         escaped,
+        unscored,
         violations,
         pcut,
         ecut,
@@ -585,12 +642,14 @@ class WarpEngine:
             q_electron,
             q_electron_alt,
             gi,
+            si,
             density,
             material,
             tab,
             slots,
             edep,
             escaped,
+            unscored,
             violations,
             pcut,
             ecut,
@@ -605,6 +664,7 @@ class WarpEngine:
         history_offset,
         n_chunk,
         gi,
+        si,
         density,
         material,
         tab,
@@ -612,6 +672,7 @@ class WarpEngine:
         slots,
         edep,
         escaped,
+        unscored,
         violations,
         pcut,
         ecut,
@@ -667,12 +728,14 @@ class WarpEngine:
             q_electron,
             q_electron_alt,
             gi,
+            si,
             density,
             material,
             tab,
             slots,
             edep,
             escaped,
+            unscored,
             violations,
             pcut,
             ecut,
@@ -726,12 +789,14 @@ class WarpEngine:
         q_electron,
         q_electron_alt,
         gi,
+        si,
         density,
         material,
         tab,
         slots,
         edep,
         escaped,
+        unscored,
         violations,
         pcut,
         ecut,
@@ -747,6 +812,7 @@ class WarpEngine:
                     dim=n_photon,
                     inputs=[
                         gi,
+                        si,
                         density,
                         material,
                         tab,
@@ -756,6 +822,7 @@ class WarpEngine:
                         slots,
                         edep,
                         escaped,
+                        unscored,
                         pcut,
                         ecut,
                         1 if transport_electrons else 0,
@@ -773,6 +840,7 @@ class WarpEngine:
                     dim=n_electron,
                     inputs=[
                         gi,
+                        si,
                         density,
                         material,
                         tab,
@@ -782,6 +850,7 @@ class WarpEngine:
                         slots,
                         edep,
                         escaped,
+                        unscored,
                         pcut,
                         ecut,
                     ],
@@ -848,6 +917,7 @@ class WarpEngine:
         chunk,
         block_histories,
         gi,
+        si,
         density,
         material,
         tab,
@@ -855,6 +925,7 @@ class WarpEngine:
         slots,
         edep,
         escaped,
+        unscored,
         violations,
         pcut,
         ecut,
@@ -907,12 +978,14 @@ class WarpEngine:
                 queues[2],
                 queues[3],
                 gi,
+                si,
                 density,
                 material,
                 tab,
                 slots,
                 edep,
                 escaped,
+                unscored,
                 violations,
                 pcut,
                 ecut,
@@ -934,6 +1007,7 @@ class WarpEngine:
         chunk,
         block_histories,
         gi,
+        si,
         density,
         material,
         tab,
@@ -941,6 +1015,7 @@ class WarpEngine:
         slots,
         edep,
         escaped,
+        unscored,
         violations,
         pcut,
         ecut,
@@ -984,12 +1059,14 @@ class WarpEngine:
                 queues[2],
                 queues[3],
                 gi,
+                si,
                 density,
                 material,
                 tab,
                 slots,
                 edep,
                 escaped,
+                unscored,
                 violations,
                 pcut,
                 ecut,
@@ -1010,6 +1087,7 @@ class WarpEngine:
         correlated,
         chunk,
         gi,
+        si,
         density,
         material,
         tab,
@@ -1017,6 +1095,7 @@ class WarpEngine:
         slots,
         edep,
         escaped,
+        unscored,
         violations,
         pcut,
         ecut,
@@ -1069,12 +1148,14 @@ class WarpEngine:
                     queues[2],
                     queues[3],
                     gi,
+                    si,
                     density,
                     material,
                     tab,
                     slots,
                     edep,
                     escaped,
+                    unscored,
                     violations,
                     pcut,
                     ecut,

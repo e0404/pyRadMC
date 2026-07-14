@@ -377,21 +377,37 @@ def make_beamlet_generator_kernel(sampler):
 @wp.func
 def _deposit(
     edep: wp.array(dtype=wp.int64),
-    gi: GridInfo,
+    unscored: wp.array(dtype=wp.int64),
+    si: GridInfo,
     base: int,
-    ix: int,
-    iy: int,
-    iz: int,
+    x: float,
+    y: float,
+    z: float,
     energy: float,
 ):
-    """Round-to-nearest fixed-point deposit; float64 scaling keeps it exact.
+    """Round-to-nearest fixed-point deposit at a position inside the transport grid.
+
+    Routes by position into the *scoring* grid ``si`` (Phase 5 decoupled dose
+    grid), mirroring ``BatchedDoseScorer.deposit_at``: the containing scoring
+    voxel of this particle's column, or the unscored ledger counter when the
+    scoring grid does not cover the position — never a clamped edge voxel, which
+    would corrupt edge dose. Quantization happens once, before routing, so
+    ``deposited + unscored`` is invariant to the scoring grid in exact quanta.
 
     ``base`` is the flat offset of this particle's beamlet column
-    (``beamlet * gi.n_voxels``); zero for plain dose runs, whose ``edep`` is a
-    single column.
+    (``beamlet * si.n_voxels``); zero for plain dose runs, whose ``edep`` is a
+    single column. When the scoring grid is the transport grid (the default),
+    the routing math is the identical ``point_axis_index`` arithmetic the
+    transport loop used, so behaviour is byte-identical to indexed deposits.
     """
     quanta = wp.int64(wp.float64(energy) * wp.float64(_INV_QUANTUM) + wp.float64(0.5))
-    wp.atomic_add(edep, base + (ix * gi.ny + iy) * gi.nz + iz, quanta)
+    if point_inside(x, y, z, si.x_lo, si.y_lo, si.z_lo, si.x_hi, si.y_hi, si.z_hi):
+        ix = point_axis_index(x, si.x_lo, si.sx, si.nx)
+        iy = point_axis_index(y, si.y_lo, si.sy, si.ny)
+        iz = point_axis_index(z, si.z_lo, si.sz, si.nz)
+        wp.atomic_add(edep, base + (ix * si.ny + iy) * si.nz + iz, quanta)
+    else:
+        wp.atomic_add(unscored, 0, quanta)
 
 
 @wp.func
@@ -410,21 +426,25 @@ def _escape(escaped: wp.array(dtype=wp.int64), energy: float):
 def _deposit_or_escape(
     edep: wp.array(dtype=wp.int64),
     escaped: wp.array(dtype=wp.int64),
+    unscored: wp.array(dtype=wp.int64),
     gi: GridInfo,
+    si: GridInfo,
     base: int,
     x: float,
     y: float,
     z: float,
     amount: float,
 ):
-    """Mirror of the reference electron loop's midpoint deposit helper."""
+    """Mirror of the reference electron loop's midpoint deposit helper.
+
+    Escape is decided against the *transport* grid ``gi`` (outside it is
+    vacuum); a deposit inside it then routes by position into the scoring grid
+    ``si`` or the unscored bucket, exactly as on the reference backend.
+    """
     if amount <= 0.0:
         return
     if point_inside(x, y, z, gi.x_lo, gi.y_lo, gi.z_lo, gi.x_hi, gi.y_hi, gi.z_hi):
-        ix = point_axis_index(x, gi.x_lo, gi.sx, gi.nx)
-        iy = point_axis_index(y, gi.y_lo, gi.sy, gi.ny)
-        iz = point_axis_index(z, gi.z_lo, gi.sz, gi.nz)
-        _deposit(edep, gi, base, ix, iy, iz, amount)
+        _deposit(edep, unscored, si, base, x, y, z, amount)
     else:
         _escape(escaped, amount)
 
@@ -434,10 +454,11 @@ def _annihilate_at_rest(
     x: float,
     y: float,
     z: float,
-    gi: GridInfo,
+    si: GridInfo,
     state: WarpRNGState,
     q_photon: Queue,
     edep: wp.array(dtype=wp.int64),
+    unscored: wp.array(dtype=wp.int64),
     pcut: float,
     beamlet: int,
     base: int,
@@ -445,15 +466,12 @@ def _annihilate_at_rest(
 ):
     """Positron annihilation at rest; mirror of transport.particles.annihilate_at_rest.
 
-    Called only for positions inside the grid. Each annihilation photon gets its
-    own child stream, since the pair are transported by independent threads; both
-    inherit the positron's beamlet tag and statistical weight.
+    Called only for positions inside the transport grid. Each annihilation photon
+    gets its own child stream, since the pair are transported by independent
+    threads; both inherit the positron's beamlet tag and statistical weight.
     """
     if pcut >= ELECTRON_MASS_MEV:
-        ix = point_axis_index(x, gi.x_lo, gi.sx, gi.nx)
-        iy = point_axis_index(y, gi.y_lo, gi.sy, gi.ny)
-        iz = point_axis_index(z, gi.z_lo, gi.sz, gi.nz)
-        _deposit(edep, gi, base, ix, iy, iz, weight * 2.0 * ELECTRON_MASS_MEV)
+        _deposit(edep, unscored, si, base, x, y, z, weight * 2.0 * ELECTRON_MASS_MEV)
         return
     ax, ay, az = sample_isotropic_direction(state)
     _queue_push(
@@ -489,6 +507,7 @@ def _annihilate_at_rest(
 @wp.kernel
 def photon_kernel(
     gi: GridInfo,
+    si: GridInfo,
     density: wp.array3d(dtype=float),
     material: wp.array3d(dtype=wp.int32),
     tab: Tables,
@@ -498,6 +517,7 @@ def photon_kernel(
     slots: wp.array(dtype=wp.uint32),
     edep: wp.array(dtype=wp.int64),
     escaped: wp.array(dtype=wp.int64),
+    unscored: wp.array(dtype=wp.int64),
     pcut: float,
     ecut: float,
     transport_electrons: int,
@@ -506,12 +526,13 @@ def photon_kernel(
     """One thread transports one photon to termination; Woodcock tracking.
 
     Sequencing mirrors ``transport.photon.photon_steps`` statement for statement;
-    consult that loop for the physics commentary.
+    consult that loop for the physics commentary. ``gi`` is the transport grid;
+    ``si`` the scoring grid deposits route into (equal to ``gi`` by default).
     """
     tid = wp.tid()
     e = q_in.energy[tid]
     beamlet = q_in.beamlet[tid]
-    base = beamlet * gi.n_voxels
+    base = beamlet * si.n_voxels
     w = q_in.weight[tid]
     primary = q_in.primary[tid]
     x = q_in.x[tid]
@@ -620,12 +641,12 @@ def photon_kernel(
                             spawn_stream(state),
                         )
                     else:
-                        _deposit(edep, gi, base, ix, iy, iz, split_w * recoil)
+                        _deposit(edep, unscored, si, base, x, y, z, split_w * recoil)
                     cos_gamma = compton_cos_theta(e, ratio)
                     gx, gy, gz = rotate_direction(ux, uy, uz, cos_gamma, phi)
                     e_scatter = e * ratio
                     if e_scatter <= pcut:
-                        _deposit(edep, gi, base, ix, iy, iz, split_w * e_scatter)
+                        _deposit(edep, unscored, si, base, x, y, z, split_w * e_scatter)
                     else:
                         copy_w = split_w
                         keep = True
@@ -676,12 +697,12 @@ def photon_kernel(
                     spawn_stream(state),
                 )
             else:
-                _deposit(edep, gi, base, ix, iy, iz, w * recoil)
+                _deposit(edep, unscored, si, base, x, y, z, w * recoil)
             cos_gamma = compton_cos_theta(e, ratio)
             ux, uy, uz = rotate_direction(ux, uy, uz, cos_gamma, phi)
             e *= ratio
             if e <= pcut:
-                _deposit(edep, gi, base, ix, iy, iz, w * e)
+                _deposit(edep, unscored, si, base, x, y, z, w * e)
                 return
             if e < PHOTON_ROULETTE_MEV and w < PHOTON_ROULETTE_WEIGHT_CAP:
                 # Basic VR, mirror of the reference loop: roulette the softened
@@ -697,7 +718,7 @@ def photon_kernel(
                     q_electron, ELECTRON, beamlet, e, w, x, y, z, ux, uy, uz, spawn_stream(state)
                 )
             else:
-                _deposit(edep, gi, base, ix, iy, iz, w * e)
+                _deposit(edep, unscored, si, base, x, y, z, w * e)
             return
         else:  # pair production
             kinetic = e - 2.0 * ELECTRON_MASS_MEV
@@ -721,7 +742,7 @@ def photon_kernel(
                         spawn_stream(state),
                     )
                 else:
-                    _deposit(edep, gi, base, ix, iy, iz, w * share_e)
+                    _deposit(edep, unscored, si, base, x, y, z, w * share_e)
                 if share_p > ecut:
                     _queue_push(
                         q_electron,
@@ -738,19 +759,22 @@ def photon_kernel(
                         spawn_stream(state),
                     )
                 else:
-                    _deposit(edep, gi, base, ix, iy, iz, w * share_p)
+                    _deposit(edep, unscored, si, base, x, y, z, w * share_p)
                     _annihilate_at_rest(
-                        x, y, z, gi, state, q_photon_out, edep, pcut, beamlet, base, w
+                        x, y, z, si, state, q_photon_out, edep, unscored, pcut, beamlet, base, w
                     )
             else:
-                _deposit(edep, gi, base, ix, iy, iz, w * kinetic)
-                _annihilate_at_rest(x, y, z, gi, state, q_photon_out, edep, pcut, beamlet, base, w)
+                _deposit(edep, unscored, si, base, x, y, z, w * kinetic)
+                _annihilate_at_rest(
+                    x, y, z, si, state, q_photon_out, edep, unscored, pcut, beamlet, base, w
+                )
             return
 
 
 @wp.kernel
 def electron_kernel(
     gi: GridInfo,
+    si: GridInfo,
     density: wp.array3d(dtype=float),
     material: wp.array3d(dtype=wp.int32),
     tab: Tables,
@@ -760,6 +784,7 @@ def electron_kernel(
     slots: wp.array(dtype=wp.uint32),
     edep: wp.array(dtype=wp.int64),
     escaped: wp.array(dtype=wp.int64),
+    unscored: wp.array(dtype=wp.int64),
     pcut: float,
     ecut: float,
 ):
@@ -767,13 +792,14 @@ def electron_kernel(
 
     Sequencing mirrors ``transport.electron.electron_steps`` statement for
     statement; delta rays go to the electron out-queue instead of a stack, and
-    bremsstrahlung/annihilation photons to the photon queue.
+    bremsstrahlung/annihilation photons to the photon queue. ``gi`` is the
+    transport grid; ``si`` the scoring grid deposits route into.
     """
     tid = wp.tid()
     is_positron = q_in.kind[tid] == POSITRON
     e = q_in.energy[tid]
     beamlet = q_in.beamlet[tid]
-    base = beamlet * gi.n_voxels
+    base = beamlet * si.n_voxels
     w = q_in.weight[tid]
     x = q_in.x[tid]
     y = q_in.y[tid]
@@ -807,12 +833,11 @@ def electron_kernel(
 
     while True:
         if e <= ecut:
-            ix = point_axis_index(x, gi.x_lo, gi.sx, gi.nx)
-            iy = point_axis_index(y, gi.y_lo, gi.sy, gi.ny)
-            iz = point_axis_index(z, gi.z_lo, gi.sz, gi.nz)
-            _deposit(edep, gi, base, ix, iy, iz, w * e)
+            _deposit(edep, unscored, si, base, x, y, z, w * e)
             if is_positron:
-                _annihilate_at_rest(x, y, z, gi, state, q_photon, edep, pcut, beamlet, base, w)
+                _annihilate_at_rest(
+                    x, y, z, si, state, q_photon, edep, unscored, pcut, beamlet, base, w
+                )
             return
 
         ix = point_axis_index(x, gi.x_lo, gi.sx, gi.nx)
@@ -895,7 +920,9 @@ def electron_kernel(
         _deposit_or_escape(
             edep,
             escaped,
+            unscored,
             gi,
+            si,
             base,
             x + ux * s1 / 2.0,
             y + uy * s1 / 2.0,
@@ -945,13 +972,15 @@ def electron_kernel(
                         spawn_stream(state),
                     )
             else:
-                _deposit_or_escape(edep, escaped, gi, base, x, y, z, w * k)
+                _deposit_or_escape(edep, escaped, unscored, gi, si, base, x, y, z, w * k)
             e -= k
 
         _deposit_or_escape(
             edep,
             escaped,
+            unscored,
             gi,
+            si,
             base,
             x + ux * s2 / 2.0,
             y + uy * s2 / 2.0,

@@ -140,22 +140,24 @@ def electron_steps(
             return w * (e + latent)
 
     def deposit_or_escape(px: float, py: float, pz: float, amount: float) -> float:
-        """Deposit at a point if it is inside; otherwise report it as escaped."""
+        """Deposit at a point if it is inside the transport grid; else escaped.
+
+        The scoring callback receives the position, not a voxel index: routing
+        into the (possibly decoupled) scoring grid is the scorer's job.
+        """
         if amount <= 0.0:
             return 0.0
         if grid.contains(px, py, pz):
-            ix, iy, iz = grid.voxel_index(px, py, pz)
-            deposit(ix, iy, iz, amount)
+            deposit(px, py, pz, amount)
             return 0.0
         return amount
 
     while True:
         if e <= ecut:
             # Terminal: local deposit; the current position is inside the grid.
-            ix, iy, iz = grid.voxel_index(x, y, z)
-            deposit(ix, iy, iz, w * e)
+            deposit(x, y, z, w * e)
             if is_positron:
-                annihilate_at_rest(x, y, z, grid, rng_state, deposit, spawn, pcut, w)
+                annihilate_at_rest(x, y, z, rng_state, deposit, spawn, pcut, w)
             return escaped
 
         ix, iy, iz = grid.voxel_index(x, y, z)

@@ -54,8 +54,9 @@ def _transport_profile() -> np.ndarray:
     rng = HostRNG()
     edep = np.zeros(NZ)
 
-    def deposit(ix: int, iy: int, iz: int, amount: float) -> None:
-        edep[iz] += amount
+    def deposit(x: float, y: float, z: float, amount: float) -> None:
+        # Position-keyed deposits; bin by the z-voxel exactly as the grid would.
+        edep[min(int(z / DZ), NZ - 1)] += amount
 
     def spawn(_entry: object) -> None:
         # Secondaries carry the same substep logic; ignoring them isolates the
