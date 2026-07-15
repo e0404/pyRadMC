@@ -3,9 +3,12 @@
 Fast photon Monte Carlo dose engine for radiotherapy treatment planning.
 
 > **Status: Phase 4 complete, pre-alpha; Phase 5 underway — the phase-space source,
-> the tabulated cross-section backend, multi-material data (ICRP media), a CT image
-> adapter, and the decoupled dose grid (arbitrary/subregion scoring grids with
-> selectable dose-to-water) are done; the pyRadPlan adapter is the last remaining
+> the tabulated cross-section backend, multi-material data (ICRP media plus
+> tungsten), a CT image adapter, the decoupled dose grid (arbitrary/subregion
+> scoring grids with selectable dose-to-water), and beam-limiting devices (jaws,
+> a rounded-tip MLC, transmission masks, and a treatment-head pre-solve that
+> scores an exit-plane phase space with collimator scatter and air-generated
+> contaminant electrons) are done; the pyRadPlan adapter is the last remaining
 > workstream — its pyRadMC-side pieces (spectral beam sources, Gy calibration via
 > `unit='gy'`, the `variance_csc()` export) are complete, and the engine subclass
 > itself lands on the pyRadPlan side.**
@@ -161,7 +164,7 @@ repeating here because they are the ones people break:
 | 2 ✅ | Warp backend, CPU and CUDA from one source² |
 | 3 ✅ | Beamlet tagging, batched Dij assembly, basic variance reduction³ |
 | 4 ✅ | Correlated sampling; study of per-beamlet noise vs. optimized-plan bias⁴ |
-| 5 🚧 | Tabulated data ✅, phase-space source ✅, multi-material media ✅, CT image adapter ✅, decoupled dose grid + dose-to-water ✅⁵, spectral beam source ✅⁶, pyRadPlan adapter (last) |
+| 5 🚧 | Tabulated data ✅, phase-space source ✅, multi-material media ✅, CT image adapter ✅, decoupled dose grid + dose-to-water ✅⁵, spectral beam source ✅⁶, beam-limiting devices + head pre-solve ✅⁷, pyRadPlan adapter (last) |
 
 ¹ The nightly validation tier gates against NIST ESTAR ranges and against
 maintainer-supplied EGSnrc depth-dose curves (1, 2 and 6 MeV; gamma 5%/3mm). The
@@ -239,6 +242,28 @@ fitted parameters for nine benchmark linac beams. Cross-backend chi-squared and
 the exact polyenergetic energy ledger are test-pinned; see
 `examples/spectral_source_demo.py` (6 MV fan into water: spectrum, PDD,
 diverging lateral profiles).
+
+⁷ Beam-limiting devices as parametric ray-attenuation geometry
+(`pyRadMC.geometry.collimation`): straight-edged jaw pairs and a rounded-tip
+MLC (exact circular tip chords; tongue-and-groove and focused edges are stated
+deferrals) in a beam frame whose axes live in the engine frame — adapters
+rotate, exactly as for the sources. Three ways to use them, all maintainer-
+specified configurations: **(1)** a treatment-head pre-solve
+(`pyRadMC.geometry.head.presolve_head`) — a one-shot host Monte Carlo with
+`mode="attenuation"` or `"first_compton"` (forced first Compton in tungsten
+plus an air column that generates the contaminant electrons) scoring an
+exit-plane in-memory phase space that either engine transports; **(2)**
+deterministic wrappers (`CollimatedSource`/`CollimatedBeamletSource`,
+Beer-Lambert weights through the stack; `TransmissionMask*` for user 0..1
+fluence masks, e.g. sequenced apertures) that consume zero extra random draws,
+so correlated Dij sampling is preserved — the Dij path now transports and books
+statistical weights on both backends; **(3)** the bare divergent rectangle
+sources from footnote 6. A planar Gaussian-spot source
+(`GaussianSpotBeamSource`) emits photons on a plane as if from a finite focal
+spot, giving downstream collimation its geometric penumbra. Tungsten joined the
+material registry (ESTAR/XCOM-gated). See `examples/collimation_demo.py`
+(staircase MLC field: beam's-eye transmission map, wrapper-vs-pre-solve
+profiles, depth dose).
 
 ## License
 

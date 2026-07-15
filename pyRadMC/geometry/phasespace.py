@@ -718,6 +718,18 @@ class InMemoryPhaseSpaceSource(Source):
         """Return the number of stored particles available to sample."""
         return int(self._codes.size)
 
+    def columns(self) -> dict[str, np.ndarray]:
+        """Return a copy of the stored population as column arrays.
+
+        ``particle_type`` (IAEA codes) plus the float64 columns as constructed —
+        for introspection, diagnostics and serialization; the sampling routes
+        (:meth:`emit`, :meth:`sample_batch`) remain the transport-facing API.
+        """
+        out: dict[str, np.ndarray] = {"particle_type": self._codes.copy()}
+        for name, col in self._columns.items():
+            out[name] = col.copy()
+        return out
+
     @property
     def max_energy(self) -> float:
         """Highest stored particle energy in MeV (for table sizing)."""

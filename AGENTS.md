@@ -427,6 +427,64 @@ the exact polyenergetic ledger are test-pinned;
 with d_max ~1.2 cm, profiles tracking the projected field edges) is the runnable
 demonstration.
 
+**Beam-limiting devices + treatment-head pre-solve — DONE 2026-07-15**
+(maintainer-requested workstream, go-ahead 2026-07-15; the three collimation
+configurations were the maintainer's design). What shipped, all test-first and
+on both backends where transport is involved:
+
+- **Tungsten in the registry** (``TUNGSTEN = 5``; Ni/Cu atomic weights for later
+  alloys). Berger-Seltzer vs ESTAR at Z = 74: collision <= 0.18 %, CSDA <= 1.21 %
+  (standard gates, untouched); compiled EPDL vs XCOM sub-percent at 0.5-20 MeV
+  with a documented 2 % gate just above the 69.5 keV K edge. The build CLI now
+  compiles the whole registry (``--n-materials 1`` = the old water table).
+- **``geometry/collimation.py``** — parametric BLD geometry in a beam frame
+  (focal-spot origin, engine-frame axes; adapters rotate): straight-edged
+  ``JawPair``, rounded-tip ``MLC`` (tip apex on the mid-plane; exact circular
+  chords by slab-and-(halfspace-or-disc) inclusion-exclusion; Boyer & Li 1997,
+  doi:10.1118/1.597996), ``BeamLimitingStack`` (full-line convention;
+  ``from_origin`` for mid-stack starts), ``project_between_planes`` for
+  isocenter-plane plan settings. Deferred, stated at the site: tongue-and-groove,
+  interleaf gap, focused jaw edges, divergent leaf sides, alloy compositions.
+- **The Dij transports and books ``Primary.weight``** (it silently assumed unit
+  weight on both engines; the in-kernel ``warp_beamlet_sampler`` contract gained
+  a trailing weight). Bit-pinned above the photon roulette weight cap (power-of-
+  two scaling is float-exact there); **measured and documented: below the
+  absolute cap, exact weight-linearity does not hold** — a boost chain crossing
+  4.0 in one of two runs diverges that history's stream, and correlated sampling
+  replays it into every column (~20 voxels at the test seed). Fair per run;
+  pinned statistically below the cap.
+- **Configuration 2/3 sources**: ``CollimatedSource``/``CollimatedBeamletSource``
+  (deterministic ``exp(-sum mu_i(E) rho_i t_i)`` weights via one shared log-log
+  ``mu_over_rho_total`` table — zero extra uniforms, correlated Dij replay
+  survives; narrow-beam total attenuation stated) and ``TransmissionMask*``
+  (user 0..1 mask, bilinear in the plateau-exact incremental form) — both on the
+  shared ``_RayWeightModel`` wrapper bases; ``GaussianSpotBeam(let)Source``
+  (photons born **on** a plane, aimed from a Gaussian focal spot; exactly six
+  uniforms, sigma = 0 replays the spectral fan's lines on the same stream).
+- **Configuration 1, the head pre-solve** (``geometry/head.py``): one-shot host
+  MC, ``mode = auto|first_compton|attenuation``, forced first Compton in the
+  stack (vectorized Kahn pinned against the scalar oracle) and in an
+  ``AirColumn`` (both Compton arms kept — the contaminant electrons), output an
+  ``InMemoryPhaseSpaceSource`` normalized **per original primary** (the N/n
+  weight factor; a demo-caught defect, now regression-pinned) with fair
+  Russian-roulette population control below ``weight_floor``. Both phase-space
+  classes warn once when drawn histories exceed the stored population (batch
+  sigmas never include the finite-phase-space latent variance).
+  ``examples/collimation_demo.py`` is the runnable demonstration (BEV
+  transmission map, wrapper-vs-pre-solve profiles, depth dose).
+
+Carried items from this workstream: **focused jaw edges** (the v1 straight edge
+throws a geometric partial-transmission band — the nightly penumbra gate is
+derived from that model, measured 15.8 mm vs the 8.9 mm band at 10 cm depth;
+a focused option should reach clinical 4-8 mm); **tongue-and-groove/interleaf
+leakage**; **W-alloy registry entries** (pure W at alloy density ships, binders'
+atomic weights already present); **a Warp port of the pre-solve** (measured
+host throughput ~5e5 rays/s jaws-only, ~1e5 rays/s with a 10-pair MLC — take
+only if a use case needs more); and the **roulette-cap/attenuated-weight
+graininess** in deep-leakage regions (absolute cap 4.0 vs ~1e-4 primary
+weights; evidence in ``tests/dij/test_weighted_beamlet_ledger.py`` — revisit
+only with a measured dosimetric case, per 2.10 as a default replacement).
+
 **Dij consumer hooks — DONE 2026-07-15.** The last pyRadMC-side pieces the
 pyRadPlan adapter needs; with these, **pyRadMC's side of the adapter workstream
 is complete** — the engine subclass itself is built on the pyRadPlan side
