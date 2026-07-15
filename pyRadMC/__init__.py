@@ -92,6 +92,15 @@ AGENTS.md 7.2 for the full record and the emission-time-splitting alternative.
 ELECTRON_MASS_MEV: float = 0.510_998_950_69
 """Electron rest mass energy in MeV (CODATA 2022)."""
 
+GY_PER_MEV_PER_G: float = 1.602_176_634e-10
+"""Absolute-dose calibration: 1 MeV/g = this many gray.
+
+Exact by SI definition: 1 MeV = e x 1e6 J with the elementary charge fixed at
+1.602176634e-19 C (SI 2019), and per gram -> per kilogram is 1e3. The engines
+score dose in MeV/g per emitted history; a planning consumer multiplies by this
+constant for Gy per history and applies its own particles-per-MU scaling on top
+(see :meth:`pyRadMC.scoring.dij.DijResult.dose_csc`)."""
+
 RAYLEIGH_MOMENTUM_TRANSFER_PER_MEV: float = 80.65543
 """Coherent-scattering momentum-transfer coefficient: the tabulated form-factor abscissa
 is ``x [1/angstrom] = this * E[MeV] * sin(theta/2)``, i.e. ``1/hc`` with
@@ -101,6 +110,7 @@ __all__ = [
     "DIJ_TRUNCATION_RELATIVE",
     "ECUT_MEV",
     "ELECTRON_MASS_MEV",
+    "GY_PER_MEV_PER_G",
     "PCUT_MEV",
     "PHOTON_ROULETTE_MEV",
     "PHOTON_ROULETTE_SURVIVAL",

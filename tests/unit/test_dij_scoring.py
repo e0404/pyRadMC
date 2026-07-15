@@ -9,12 +9,14 @@ tested in the dij tier against DVH endpoints, not here and never via a norm.
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import pytest
 
-from pyRadMC import DIJ_TRUNCATION_RELATIVE
+from pyRadMC import DIJ_TRUNCATION_RELATIVE, GY_PER_MEV_PER_G
 from pyRadMC.geometry.grid import VoxelGrid
-from pyRadMC.scoring.dij import BatchedBeamletScorer, DijAssembler
+from pyRadMC.scoring.dij import BatchedBeamletScorer, DijAssembler, DijResult
 
 
 def _grid() -> VoxelGrid:
@@ -212,3 +214,78 @@ class TestDijAssembler:
         )
         asm.add_block(0, dose, np.zeros_like(dose))
         return asm.finalize(energy_emitted=1.0, energy_deposited=0.0, energy_escaped=0.0)
+
+
+class TestDijConsumerHooks:
+    """The adapter-facing exports: absolute calibration and the variance caveat.
+
+    Column doses are MeV/g per emitted history; a planning consumer (the pyRadPlan
+    adapter) needs them in Gy per history so its own particles-per-MU scaling can
+    apply downstream, and needs the per-entry variance for ``physical_dose_var`` —
+    with the Phase 4 caveat attached when the Dij was sampled correlated.
+    """
+
+    def _dij(self, correlated: bool) -> DijResult:
+        return DijResult(
+            grid_shape=(2, 2, 2),
+            n_beamlets=2,
+            n_histories_per_beamlet=4,
+            n_batches=2,
+            truncation=DIJ_TRUNCATION_RELATIVE,
+            indptr=np.array([0, 2, 3]),
+            indices=np.array([0, 5, 7]),
+            dose=np.array([1.0, 2.0, 3.0]),
+            sigma=np.array([0.1, 0.2, 0.3]),
+            energy_emitted=1.0,
+            energy_deposited=1.0,
+            energy_escaped=0.0,
+            correlated=correlated,
+        )
+
+    def test_gray_constant_is_the_exact_si_conversion(self) -> None:
+        """1 MeV/g = e * 1e6 J / 1e-3 kg with the exact SI elementary charge.
+
+        The constant is the correctly rounded decimal (the float product of the
+        three factors differs in the last ulp, hence approx for the derivation).
+        """
+        assert GY_PER_MEV_PER_G == 1.602176634e-10
+        assert pytest.approx(1.602176634e-19 * 1.0e6 * 1.0e3, rel=1e-15) == GY_PER_MEV_PER_G
+
+    def test_dose_and_sigma_in_gray_scale_exactly(self) -> None:
+        """unit='gy' is the same matrix times the exact constant, entry for entry."""
+        dij = self._dij(correlated=False)
+        np.testing.assert_array_equal(
+            dij.dose_csc(unit="gy").data, dij.dose_csc().data * GY_PER_MEV_PER_G
+        )
+        np.testing.assert_array_equal(
+            dij.sigma_csc(unit="gy").data, dij.sigma_csc().data * GY_PER_MEV_PER_G
+        )
+
+    def test_unknown_unit_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="unit"):
+            self._dij(correlated=False).dose_csc(unit="cgy")
+
+    def test_variance_is_sigma_squared_and_scales_quadratically(self) -> None:
+        """Variance entries are sigma^2; in gray they carry the constant squared."""
+        dij = self._dij(correlated=False)
+        np.testing.assert_array_equal(dij.variance_csc().data, dij.sigma**2)
+        np.testing.assert_array_equal(
+            dij.variance_csc(unit="gy").data, dij.sigma**2 * GY_PER_MEV_PER_G**2
+        )
+
+    def test_variance_of_a_correlated_dij_carries_the_caveat(self) -> None:
+        """Correlated columns are dependent: exporting per-entry variance warns.
+
+        Per-column sigma stays valid for per-beamlet QA, but the known downstream
+        use of a variance matrix is a cross-column combination (a plan-dose
+        variance), which quadrature cannot give under correlated sampling
+        (AGENTS.md Phase 4 record). The caveat is a ``warnings.warn`` per the
+        library output policy.
+        """
+        with pytest.warns(UserWarning, match="correlated"):
+            self._dij(correlated=True).variance_csc()
+
+    def test_variance_of_an_independent_dij_is_silent(self) -> None:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            self._dij(correlated=False).variance_csc()

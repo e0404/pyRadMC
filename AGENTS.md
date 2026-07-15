@@ -374,8 +374,14 @@ for a standalone MC"), in order:
    demo's off-body air pocket was dropped: dose-to-medium in near-vacuum voxels is
    dominated by 1/density variance (speckle at finite statistics), which is inherent,
    not an interface bias.
-3. **pyRadPlan adapter — the last remaining Phase 5 workstream** (with the per-batch
-   plan-dose sigma carried below).
+3. **pyRadPlan adapter — the last remaining Phase 5 workstream. The pyRadMC
+   side is complete as of 2026-07-15** (the spectral beam sources and the Dij
+   consumer hooks recorded below); what remains is the engine subclass on the
+   pyRadPlan side, which imports pyRadMC — pyRadMC stays pyRadPlan-agnostic
+   (section 6). The per-batch plan-dose sigma was **resolved by maintainer
+   decision 2026-07-14**: the adapter ships per-column variance plus the
+   correlated-columns warning instead; per-batch data stays deferred (see the
+   carried item below).
 
 **Public source interface — DONE 2026-07-14** (maintainer-directed infrastructure,
 precedes the pyRadPlan adapter which will hand the engine beamlet sources). `Source`
@@ -419,8 +425,22 @@ histories on the 4070). Cross-backend per-column chi-squared (cpu and cuda) and
 the exact polyenergetic ledger are test-pinned;
 ``examples/spectral_source_demo.py`` (Varian 6 MV fan into water: spectrum, PDD
 with d_max ~1.2 cm, profiles tracking the projected field edges) is the runnable
-demonstration. Remaining adapter-side bits: the absolute-calibration hook and the
-correlated-sampling variance warning.
+demonstration.
+
+**Dij consumer hooks — DONE 2026-07-15.** The last pyRadMC-side pieces the
+pyRadPlan adapter needs; with these, **pyRadMC's side of the adapter workstream
+is complete** — the engine subclass itself is built on the pyRadPlan side
+(section 6: pyRadMC stays planning-system-agnostic). ``GY_PER_MEV_PER_G``
+(exact by SI definition, elementary charge fixed at 1.602176634e-19 C) converts
+the engines' MeV/g-per-history scoring to absolute dose; the ``DijResult`` CSC
+exports take ``unit='gy'`` (sigma scales linearly, variance quadratically).
+The new ``variance_csc()`` is the export a planning system stores as its
+dose-influence variance (pyRadPlan's ``physical_dose_var``): per-entry variances
+stay valid within a column, but a correlated-sampling Dij has statistically
+*dependent* columns, so the export carries a ``warnings.warn`` result caveat —
+cross-column combinations, i.e. a quadrature plan-dose variance, are invalid
+(Phase 4 exit record). ``sigma_csc()`` stays silent: per-beamlet QA is its
+valid use.
 
 **Decoupled dose grid + dose-to-water — DONE 2026-07-14** (maintainer-directed
 infrastructure, precedes the pyRadPlan adapter, which defines its own dose grid
@@ -530,8 +550,11 @@ history.
   is unaffected) but a sum across columns — a plan dose — must **not** combine
   the column sigmas in quadrature. A valid plan-dose sigma needs per-batch
   scoring (batches are aligned across columns); ``DijResult`` carries no
-  per-batch data, so it exposes none. Build it with the pyRadPlan adapter that
-  consumes it; never reintroduce a quadrature plan-dose sigma anywhere.
+  per-batch data, so it exposes none. **Resolved for the adapter (maintainer,
+  2026-07-14): the adapter consumes per-column variance — ``variance_csc()``,
+  shipped 2026-07-15 with its ``warnings.warn`` caveat — so the per-batch slice
+  is a deferred nicety, not an adapter blocker.** Never reintroduce a quadrature
+  plan-dose sigma anywhere.
 - **Compton splitting stays OFF — the Phase 5 phase-space FOM was measured and
   is still < 1.** ``PHOTON_SPLIT_N`` ships at 1 (analog); the ``N > 1`` path is
   test-pinned via the N = 2 instrument but dormant. Phase 4 found it does not earn

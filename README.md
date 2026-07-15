@@ -6,7 +6,9 @@ Fast photon Monte Carlo dose engine for radiotherapy treatment planning.
 > the tabulated cross-section backend, multi-material data (ICRP media), a CT image
 > adapter, and the decoupled dose grid (arbitrary/subregion scoring grids with
 > selectable dose-to-water) are done; the pyRadPlan adapter is the last remaining
-> workstream.**
+> workstream — its pyRadMC-side pieces (spectral beam sources, Gy calibration via
+> `unit='gy'`, the `variance_csc()` export) are complete, and the engine subclass
+> itself lands on the pyRadPlan side.**
 > The engine produces its primary
 > product: a **beamlet-resolved dose influence matrix (Dij)** — sparse CSC columns
 > with a per-entry statistical uncertainty, computed on CPU and CUDA by tagging
@@ -205,9 +207,11 @@ splitting at primary sites was implemented on both backends and measured, then
 shipped **off** (`PHOTON_SPLIT_N = 1`): its variance-reduction figure of merit
 is below 1 on the reference CPU and neutral on the GPU, and it does not reach the
 low-dose tail, so the tested mechanism is retained for the Phase 5 phase-space
-source rather than run now. Roulette stays always-on. Carried into Phase 5: a
-per-batch plan-dose sigma (correlated columns forbid a quadrature one), built
-with the adapter that consumes it.
+source rather than run now. Roulette stays always-on. Correlated columns forbid
+a quadrature plan-dose sigma; the adapter instead consumes per-column variance
+(`DijResult.variance_csc()`, which warns that cross-column combinations are
+invalid under correlated sampling), and a per-batch plan-dose sigma stays a
+deferred nicety.
 
 ⁵ Dose is accumulated on a **scoring grid decoupled from the transport (CT)
 grid** (`pyRadMC.scoring.grid.ScoringGrid`; `scoring_grid=` on both engines'

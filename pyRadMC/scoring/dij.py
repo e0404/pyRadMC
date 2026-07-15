@@ -24,11 +24,13 @@ of the scorer, as in the dose module.
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import numpy as np
 
+from pyRadMC import GY_PER_MEV_PER_G
 from pyRadMC.geometry.grid import VoxelGrid
 from pyRadMC.scoring.grid import ScoringGrid
 
@@ -248,21 +250,63 @@ class DijResult:
             np.add.at(out, self.indices[lo:hi], w[j] * self.dose[lo:hi])
         return out.reshape(self.grid_shape)
 
-    def dose_csc(self) -> csc_array:
-        """Export the dose matrix as a ``scipy.sparse.csc_array``, (n_voxels, n_beamlets)."""
+    def dose_csc(self, unit: str = "mev_per_g") -> csc_array:
+        """Export the dose matrix as a ``scipy.sparse.csc_array``, (n_voxels, n_beamlets).
+
+        ``unit="mev_per_g"`` (default) is the engines' native score, per emitted
+        history of each column's beamlet; ``unit="gy"`` applies the exact SI
+        calibration :data:`pyRadMC.GY_PER_MEV_PER_G` for absolute dose per
+        history — a planning consumer scales by its own particles-per-MU on top.
+        """
+        return self._csc(self.dose, self._unit_factor(unit))
+
+    def sigma_csc(self, unit: str = "mev_per_g") -> csc_array:
+        """Export the per-entry sigma as a ``scipy.sparse.csc_array``, aligned with the dose.
+
+        Valid per column (per-beamlet QA) in either mode; see :meth:`variance_csc`
+        for the cross-column caveat under correlated sampling.
+        """
+        return self._csc(self.sigma, self._unit_factor(unit))
+
+    def variance_csc(self, unit: str = "mev_per_g") -> csc_array:
+        """Export the per-entry variance (``sigma**2``), aligned with the dose.
+
+        The export a planning consumer stores as its dose-influence variance
+        matrix (pyRadPlan's ``physical_dose_var``). Each entry is valid on its
+        own, but when the Dij was computed under **correlated sampling** (the
+        shipped default) the columns are statistically *dependent*, so any
+        cross-column combination of these variances — ``variance @ weights``, a
+        quadrature plan-dose sigma — is invalid (AGENTS.md, Phase 4 exit record).
+        That known downstream use is why this export carries a
+        :func:`warnings.warn` result caveat when ``correlated`` is True; compute
+        a plan-dose sigma from batch-resolved data or an independent-columns run
+        instead.
+        """
+        if self.correlated:
+            warnings.warn(
+                "this Dij was sampled with correlated columns: per-entry variances "
+                "are valid within a column, but combining them across columns "
+                "(e.g. a quadrature plan-dose variance) is invalid because the "
+                "columns are statistically dependent",
+                UserWarning,
+                stacklevel=2,
+            )
+        return self._csc(self.sigma**2, self._unit_factor(unit) ** 2)
+
+    @staticmethod
+    def _unit_factor(unit: str) -> float:
+        """Return the linear scale for a unit choice; variance exports square it."""
+        if unit == "mev_per_g":
+            return 1.0
+        if unit == "gy":
+            return GY_PER_MEV_PER_G
+        raise ValueError(f"unknown unit {unit!r}; expected 'mev_per_g' or 'gy'")
+
+    def _csc(self, values: np.ndarray, factor: float) -> csc_array:
         from scipy.sparse import csc_array
 
-        return csc_array(
-            (self.dose, self.indices, self.indptr), shape=(self.n_voxels, self.n_beamlets)
-        )
-
-    def sigma_csc(self) -> csc_array:
-        """Export the per-entry sigma as a ``scipy.sparse.csc_array``, aligned with the dose."""
-        from scipy.sparse import csc_array
-
-        return csc_array(
-            (self.sigma, self.indices, self.indptr), shape=(self.n_voxels, self.n_beamlets)
-        )
+        data = values if factor == 1.0 else values * factor
+        return csc_array((data, self.indices, self.indptr), shape=(self.n_voxels, self.n_beamlets))
 
 
 @dataclass
