@@ -13,7 +13,9 @@ ways onto a device backend** (see :mod:`pyRadMC.backends.warp.engine`):
   kernel, so the primaries are generated in-kernel with no host round trip.
 
 Monoenergetic beam sources here draw from neither route's data — they are analytic.
-Spectra enter via the phase-space source (per-record energy) or a user source.
+Spectra enter via the phase-space source (per-record energy), the divergent
+:class:`SpectralBeamSource`/:class:`SpectralBeamletSource` (a histogram
+:class:`~pyRadMC.geometry.spectrum.Spectrum` sampled per history), or a user source.
 """
 
 from __future__ import annotations
@@ -27,6 +29,7 @@ from typing import Any, ClassVar, NamedTuple
 import numpy as np
 import numpy.typing as npt
 
+from pyRadMC.geometry.spectrum import Spectrum
 from pyRadMC.rng import RNGState, uniform
 
 __all__ = [
@@ -38,6 +41,8 @@ __all__ = [
     "PencilBeamSource",
     "Primary",
     "Source",
+    "SpectralBeamSource",
+    "SpectralBeamletSource",
 ]
 
 # Primary.kind -> IAEA particle code (photon 1, electron 2, positron 3); the pre-sampled
@@ -414,3 +419,223 @@ class BeamletGridSource(BeamletSource):
         x = x_lo + (x_hi - x_lo) * uniform(rng_state)
         y = y_lo + (y_hi - y_lo) * uniform(rng_state)
         return Primary(self.energy, x, y, self.z, 0.0, 0.0, 1.0)
+
+
+@dataclass(frozen=True)
+class _DivergentFan:
+    """Validated fan geometry shared by the spectral sources: focal spot + apertures.
+
+    Everything is **in the engine frame** ((x, y, z) cm, lower-corner origin): a
+    caller with gantry/couch angles (the pyRadPlan adapter) rotates the focal point,
+    aperture centres and axes into this frame itself, exactly as the CT adapter maps
+    image coordinates — no rotation logic lives in the core. Each aperture is the
+    rectangle ``center + u*u_axis + v*v_axis`` with ``|u| <= width_u / 2``,
+    ``|v| <= width_v / 2``; the axes are normalized here and may be non-orthogonal
+    (a parallelogram aperture), but not parallel.
+    """
+
+    focal_point: tuple[float, float, float]
+    centers: tuple[tuple[float, float, float], ...]
+    width_u: float
+    width_v: float
+    u_axis: tuple[float, float, float]
+    v_axis: tuple[float, float, float]
+
+    def __post_init__(self) -> None:
+        """Normalize the axes and validate the fan geometry."""
+        if len(self.centers) == 0:
+            raise ValueError("a spectral source needs at least one aperture centre")
+        if self.width_u < 0.0 or self.width_v < 0.0:
+            raise ValueError(
+                f"aperture widths must be non-negative, got ({self.width_u}, {self.width_v})"
+            )
+        u = _normalized(self.u_axis, "u_axis")
+        v = _normalized(self.v_axis, "v_axis")
+        cross = (
+            u[1] * v[2] - u[2] * v[1],
+            u[2] * v[0] - u[0] * v[2],
+            u[0] * v[1] - u[1] * v[0],
+        )
+        if math.sqrt(sum(c * c for c in cross)) < 1.0e-12:
+            raise ValueError("aperture axes are parallel; they must span a plane")
+        object.__setattr__(self, "u_axis", u)
+        object.__setattr__(self, "v_axis", v)
+        object.__setattr__(self, "centers", tuple(tuple(c) for c in self.centers))
+        for center in self.centers:
+            if all(a == b for a, b in zip(center, self.focal_point, strict=True)):
+                raise ValueError(
+                    f"aperture centre {center} coincides with the focal point; "
+                    "the fan direction is undefined"
+                )
+
+    def emit_through(self, spectrum: Spectrum, aperture: int, rng_state: RNGState) -> Primary:
+        """Emit one primary from the focal spot through one aperture.
+
+        Consumes exactly four uniforms in a fixed order — two for the energy
+        (:meth:`Spectrum.sample_energy`), then the in-aperture u and v offsets —
+        so under correlated Dij sampling corresponding histories of every beamlet
+        replay the same energy and the same within-aperture offset, and only the
+        aperture centre differs. The primary starts *at* the focal point (the
+        transport loops fly the vacuum up to the grid), and uniform aperture
+        sampling from a point source carries the 1/r^2 divergence for free.
+        """
+        energy = spectrum.sample_energy(rng_state)
+        du = (uniform(rng_state) - 0.5) * self.width_u
+        dv = (uniform(rng_state) - 0.5) * self.width_v
+        center = self.centers[aperture]
+        dx = center[0] + du * self.u_axis[0] + dv * self.v_axis[0] - self.focal_point[0]
+        dy = center[1] + du * self.u_axis[1] + dv * self.v_axis[1] - self.focal_point[1]
+        dz = center[2] + du * self.u_axis[2] + dv * self.v_axis[2] - self.focal_point[2]
+        norm = math.sqrt(dx * dx + dy * dy + dz * dz)
+        return Primary(
+            energy,
+            self.focal_point[0],
+            self.focal_point[1],
+            self.focal_point[2],
+            dx / norm,
+            dy / norm,
+            dz / norm,
+        )
+
+    def sample_through_batch(
+        self, spectrum: Spectrum, aperture: int, seed: int, history_offset: int, n: int
+    ) -> dict[str, npt.NDArray[Any]]:
+        """Vectorized pre-sampling of ``n`` primaries through one aperture.
+
+        The vectorized sibling of :meth:`emit_through` (the phase-space precedent,
+        AGENTS.md 7.2): the four per-history uniforms come from a single
+        ``PCG64(seed)`` stream advanced to ``4 * history_offset``, so history ``h``
+        always consumes draws ``4h .. 4h + 3`` regardless of chunking
+        (chunk-invariant) and independently of the aperture (correlated Dij
+        sampling replays the same energy and in-aperture offset in every beamlet).
+        This is a *different* stream from ``emit_through``'s per-history spawn, so
+        the two backends draw independent primaries — both unbiased estimators of
+        the same dose, compared statistically, never bit-wise.
+        """
+        bitgen = np.random.PCG64(seed)
+        bitgen.advance(4 * history_offset)
+        u = np.random.Generator(bitgen).random((n, 4))
+
+        energy = spectrum.sample_energies(u[:, 0], u[:, 1])
+        du = (u[:, 2] - 0.5) * self.width_u
+        dv = (u[:, 3] - 0.5) * self.width_v
+        focal = np.asarray(self.focal_point, dtype=np.float64)
+        target = (
+            np.asarray(self.centers[aperture], dtype=np.float64)
+            + du[:, None] * np.asarray(self.u_axis, dtype=np.float64)
+            + dv[:, None] * np.asarray(self.v_axis, dtype=np.float64)
+        )
+        direction = target - focal
+        direction /= np.linalg.norm(direction, axis=1, keepdims=True)
+
+        return {
+            "particle_type": np.ones(n, dtype=np.int32),  # photons, unit weight
+            "energy": energy.astype(np.float32),
+            "x": np.full(n, focal[0], dtype=np.float32),
+            "y": np.full(n, focal[1], dtype=np.float32),
+            "z": np.full(n, focal[2], dtype=np.float32),
+            "ux": direction[:, 0].astype(np.float32),
+            "uy": direction[:, 1].astype(np.float32),
+            "uz": direction[:, 2].astype(np.float32),
+            "weight": np.ones(n, dtype=np.float32),
+        }
+
+
+def _normalized(vector: tuple[float, float, float], name: str) -> tuple[float, float, float]:
+    """Return the unit vector, rejecting a zero input by name."""
+    norm = math.sqrt(sum(c * c for c in vector))
+    if norm == 0.0:
+        raise ValueError(f"zero {name} vector")
+    return (vector[0] / norm, vector[1] / norm, vector[2] / norm)
+
+
+class SpectralBeamSource(Source):
+    """Divergent polyenergetic open field: a focal spot fanning through one aperture.
+
+    The photon energy is sampled from a histogram
+    :class:`~pyRadMC.geometry.spectrum.Spectrum` by CDF inversion; the geometry is a
+    point source at ``focal_point`` emitting toward points sampled uniformly in the
+    rectangular aperture at the reference plane (see :class:`_DivergentFan` for the
+    engine-frame convention and axis semantics). Transports on both backends via the
+    default pre-sampling route (no ``warp_sampler``).
+    """
+
+    def __init__(
+        self,
+        spectrum: Spectrum,
+        focal_point: tuple[float, float, float],
+        center: tuple[float, float, float],
+        width_u: float,
+        width_v: float,
+        u_axis: tuple[float, float, float] = (1.0, 0.0, 0.0),
+        v_axis: tuple[float, float, float] = (0.0, 1.0, 0.0),
+    ) -> None:
+        self._spectrum = spectrum
+        self._fan = _DivergentFan(focal_point, (center,), width_u, width_v, u_axis, v_axis)
+
+    @property
+    def max_energy(self) -> float:
+        """The spectrum's top bin edge, for cross-section table sizing."""
+        return self._spectrum.max_energy
+
+    def emit(self, rng_state: RNGState) -> Primary:
+        """Emit one primary through the aperture; consumes exactly four uniforms."""
+        return self._fan.emit_through(self._spectrum, 0, rng_state)
+
+    def sample_batch(self, seed: int, history_offset: int, n: int) -> dict[str, npt.NDArray[Any]]:
+        """Vectorized simple-route batch; see :meth:`_DivergentFan.sample_through_batch`."""
+        return self._fan.sample_through_batch(self._spectrum, 0, seed, history_offset, n)
+
+
+class SpectralBeamletSource(BeamletSource):
+    """Divergent polyenergetic beamlet fan — the pyRadPlan adapter's Dij source.
+
+    Beamlet ``j`` is the fan from ``focal_point`` through the rectangular aperture
+    centred at ``centers[j]`` (all engine-frame; see :class:`_DivergentFan`). The
+    beamlet order is the caller's: pyRadPlan hands the centres in its own
+    bixel-index order and the Dij columns come back in the same order. All bixels
+    share one aperture size, the width at the reference plane the centres lie on.
+    Transports on both backends via the default per-beamlet pre-sampling route.
+    """
+
+    def __init__(
+        self,
+        spectrum: Spectrum,
+        focal_point: tuple[float, float, float],
+        centers: Sequence[tuple[float, float, float]],
+        width_u: float,
+        width_v: float,
+        u_axis: tuple[float, float, float] = (1.0, 0.0, 0.0),
+        v_axis: tuple[float, float, float] = (0.0, 1.0, 0.0),
+    ) -> None:
+        self._spectrum = spectrum
+        self._fan = _DivergentFan(focal_point, tuple(centers), width_u, width_v, u_axis, v_axis)
+
+    @property
+    def max_energy(self) -> float:
+        """The spectrum's top bin edge, for cross-section table sizing."""
+        return self._spectrum.max_energy
+
+    @property
+    def n_beamlets(self) -> int:
+        """One beamlet per aperture centre."""
+        return len(self._fan.centers)
+
+    def emit(self, beamlet: int, rng_state: RNGState) -> Primary:
+        """Emit one primary for ``beamlet``; consumes exactly four uniforms."""
+        if not 0 <= beamlet < self.n_beamlets:
+            raise IndexError(f"beamlet {beamlet} outside fan of {self.n_beamlets}")
+        return self._fan.emit_through(self._spectrum, beamlet, rng_state)
+
+    def sample_beamlet_batch(
+        self, seed: int, history_offset: int, n: int, beamlet: int
+    ) -> dict[str, npt.NDArray[Any]]:
+        """Vectorized per-beamlet batch; see :meth:`_DivergentFan.sample_through_batch`.
+
+        The caller keys ``history_offset`` for the correlated/independent mapping;
+        the draw stream never sees the beamlet, so correlated sampling replays the
+        same energy and in-aperture offset in every beamlet's column (test-pinned).
+        """
+        if not 0 <= beamlet < self.n_beamlets:
+            raise IndexError(f"beamlet {beamlet} outside fan of {self.n_beamlets}")
+        return self._fan.sample_through_batch(self._spectrum, beamlet, seed, history_offset, n)

@@ -391,6 +391,37 @@ chi-squared (open field and Dij, both routes), the Dij group-size invariance, an
 energy ledger are test-pinned; `examples/custom_source_demo.py` (a Gaussian pencil
 beam) is the runnable demonstration.
 
+**Spectral beam source — DONE 2026-07-15** (the main pyRadMC-side piece the
+pyRadPlan adapter consumes; contract confirmed with the maintainer at session
+start). A histogram ``Spectrum`` (``geometry/spectrum.py``: edges + per-bin
+content, sampled by CDF inversion, two uniforms) accepts **both** photon-number
+and energy-fluence weights via a ``convention`` flag (energy fluence divides by
+the bin midpoint — stated narrow-bin approximation); ``ali_rogers_mv`` builds one
+from the analytic MV form of Ali and Rogers (2012, doi:10.1088/0031-9155/57/1/31),
+function 12/13 with the table 3 mu parameterizations and the table 5 fitted
+parameters for the nine benchmark beams (``ALI_ROGERS_BEAMS``), integrating
+``psi(E)/E`` per bin on a sub-grid (2.7) and booking the ``C4`` 511 keV line as
+``C4/0.511`` photons on the continuum's own scale. The divergent geometry
+(``SpectralBeamSource`` open field, ``SpectralBeamletSource`` for the Dij) is a
+focal-point fan through per-bixel rectangular apertures, **everything already in
+the engine frame** — gantry/couch rotation stays out of the core, the adapter maps
+frames exactly like the CT adapter — with uniform aperture sampling giving 1/r^2
+for free and the transport loops flying the vacuum from the focal spot to the
+grid (both backends already did this). ``emit`` consumes exactly four uniforms
+keyed on the history index only, so correlated Dij sampling replays the same
+energy and in-aperture offset in every beamlet (test-pinned). On Warp the source
+uses the simple route with a **vectorized** ``sample_batch``/
+``sample_beamlet_batch`` (the phase-space precedent: one ``PCG64(seed)`` stream
+advanced to ``4*history_offset`` — chunk-invariant, beamlet-blind, a *different*
+stream from ``emit``, so backends agree statistically, never bit-wise); the
+per-history default was a measured demo bottleneck (428 s -> 2.4 s for 4M
+histories on the 4070). Cross-backend per-column chi-squared (cpu and cuda) and
+the exact polyenergetic ledger are test-pinned;
+``examples/spectral_source_demo.py`` (Varian 6 MV fan into water: spectrum, PDD
+with d_max ~1.2 cm, profiles tracking the projected field edges) is the runnable
+demonstration. Remaining adapter-side bits: the absolute-calibration hook and the
+correlated-sampling variance warning.
+
 **Decoupled dose grid + dose-to-water — DONE 2026-07-14** (maintainer-directed
 infrastructure, precedes the pyRadPlan adapter, which defines its own dose grid
 independent of the CT). Dose is *accumulated* on a

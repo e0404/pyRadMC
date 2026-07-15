@@ -159,7 +159,7 @@ repeating here because they are the ones people break:
 | 2 ✅ | Warp backend, CPU and CUDA from one source² |
 | 3 ✅ | Beamlet tagging, batched Dij assembly, basic variance reduction³ |
 | 4 ✅ | Correlated sampling; study of per-beamlet noise vs. optimized-plan bias⁴ |
-| 5 🚧 | Tabulated data ✅, phase-space source ✅, multi-material media ✅, CT image adapter ✅, decoupled dose grid + dose-to-water ✅⁵, pyRadPlan adapter (last) |
+| 5 🚧 | Tabulated data ✅, phase-space source ✅, multi-material media ✅, CT image adapter ✅, decoupled dose grid + dose-to-water ✅⁵, spectral beam source ✅⁶, pyRadPlan adapter (last) |
 
 ¹ The nightly validation tier gates against NIST ESTAR ranges and against
 maintainer-supplied EGSnrc depth-dose curves (1, 2 and 6 MeV; gamma 5%/3mm). The
@@ -223,6 +223,18 @@ by the restricted collision stopping-power ratio water/medium at the depositing
 particle's energy (Siebers et al. 2000) — a scoring-output selection, not a
 physics toggle: transport and the energy books are identical in both modes.
 See `examples/dose_grid_demo.py`.
+
+⁶ A divergent polyenergetic photon source (`pyRadMC.geometry.spectrum.Spectrum`
+plus `SpectralBeamSource`/`SpectralBeamletSource`), the source model the
+pyRadPlan adapter feeds: photon energies sampled by CDF inversion from a
+histogram spectrum (number or energy-fluence weights), geometry a focal-spot fan
+through per-bixel rectangular apertures given **in the engine frame** (rotation
+into that frame is the adapter's job, as with the CT adapter). `ali_rogers_mv`
+builds spectra from the analytic MV form of Ali & Rogers (2012), including the
+fitted parameters for nine benchmark linac beams. Cross-backend chi-squared and
+the exact polyenergetic energy ledger are test-pinned; see
+`examples/spectral_source_demo.py` (6 MV fan into water: spectrum, PDD,
+diverging lateral profiles).
 
 ## License
 
