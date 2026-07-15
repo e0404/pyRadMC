@@ -25,7 +25,7 @@ import numpy as np
 import pytest
 
 from pyRadMC.data import berger_seltzer
-from pyRadMC.data.materials import ADIPOSE, AIR, CORTICAL_BONE, LUNG, MATERIALS, WATER
+from pyRadMC.data.materials import ADIPOSE, AIR, CORTICAL_BONE, LUNG, MATERIALS, TUNGSTEN, WATER
 from pyRadMC.data.tabulated.format import load_tables, save_tables
 from pyRadMC.data.tabulated.model import TabulatedData
 from pyRadMC.data.tabulated.precompile import compile_materials
@@ -34,12 +34,32 @@ from pyRadMC.data.tabulated.source import TabulatedCrossSections
 ECUT = 0.2
 
 # Energy (MeV) -> total mass attenuation with coherent (cm^2/g), NIST XCOM mixtures.
+# Tungsten (element 74, fetched 2026-07-15 for the BLD workstream) extends the
+# effective-Z bracket far past bone: pair production off the Z^2 nuclear field
+# dominates above ~8 MeV, so this row also pins the pair channel's mixing.
 XCOM_TOTAL_MU_OVER_RHO: dict[int, dict[float, float]] = {
     AIR: {1.0: 6.358e-2, 2.0: 4.447e-2, 6.0: 2.522e-2, 10.0: 2.045e-2, 15.0: 1.810e-2},
     CORTICAL_BONE: {1.0: 6.649e-2, 2.0: 4.663e-2, 6.0: 2.754e-2, 10.0: 2.320e-2, 15.0: 2.129e-2},
+    TUNGSTEN: {
+        0.5: 1.378e-1,
+        1.0: 6.618e-2,
+        2.0: 4.433e-2,
+        6.0: 4.210e-2,
+        10.0: 4.747e-2,
+        15.0: 5.384e-2,
+        20.0: 5.893e-2,
+    },
 }
 
 PHOTON_TOLERANCE = 0.01  # same gate as the water EPDL validation
+
+# XCOM tungsten just above the K edge (69.525 keV): the compiled 2048-point log grid
+# resolves the edge to one grid interval (~0.35%), so points a decade of intervals
+# above it still interpolate cleanly, but the EPDL edge placement itself differs
+# from XCOM's by enough to warrant a documented, slightly looser gate here. MV
+# transport barely samples this region (PCUT = 50 keV).
+XCOM_TUNGSTEN_NEAR_K_EDGE = {0.1: 4.437}
+K_EDGE_TOLERANCE = 0.02
 
 
 def _texts() -> tuple[str, str]:
@@ -67,12 +87,17 @@ def test_compiled_rows_are_the_registry(compiled: TabulatedData) -> None:
 
 
 @pytest.mark.validation
-@pytest.mark.parametrize("material", sorted(XCOM_TOTAL_MU_OVER_RHO), ids=("air", "cortical_bone"))
+@pytest.mark.parametrize(
+    "material",
+    sorted(XCOM_TOTAL_MU_OVER_RHO),
+    ids=[MATERIALS[m].name for m in sorted(XCOM_TOTAL_MU_OVER_RHO)],
+)
 def test_compiled_photons_match_xcom_mixtures(compiled: TabulatedData, material: int) -> None:
     """EPDL mixed by the registry mass fractions reproduces XCOM to under 1 percent.
 
-    Air and cortical bone bracket the registry in effective Z; sub-percent agreement
-    on both pins the mixing key (composition) and the per-element conversion at once.
+    Air and cortical bone bracket the tissue registry in effective Z; tungsten
+    extends the bracket to the collimator material. Sub-percent agreement on all
+    three pins the mixing key (composition) and the per-element conversion at once.
     """
     xs = TabulatedCrossSections(compiled)
     for energy, expected in sorted(XCOM_TOTAL_MU_OVER_RHO[material].items()):
@@ -85,10 +110,29 @@ def test_compiled_photons_match_xcom_mixtures(compiled: TabulatedData, material:
 
 
 @pytest.mark.validation
+def test_tungsten_above_k_edge_matches_xcom(compiled: TabulatedData) -> None:
+    """Just above the W K edge (69.5 keV) the compiled table still tracks XCOM.
+
+    Gated at 2 percent, not 1: the log-grid resolution of the edge and EPDL-vs-XCOM
+    edge placement both live here (documented in the constant above). Sub-PCUT
+    fluence makes this dosimetrically marginal; the gate exists so a future grid or
+    parser regression near the edge is caught, not to certify edge physics.
+    """
+    xs = TabulatedCrossSections(compiled)
+    for energy, expected in sorted(XCOM_TUNGSTEN_NEAR_K_EDGE.items()):
+        actual = xs.mu_over_rho_total(energy, TUNGSTEN)
+        relative_error = abs(actual - expected) / expected
+        assert relative_error < K_EDGE_TOLERANCE, (
+            f"mu/rho(tungsten, {energy} MeV) = {actual:.5e}, "
+            f"XCOM = {expected:.5e}, relative error {relative_error:.2%}"
+        )
+
+
+@pytest.mark.validation
 def test_compiled_electron_stopping_matches_berger_seltzer(compiled: TabulatedData) -> None:
     """Loaded per-material stopping equals the machinery it was compiled from."""
     xs = TabulatedCrossSections(compiled)
-    for index in (WATER, AIR, LUNG, ADIPOSE, CORTICAL_BONE):
+    for index in (WATER, AIR, LUNG, ADIPOSE, CORTICAL_BONE, TUNGSTEN):
         material = MATERIALS[index]
         coeffs = berger_seltzer.radiative_fit_coefficients(material.radiative_anchors)
         for energy in (0.5, 1.0, 5.0, 15.0):
@@ -124,6 +168,14 @@ def test_scattering_power_orders_physically(compiled: TabulatedData) -> None:
         assert 0.70 < xs.scattering_power(energy, ADIPOSE) / water < 0.95
         assert 0.90 < xs.scattering_power(energy, AIR) / water < 1.10
         assert 0.90 < xs.scattering_power(energy, LUNG) / water < 1.10
+        # Tungsten: sum w_i Z_i(Z_i+1)/A_i = 30.19, i.e. 7.15x water's 4.22. Measured
+        # EEDL ratios (2026-07-15): 7.14 / 5.24 / 9.69 at 0.5 / 2 / 10 MeV — centred
+        # on the prediction, but swinging +-35% with energy because the sparse EEDL
+        # angular-shape grid (one 0.256->10 MeV gap) moves the interpolated <1-mu>
+        # moment much more for W than for the tissue media. The bracket spans the
+        # measurement; this is a mixing sanity gate, the magnitude convention is
+        # pinned by the water Highland gate.
+        assert 4.0 < xs.scattering_power(energy, TUNGSTEN) / water < 12.0
 
 
 @pytest.mark.validation

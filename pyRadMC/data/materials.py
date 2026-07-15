@@ -34,6 +34,7 @@ __all__ = [
     "LUNG",
     "MATERIALS",
     "STANDARD_ATOMIC_WEIGHT",
+    "TUNGSTEN",
     "WATER",
     "MaterialData",
     "SternheimerParameters",
@@ -44,9 +45,10 @@ AVOGADRO: float = 6.022_140_76e23
 """Avogadro constant in 1/mol (exact, SI 2019)."""
 
 # Standard (conventional) atomic weights, g/mol; IUPAC 2021 (Prohaska et al.,
-# doi:10.1515/pac-2019-0603). Only the elements of the ICRP/ICRU reference media are
-# listed: H..Ca for the bulk constituents plus the Fe/Zn traces of the ICRP tissues.
-# This is the canonical table; the EPDL/EEDL parsers import it from here.
+# doi:10.1515/pac-2019-0603). The elements of the ICRP/ICRU reference media (H..Ca
+# for the bulk constituents plus the Fe/Zn traces of the ICRP tissues) and of the
+# beam-limiting-device materials (W, with the Ni/Cu binders of the common heavy
+# alloys). This is the canonical table; the EPDL/EEDL parsers import it from here.
 STANDARD_ATOMIC_WEIGHT: dict[int, float] = {
     1: 1.008,
     6: 12.011,
@@ -61,7 +63,10 @@ STANDARD_ATOMIC_WEIGHT: dict[int, float] = {
     19: 39.0983,
     20: 40.078,
     26: 55.845,
+    28: 58.693,
+    29: 63.546,
     30: 65.38,
+    74: 183.84,
 }
 
 
@@ -151,6 +156,15 @@ ADIPOSE: int = 3
 
 CORTICAL_BONE: int = 4
 """Material index of ICRP cortical bone."""
+
+TUNGSTEN: int = 5
+"""Material index of pure tungsten (beam-limiting devices: jaws, MLC leaves).
+
+Real jaws and leaves are often 90-97 percent W heavy alloys with Ni/Cu/Fe binders;
+v1 of the collimation module models them as pure tungsten at a caller-supplied
+density, which moves mu/rho by ~1-2 percent at MV energies. An alloy entry later
+is a pure data change (the binder atomic weights are already in the table).
+"""
 
 # H2O: 10 electrons per molecule, M = 18.01528 g/mol (molecular standard); the
 # composition uses the IUPAC elemental weights (2*1.008 + 15.999 = 18.015 g/mol),
@@ -274,6 +288,21 @@ MATERIALS: tuple[MaterialData, ...] = (
             a=0.0620, m=3.5919, x0=0.1161, x1=3.0919, cbar=3.6488, delta0=0.0
         ),
         radiative_anchors=((1.0, 1.824e-2), (10.0, 2.476e-1), (20.0, 5.525e-1)),
+    ),
+    # Tungsten (BLD workstream, 2026-07-15): density and I from the PDG 2024
+    # atomic-properties page; Sternheimer row from the same page's muE header (the
+    # SBS-1984 tungsten row); radiative anchors from NIST ESTAR element 074. See
+    # the TUNGSTEN docstring for the pure-W-at-alloy-density approximation.
+    MaterialData(
+        name="tungsten",
+        density=19.30,
+        electrons_per_gram=electrons_per_gram_from_composition(((74, 1.0),)),
+        composition=((74, 1.0),),
+        mean_excitation_mev=727.0e-6,  # ICRU-37 vintage, as in ESTAR and SBS-1984
+        sternheimer=SternheimerParameters(
+            a=0.1551, m=2.8447, x0=0.2167, x1=3.4960, cbar=5.4059, delta0=0.14
+        ),
+        radiative_anchors=((1.0, 1.159e-1), (10.0, 1.132), (20.0, 2.406)),
     ),
 )
 """Material registry, indexed by the ``WATER``-style integer constants."""

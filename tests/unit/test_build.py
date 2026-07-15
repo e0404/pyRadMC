@@ -31,6 +31,38 @@ def test_download_returns_cached_file_without_network(tmp_path: Path) -> None:
     assert result.read_text() == "already here"
 
 
+def test_main_compiles_the_whole_registry_by_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The CLI routes through ``compile_materials`` (BLD slice 0: tungsten row).
+
+    Default is the whole registry (``n_materials=None``) so a compiled table can
+    serve CT media and the beam-limiting devices at once; ``--n-materials`` narrows
+    it to a registry prefix (1 reproduces the historical water-only build).
+    """
+    from types import SimpleNamespace
+
+    (tmp_path / "EPDL2023.ALL").write_text("epdl text")
+    (tmp_path / "EEDL2023.ALL").write_text("eedl text")
+    calls: dict[str, object] = {}
+
+    def fake_compile(epdl_text: str, eedl_text: str, **kwargs: object) -> object:
+        calls["n_materials"] = kwargs.get("n_materials", "missing")
+        calls["texts"] = (epdl_text, eedl_text)
+        return SimpleNamespace(provenance="fake")
+
+    monkeypatch.setattr(build, "compile_materials", fake_compile)
+    monkeypatch.setattr(build, "save_tables", lambda data, path, dtype: Path(path))
+
+    common = ["--output", str(tmp_path / "out.npz"), "--cache-dir", str(tmp_path)]
+    build.main(common)
+    assert calls["n_materials"] is None  # whole registry
+    assert calls["texts"] == ("epdl text", "eedl text")
+
+    build.main([*common, "--n-materials", "1"])
+    assert calls["n_materials"] == 1  # the historical water-only prefix
+
+
 def test_download_progress_goes_through_logging_not_stdout(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -1,14 +1,16 @@
-"""Download the EPICS libraries and compile a tabulated water table.
+"""Download the EPICS libraries and compile a tabulated cross-section table.
 
 A small build tool, not part of the runtime: it fetches the EPDL and EEDL 2023 files
 from the IAEA (public data; the download and its licence stay user-side, and the
-compiled ``.npz`` is source-agnostic), caches them, compiles liquid water via
-:func:`~pyRadMC.data.tabulated.precompile.compile_water`, and writes the result.
+compiled ``.npz`` is source-agnostic), caches them, compiles a registry prefix via
+:func:`~pyRadMC.data.tabulated.precompile.compile_materials`, and writes the result.
 
-    python -m pyRadMC.data.tabulated.build --output water.npz
+    python -m pyRadMC.data.tabulated.build --output materials.npz
 
-The cached libraries and the compiled table are never committed (stdlib ``urllib``
-only, so no dependency is added). Re-running reuses the cache unless ``--force-download``.
+The default compiles the whole registry (water through tungsten); ``--n-materials 1``
+reproduces the historical water-only table. The cached libraries and the compiled
+table are never committed (stdlib ``urllib`` only, so no dependency is added).
+Re-running reuses the cache unless ``--force-download``.
 """
 
 from __future__ import annotations
@@ -24,7 +26,7 @@ import numpy as np
 from pyRadMC import ECUT_MEV, PCUT_MEV, __version__
 from pyRadMC.data.tables import TABLE_POINTS
 from pyRadMC.data.tabulated.format import save_tables
-from pyRadMC.data.tabulated.precompile import ElectronStoppingStrategy, compile_water
+from pyRadMC.data.tabulated.precompile import ElectronStoppingStrategy, compile_materials
 
 __all__ = ["download_library", "library_path", "main"]
 
@@ -64,10 +66,16 @@ def download_library(which: str, cache_dir: Path | None = None, *, force: bool =
 
 
 def main(argv: list[str] | None = None) -> None:
-    """CLI: download the libraries (as needed) and compile a water table."""
+    """CLI: download the libraries (as needed) and compile a materials table."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0] if __doc__ else None)
     parser.add_argument("--output", type=Path, required=True, help="output .npz path")
     parser.add_argument("--cache-dir", type=Path, default=None, help="library cache directory")
+    parser.add_argument(
+        "--n-materials",
+        type=int,
+        default=None,
+        help="compile only the first N registry materials (default: whole registry)",
+    )
     parser.add_argument(
         "--strategy",
         choices=[s.value for s in ElectronStoppingStrategy],
@@ -83,9 +91,10 @@ def main(argv: list[str] | None = None) -> None:
 
     epdl = download_library("epdl", args.cache_dir, force=args.force_download)
     eedl = download_library("eedl", args.cache_dir, force=args.force_download)
-    data = compile_water(
+    data = compile_materials(
         epdl.read_text(encoding="latin-1"),
         eedl.read_text(encoding="latin-1"),
+        n_materials=args.n_materials,
         strategy=ElectronStoppingStrategy(args.strategy),
         pcut=args.pcut,
         ecut=args.ecut,
