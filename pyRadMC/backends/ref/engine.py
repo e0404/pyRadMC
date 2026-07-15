@@ -297,7 +297,7 @@ class ReferenceEngine:
                     h = beamlet * n_histories_per_beamlet + rw
                     state = self.rng.init_state(seed, rw if correlated else h)
                     primary = source.emit(beamlet, state)
-                    energy_emitted += primary.energy
+                    energy_emitted += primary.weight * primary.energy
                     energy_escaped += transport_history(
                         PHOTON,
                         primary.energy,
@@ -314,6 +314,7 @@ class ReferenceEngine:
                         pcut,
                         ecut,
                         transport_electrons,
+                        weight=primary.weight,
                         deposit_weight=deposit_weight,
                     )
             scorer.end_batch(per_batch)

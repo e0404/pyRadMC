@@ -32,7 +32,12 @@ from tests.phsp_fixtures import Rec, write_phsp
 
 wp = pytest.importorskip("warp", reason="warp-lang optional dependency not installed")
 
-pytestmark = pytest.mark.warp
+# These tests deliberately oversample tiny synthetic phase spaces; the finite-
+# reuse latent-variance caveat is expected and acknowledged (pinned elsewhere).
+pytestmark = [
+    pytest.mark.warp,
+    pytest.mark.filterwarnings("ignore:.*latent variance:UserWarning"),
+]
 
 DEVICES = [
     "cpu",

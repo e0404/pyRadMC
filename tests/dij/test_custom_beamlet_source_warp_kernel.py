@@ -40,7 +40,7 @@ def _strip_beamlet_sampler(beamlet: int, within_index: int, state: WarpRNGState)
     x_hi = X_LO + X_SPAN * float(beamlet + 1) / float(N_STRIPS)
     x = x_lo + (x_hi - x_lo) * wp_uniform(state)
     y = Y_LO + Y_SPAN * wp_uniform(state)
-    return 6.0, x, y, -1.0, 0.0, 0.0, 1.0
+    return 6.0, x, y, -1.0, 0.0, 0.0, 1.0, 1.0
 
 
 class StripWarpBeamletSource(BeamletSource):
@@ -124,3 +124,34 @@ def test_in_kernel_dij_conserves_energy() -> None:
     )
     assert dij.energy_emitted == pytest.approx(dij.energy_deposited + dij.energy_escaped, rel=1e-4)
     assert dij.energy_emitted == pytest.approx(N_STRIPS * 600 * ENERGY, rel=1e-4)
+
+
+@wp.func
+def _half_weight_sampler(beamlet: int, within_index: int, state: WarpRNGState):
+    """The strip sampler at statistical weight 0.5 (weighted-Dij contract pin)."""
+    x_lo = X_LO + X_SPAN * float(beamlet) / float(N_STRIPS)
+    x_hi = X_LO + X_SPAN * float(beamlet + 1) / float(N_STRIPS)
+    x = x_lo + (x_hi - x_lo) * wp_uniform(state)
+    y = Y_LO + Y_SPAN * wp_uniform(state)
+    return 6.0, x, y, -1.0, 0.0, 0.0, 1.0, 0.5
+
+
+class HalfWeightWarpBeamletSource(StripWarpBeamletSource):
+    """The strip source emitting at weight 0.5 on both routes."""
+
+    warp_beamlet_sampler = _half_weight_sampler
+
+    def emit(self, beamlet: int, rng_state: object) -> Primary:
+        return super().emit(beamlet, rng_state)._replace(weight=0.5)
+
+
+def test_in_kernel_dij_books_the_sampler_weight() -> None:
+    """The wrapped kernel books emitted weight*energy and transports the weight."""
+    from pyRadMC.backends.warp.engine import WarpEngine
+
+    grid = _grid()
+    dij = WarpEngine(grid=grid, cross_sections=_xs(grid), device="cpu").run_dij(
+        HalfWeightWarpBeamletSource(), n_histories_per_beamlet=600, n_batches=3, seed=SEED
+    )
+    assert dij.energy_emitted == pytest.approx(0.5 * N_STRIPS * 600 * ENERGY, rel=1e-9)
+    assert dij.energy_emitted == pytest.approx(dij.energy_deposited + dij.energy_escaped, rel=1e-4)

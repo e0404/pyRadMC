@@ -49,6 +49,7 @@ __all__ = [
     "IAEA_POSITRON",
     "IAEAHeader",
     "IAEAPhaseSpace",
+    "InMemoryPhaseSpaceSource",
     "PhaseSpaceSource",
     "PhspRecord",
     "read_iaea_header",
@@ -373,6 +374,57 @@ class IAEAPhaseSpace:
             yield _decode_record(self._fh.read(length), self.header, self._struct)
 
 
+def _sample_indices(seed: int, history_offset: int, n: int, n_valid: int) -> np.ndarray:
+    """Chunk-invariant record indices for histories ``[offset, offset + n)``.
+
+    One ``PCG64(seed)`` stream advanced to ``history_offset``: history ``h``
+    always draws the ``h``-th value regardless of chunking. This is a *different*
+    stream from the per-history ``emit`` spawn, so the two backends draw
+    independent records — both unbiased estimators of the same dose, compared
+    statistically, never bit-wise.
+    """
+    bitgen = np.random.PCG64(seed)
+    bitgen.advance(history_offset)
+    u01 = np.random.Generator(bitgen).random(n)
+    k = (u01 * n_valid).astype(np.int64)
+    np.clip(k, 0, n_valid - 1, out=k)  # guard the u01 == 1 corner
+    return k
+
+
+class _LatentVarianceTripwire:
+    """One-shot result caveat: batch sigmas never see the finite-N latent variance.
+
+    Sampling a stored phase space **with replacement**, the run's per-batch sigma
+    estimates only the transport noise of the drawn population; the statistical
+    error of the finite phase space itself (its "latent variance") is invisible
+    to them at any history count. Once the histories drawn exceed the stored
+    population, record reuse is certain, so a single :func:`warnings.warn` fires
+    there — a pragmatic tripwire, not a claim that fewer histories are free of
+    the effect.
+    """
+
+    def __init__(self, n_valid: int) -> None:
+        self._n_valid = n_valid
+        self._histories_seen = 0
+        self._warned = False
+
+    def note(self, up_to: int) -> None:
+        """Record that histories up to index ``up_to`` (exclusive) were drawn."""
+        self._histories_seen = max(self._histories_seen, up_to)
+        if not self._warned and self._histories_seen > self._n_valid:
+            self._warned = True
+            warnings.warn(
+                f"drawing more histories ({self._histories_seen}) than the phase space "
+                f"holds particles ({self._n_valid}): records repeat, and the per-batch "
+                "sigmas do not include the finite-phase-space latent variance",
+                stacklevel=3,
+            )
+
+    def count_one(self) -> None:
+        """Record one more per-history ``emit`` draw."""
+        self.note(self._histories_seen + 1)
+
+
 class PhaseSpaceSource(Source):
     """A primary source that samples particles from an IAEA phase-space file.
 
@@ -457,6 +509,7 @@ class PhaseSpaceSource(Source):
         self._n_valid = n - len(self._unsupported)
         if self._n_valid == 0:
             raise ValueError(f"phase-space file {path} has no transportable particles")
+        self._tripwire = _LatentVarianceTripwire(self._n_valid)
 
     @property
     def max_energy(self) -> float:
@@ -492,6 +545,7 @@ class PhaseSpaceSource(Source):
 
     def emit(self, rng_state: RNGState) -> Primary:
         """Emit one primary, sampled uniformly from the file; consumes one uniform."""
+        self._tripwire.count_one()
         rec = self._record_for_state(rng_state)
         return Primary(
             energy=rec.energy,
@@ -527,11 +581,8 @@ class PhaseSpaceSource(Source):
         per-history generator), so the two backends draw different records — both
         unbiased estimators of the same dose, compared statistically, never bit-wise.
         """
-        bitgen = np.random.PCG64(seed)
-        bitgen.advance(history_offset)
-        u01 = np.random.Generator(bitgen).random(n)
-        k = (u01 * self._n_valid).astype(np.int64)
-        np.clip(k, 0, self._n_valid - 1, out=k)  # guard the u01 == 1 corner
+        self._tripwire.note(history_offset + n)
+        k = _sample_indices(seed, history_offset, n, self._n_valid)
         recs = np.frombuffer(self._mmap, dtype=self._record_dtype, count=self.header.n_particles)[
             self._record_indices(k)
         ]
@@ -598,3 +649,109 @@ class PhaseSpaceSource(Source):
     def __del__(self) -> None:
         """Best-effort cleanup if the source was not closed explicitly."""
         self.close()
+
+
+class InMemoryPhaseSpaceSource(Source):
+    """A phase space held as column arrays — the treatment-head pre-solve's output.
+
+    The same sampling contract as :class:`PhaseSpaceSource` (one uniform per
+    ``emit``; chunk-invariant vectorized :meth:`sample_batch` on its own PCG64
+    stream; per-particle ``kind`` and ``weight``) backed by arrays built in
+    memory instead of an IAEA file, so ``geometry/head.py`` can hand its scored
+    exit-plane particles straight to ``run``. Like the file-backed source it
+    breaks unique beamlet ownership and never plugs into ``run_dij``.
+
+    Directions must be unit vectors (validated to 1e-5 — pre-solve output is
+    float64, so this is a correctness check, not a tolerance); ``particle_type``
+    uses the IAEA codes (photon 1, electron 2, positron 3). The finite-reuse
+    latent-variance caveat (:class:`_LatentVarianceTripwire`) applies with force
+    here: the population size is whatever the pre-solve was asked for, so
+    oversampling it is easy — size the pre-solve at or above the planned
+    transport histories.
+    """
+
+    def __init__(
+        self,
+        particle_type: np.ndarray,
+        energy: np.ndarray,
+        x: np.ndarray,
+        y: np.ndarray,
+        z: np.ndarray,
+        ux: np.ndarray,
+        uy: np.ndarray,
+        uz: np.ndarray,
+        weight: np.ndarray,
+    ) -> None:
+        codes = np.asarray(particle_type, dtype=np.int32)
+        if codes.size == 0:
+            raise ValueError("an in-memory phase space needs at least one particle")
+        columns = {
+            "energy": energy,
+            "x": x,
+            "y": y,
+            "z": z,
+            "ux": ux,
+            "uy": uy,
+            "uz": uz,
+            "weight": weight,
+        }
+        arrays = {name: np.asarray(col, dtype=np.float64) for name, col in columns.items()}
+        for name, col in arrays.items():
+            if col.shape != codes.shape:
+                raise ValueError(
+                    f"column {name!r} length {col.shape} != particle_type length {codes.shape}"
+                )
+        if not np.all(np.isin(codes, (IAEA_PHOTON, IAEA_ELECTRON, IAEA_POSITRON))):
+            raise ValueError("particle_type must use the supported IAEA codes 1/2/3")
+        if not np.all(arrays["energy"] > 0.0):
+            raise ValueError("every particle needs a positive energy")
+        norms = arrays["ux"] ** 2 + arrays["uy"] ** 2 + arrays["uz"] ** 2
+        if not np.all(np.abs(norms - 1.0) < 1.0e-5):
+            raise ValueError("directions must be unit vectors")
+        if not np.all(np.isfinite(arrays["weight"])) or np.any(arrays["weight"] < 0.0):
+            raise ValueError("weights must be finite and non-negative")
+        self._codes = codes
+        self._columns = arrays
+        self._tripwire = _LatentVarianceTripwire(int(codes.size))
+
+    def __len__(self) -> int:
+        """Return the number of stored particles available to sample."""
+        return int(self._codes.size)
+
+    @property
+    def max_energy(self) -> float:
+        """Highest stored particle energy in MeV (for table sizing)."""
+        return float(self._columns["energy"].max())
+
+    def emit(self, rng_state: RNGState) -> Primary:
+        """Emit one stored particle, sampled uniformly; consumes one uniform."""
+        self._tripwire.count_one()
+        k = int(uniform(rng_state) * len(self))
+        if k >= len(self):  # guard the uniform == 1.0 corner
+            k = len(self) - 1
+        c = self._columns
+        return Primary(
+            energy=float(c["energy"][k]),
+            x=float(c["x"][k]),
+            y=float(c["y"][k]),
+            z=float(c["z"][k]),
+            ux=float(c["ux"][k]),
+            uy=float(c["uy"][k]),
+            uz=float(c["uz"][k]),
+            kind=_IAEA_KIND[int(self._codes[k])],
+            weight=float(c["weight"][k]),
+        )
+
+    def sample_batch(self, seed: int, history_offset: int, n: int) -> dict[str, np.ndarray]:
+        """Vectorized upload columns for histories ``[offset, offset + n)``.
+
+        A pure fancy-indexed gather of the stored columns at the chunk-invariant
+        :func:`_sample_indices`; the same stream/independence caveats as the
+        file-backed source apply.
+        """
+        self._tripwire.note(history_offset + n)
+        k = _sample_indices(seed, history_offset, n, len(self))
+        out: dict[str, np.ndarray] = {"particle_type": self._codes[k].copy()}
+        for name, col in self._columns.items():
+            out[name] = col[k].astype(np.float32)
+        return out

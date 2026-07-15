@@ -431,8 +431,9 @@ class WarpEngine:
         # Route by capability: the built-in lattice generates in-kernel from analytic
         # bounds; a source with a warp_beamlet_sampler is generated in-kernel by a
         # wrapped kernel; any other source is host pre-sampled per beamlet and uploaded.
-        # All three transport each beamlet primary as a unit-weight photon (the
-        # reference Dij contract).
+        # Beamlet primaries are photons carrying the source's statistical weight
+        # (the lattice is unit-weight by construction; the other two routes take the
+        # weight from the sampler/emit, matching the reference Dij).
         use_lattice = isinstance(source, BeamletGridSource)
         beamlet_generator = None
         emitted_counter = None
@@ -1264,16 +1265,20 @@ class WarpEngine:
         (correlated) or ``h = j*n_per + r`` (independent) — the mapping
         ``ReferenceEngine.run_dij`` defines — and the column tag is
         ``local * n_batches + (r // per_batch)`` into the group's dense buffer, so the
-        result is bit-invariant to grouping/chunking. Every beamlet primary is a
-        unit-weight photon at the sampled energy/position, matching the reference Dij.
-        Returns the group's emitted energy.
+        result is bit-invariant to grouping/chunking. Every beamlet primary is a photon
+        at the sampled energy/position carrying the sampled statistical weight (the
+        collimated sources attenuate by weight), and the emitted book sums
+        ``weight * energy``, matching the reference Dij. Returns the group's emitted
+        energy.
         """
         emitted = 0.0
         for local in range(group):
             beamlet = group_start + local
             offset = 0 if correlated else beamlet * n_per
             cols = source.sample_beamlet_batch(seed, offset, n_per, beamlet)
-            emitted += float(np.sum(cols["energy"].astype(np.float64)))  # photon, weight 1
+            emitted += float(
+                np.sum(cols["weight"].astype(np.float64) * cols["energy"].astype(np.float64))
+            )
             r = np.arange(n_per, dtype=np.int64)
             key = (offset + r).astype(np.int32)
             tag = (local * n_batches + (r // per_batch)).astype(np.int32)
@@ -1283,9 +1288,9 @@ class WarpEngine:
                 nc = r1 - r0
                 sub = slice(r0, r1)
                 sub_batch = {
-                    name: cols[name][sub] for name in ("energy", "x", "y", "z", "ux", "uy", "uz")
+                    name: cols[name][sub]
+                    for name in ("energy", "x", "y", "z", "ux", "uy", "uz", "weight")
                 }
-                sub_batch["weight"] = np.ones(nc, dtype=np.float32)
                 for q in queues:
                     _reset_count(q, device)
                 self._seed_queue(

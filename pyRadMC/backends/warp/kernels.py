@@ -320,15 +320,18 @@ _beamlet_generator_cache: dict = {}
 def make_beamlet_generator_kernel(sampler):
     """Wrap a user ``@wp.func`` beamlet sampler into a Dij generator kernel (cached).
 
-    ``sampler(beamlet: int, within_index: int, state) -> (energy, x, y, z, ux, uy, uz)``
-    is the advanced Warp Dij route
+    ``sampler(beamlet: int, within_index: int, state) -> (energy, x, y, z, ux, uy, uz,
+    weight)`` is the advanced Warp Dij route
     (:attr:`pyRadMC.geometry.source.BeamletSource.warp_beamlet_sampler`): the returned
     kernel bakes the same flat-block history mapping as
     :func:`generate_beamlet_lattice` — group-local beamlet ``t // n_per``, within-beamlet
     index ``r``, batch ``r // per_batch``, global history ``h = beamlet*n_per + r``,
-    correlated key ``r`` — calls the sampler for the primary's position, and writes a
-    unit-weight photon tagged with the batch-resolved column ``local*n_batches + batch``.
-    Emitted energy is booked into a signed fixed-point counter. Memoized per sampler.
+    correlated key ``r`` — calls the sampler for the primary, and writes a photon at the
+    sampled weight tagged with the batch-resolved column ``local*n_batches + batch``
+    (the weight carries deterministic source-side attenuation; it must match what the
+    host ``emit`` returns or the backends disagree systematically). Emitted
+    ``weight * energy`` is booked into a signed fixed-point counter. Memoized per
+    sampler.
     """
     cached = _beamlet_generator_cache.get(sampler)
     if cached is not None:
@@ -361,13 +364,13 @@ def make_beamlet_generator_kernel(sampler):
         state = WarpRNGState()
         state.slots = slots
         state.idx = tid
-        energy, x, y, z, ux, uy, uz = sampler(beamlet, r, state)
-        _escape(emitted, energy)  # unit-weight photon; no positron latent in a Dij
+        energy, x, y, z, ux, uy, uz, weight = sampler(beamlet, r, state)
+        _escape(emitted, weight * energy)  # photon; no positron latent in a Dij
         q.kind[tid] = PHOTON
         q.beamlet[tid] = local * n_batches + batch
         q.primary[tid] = 1
         q.energy[tid] = energy
-        q.weight[tid] = 1.0
+        q.weight[tid] = weight
         q.x[tid] = x
         q.y[tid] = y
         q.z[tid] = z

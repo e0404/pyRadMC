@@ -22,6 +22,11 @@ from pyRadMC.rng.host import HostRNG
 from tests.conftest import SEED
 from tests.phsp_fixtures import Rec, write_phsp
 
+# These tests deliberately oversample tiny synthetic phase spaces; the finite-
+# reuse latent-variance caveat is expected and acknowledged (pinned explicitly
+# in the tripwire tests).
+pytestmark = pytest.mark.filterwarnings("ignore:.*latent variance:UserWarning")
+
 
 def _engine() -> ReferenceEngine:
     grid = VoxelGrid.uniform_water(shape=(16, 16, 16), spacing=(1.0, 1.0, 1.0))

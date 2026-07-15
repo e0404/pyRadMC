@@ -37,6 +37,8 @@ __all__ = [
     "BeamletSource",
     "CompositeBeamletSource",
     "CompositeSource",
+    "GaussianSpotBeamSource",
+    "GaussianSpotBeamletSource",
     "ParallelBeamSource",
     "PencilBeamSource",
     "Primary",
@@ -152,7 +154,10 @@ class BeamletSource(ABC):
     """
 
     #: Optional ``@wp.func`` for the advanced Warp Dij route; ``None`` selects
-    #: pre-sampling. Signature ``(beamlet: int, within_index: int, state) -> (...)``.
+    #: pre-sampling. Signature ``(beamlet: int, within_index: int, state) ->
+    #: (energy, x, y, z, ux, uy, uz, weight)`` — a photon with a statistical
+    #: weight (1.0 for analog sources; the collimated wrappers attenuate by it),
+    #: mirroring what :meth:`emit` returns for the same stream.
     warp_beamlet_sampler: ClassVar[Any] = None
 
     @property
@@ -639,3 +644,213 @@ class SpectralBeamletSource(BeamletSource):
         if not 0 <= beamlet < self.n_beamlets:
             raise IndexError(f"beamlet {beamlet} outside fan of {self.n_beamlets}")
         return self._fan.sample_through_batch(self._spectrum, beamlet, seed, history_offset, n)
+
+
+# A uniform draw of exactly zero would send the Box-Muller radius to infinity; the
+# clamp changes the spot distribution only below the 1e-12 quantile.
+_BOX_MULLER_FLOOR = 1.0e-12
+
+
+@dataclass(frozen=True)
+class _GaussianSpotFan:
+    """The divergent fan generalized to a finite 2D-Gaussian focal spot.
+
+    Composes a :class:`_DivergentFan` (whose validation and engine-frame
+    conventions apply unchanged) with per-axis spot sigmas at the focal point.
+    Primaries start **on** the rectangle at the reference plane — e.g. directly
+    upstream of the beam-limiting devices — travelling as if they came in a
+    straight line from a point sampled from the Gaussian spot (the standard
+    finite-source-size model): downstream collimation then acquires a geometric
+    penumbra with no extra machinery, and the transport loops fly whatever vacuum
+    remains to the grid. The spot spreads along the *aperture axes* translated to
+    the focal point; the two Gaussian components are independent (Box-Muller).
+    """
+
+    fan: _DivergentFan
+    sigma_u: float
+    sigma_v: float
+
+    def __post_init__(self) -> None:
+        """Reject negative spot widths (zero is the point-source degeneracy)."""
+        if self.sigma_u < 0.0 or self.sigma_v < 0.0:
+            raise ValueError(
+                f"spot sigma must be non-negative, got ({self.sigma_u}, {self.sigma_v})"
+            )
+
+    def emit_from_plane(self, spectrum: Spectrum, aperture: int, rng_state: RNGState) -> Primary:
+        """Emit one primary on the plane, aimed from a Gaussian-sampled spot point.
+
+        Consumes **exactly six uniforms in fixed order** — two for the energy,
+        two for the in-rectangle offset (identical to
+        :meth:`_DivergentFan.emit_through`, so the zero-sigma source replays the
+        fan's lines on the same stream), and two Box-Muller draws for the spot,
+        consumed even at zero sigma so the draw count never varies (the
+        vectorized-batch requirement). Under correlated Dij sampling every
+        beamlet replays the same energy, rectangle offset *and* spot point.
+        """
+        energy = spectrum.sample_energy(rng_state)
+        du = (uniform(rng_state) - 0.5) * self.fan.width_u
+        dv = (uniform(rng_state) - 0.5) * self.fan.width_v
+        radius = math.sqrt(-2.0 * math.log(max(uniform(rng_state), _BOX_MULLER_FLOOR)))
+        angle = 2.0 * math.pi * uniform(rng_state)
+        spot_u = self.sigma_u * radius * math.cos(angle)
+        spot_v = self.sigma_v * radius * math.sin(angle)
+
+        center = self.fan.centers[aperture]
+        u_axis, v_axis = self.fan.u_axis, self.fan.v_axis
+        px = center[0] + du * u_axis[0] + dv * v_axis[0]
+        py = center[1] + du * u_axis[1] + dv * v_axis[1]
+        pz = center[2] + du * u_axis[2] + dv * v_axis[2]
+        focal = self.fan.focal_point
+        sx = focal[0] + spot_u * u_axis[0] + spot_v * v_axis[0]
+        sy = focal[1] + spot_u * u_axis[1] + spot_v * v_axis[1]
+        sz = focal[2] + spot_u * u_axis[2] + spot_v * v_axis[2]
+        dx, dy, dz = px - sx, py - sy, pz - sz
+        norm = math.sqrt(dx * dx + dy * dy + dz * dz)
+        return Primary(energy, px, py, pz, dx / norm, dy / norm, dz / norm)
+
+    def sample_from_plane_batch(
+        self, spectrum: Spectrum, aperture: int, seed: int, history_offset: int, n: int
+    ) -> dict[str, npt.NDArray[Any]]:
+        """Vectorized pre-sampling sibling of :meth:`emit_from_plane`.
+
+        One ``PCG64(seed)`` stream advanced to ``6 * history_offset``: history
+        ``h`` always consumes draws ``6h .. 6h + 5`` regardless of chunking and
+        of the aperture (chunk-invariant, beamlet-blind) — a *different* stream
+        from ``emit_from_plane``'s per-history spawn, so the backends draw
+        independent primaries and agree statistically, never bit-wise (the
+        spectral-source precedent).
+        """
+        bitgen = np.random.PCG64(seed)
+        bitgen.advance(6 * history_offset)
+        u = np.random.Generator(bitgen).random((n, 6))
+
+        energy = spectrum.sample_energies(u[:, 0], u[:, 1])
+        du = (u[:, 2] - 0.5) * self.fan.width_u
+        dv = (u[:, 3] - 0.5) * self.fan.width_v
+        radius = np.sqrt(-2.0 * np.log(np.maximum(u[:, 4], _BOX_MULLER_FLOOR)))
+        angle = 2.0 * np.pi * u[:, 5]
+        spot_u = self.sigma_u * radius * np.cos(angle)
+        spot_v = self.sigma_v * radius * np.sin(angle)
+
+        u_axis = np.asarray(self.fan.u_axis, dtype=np.float64)
+        v_axis = np.asarray(self.fan.v_axis, dtype=np.float64)
+        center = np.asarray(self.fan.centers[aperture], dtype=np.float64)
+        focal = np.asarray(self.fan.focal_point, dtype=np.float64)
+        plane_point = center + du[:, None] * u_axis + dv[:, None] * v_axis
+        spot_point = focal + spot_u[:, None] * u_axis + spot_v[:, None] * v_axis
+        direction = plane_point - spot_point
+        direction /= np.linalg.norm(direction, axis=1, keepdims=True)
+
+        return {
+            "particle_type": np.ones(n, dtype=np.int32),  # photons, unit weight
+            "energy": energy.astype(np.float32),
+            "x": plane_point[:, 0].astype(np.float32),
+            "y": plane_point[:, 1].astype(np.float32),
+            "z": plane_point[:, 2].astype(np.float32),
+            "ux": direction[:, 0].astype(np.float32),
+            "uy": direction[:, 1].astype(np.float32),
+            "uz": direction[:, 2].astype(np.float32),
+            "weight": np.ones(n, dtype=np.float32),
+        }
+
+
+class GaussianSpotBeamSource(Source):
+    """Photons born on a plane rectangle, aimed from a 2D-Gaussian focal spot.
+
+    The simplified head-input source of the BLD workstream: emission happens on
+    the rectangle at the reference plane (e.g. directly upstream of the limiting
+    devices), each photon travelling as if it originated at the Gaussian spot —
+    compose with :class:`~pyRadMC.geometry.collimation.CollimatedSource` (whose
+    full-line convention handles the devices downstream of this plane) or feed
+    the head pre-solve. ``sigma_u = sigma_v = 0`` degenerates to
+    :class:`SpectralBeamSource`'s fan lines, started on the plane. Transports on
+    both backends via the vectorized pre-sampling route.
+    """
+
+    def __init__(
+        self,
+        spectrum: Spectrum,
+        focal_point: tuple[float, float, float],
+        center: tuple[float, float, float],
+        width_u: float,
+        width_v: float,
+        sigma_u: float,
+        sigma_v: float,
+        u_axis: tuple[float, float, float] = (1.0, 0.0, 0.0),
+        v_axis: tuple[float, float, float] = (0.0, 1.0, 0.0),
+    ) -> None:
+        self._spectrum = spectrum
+        self._spot_fan = _GaussianSpotFan(
+            _DivergentFan(focal_point, (center,), width_u, width_v, u_axis, v_axis),
+            sigma_u,
+            sigma_v,
+        )
+
+    @property
+    def max_energy(self) -> float:
+        """The spectrum's top bin edge, for cross-section table sizing."""
+        return self._spectrum.max_energy
+
+    def emit(self, rng_state: RNGState) -> Primary:
+        """Emit one primary on the plane; consumes exactly six uniforms."""
+        return self._spot_fan.emit_from_plane(self._spectrum, 0, rng_state)
+
+    def sample_batch(self, seed: int, history_offset: int, n: int) -> dict[str, npt.NDArray[Any]]:
+        """Vectorized simple-route batch; see :meth:`_GaussianSpotFan.sample_from_plane_batch`."""
+        return self._spot_fan.sample_from_plane_batch(self._spectrum, 0, seed, history_offset, n)
+
+
+class GaussianSpotBeamletSource(BeamletSource):
+    """The beamlet-resolved planar Gaussian-spot source (one rectangle per bixel).
+
+    Beamlet ``j`` emits on the rectangle centred at ``centers[j]``; the draw
+    stream never sees the beamlet, so correlated Dij sampling replays the same
+    energy, in-rectangle offset and spot point in every column. See
+    :class:`GaussianSpotBeamSource` for the geometry and conventions.
+    """
+
+    def __init__(
+        self,
+        spectrum: Spectrum,
+        focal_point: tuple[float, float, float],
+        centers: Sequence[tuple[float, float, float]],
+        width_u: float,
+        width_v: float,
+        sigma_u: float,
+        sigma_v: float,
+        u_axis: tuple[float, float, float] = (1.0, 0.0, 0.0),
+        v_axis: tuple[float, float, float] = (0.0, 1.0, 0.0),
+    ) -> None:
+        self._spectrum = spectrum
+        self._spot_fan = _GaussianSpotFan(
+            _DivergentFan(focal_point, tuple(centers), width_u, width_v, u_axis, v_axis),
+            sigma_u,
+            sigma_v,
+        )
+
+    @property
+    def max_energy(self) -> float:
+        """The spectrum's top bin edge, for cross-section table sizing."""
+        return self._spectrum.max_energy
+
+    @property
+    def n_beamlets(self) -> int:
+        """One beamlet per plane rectangle centre."""
+        return len(self._spot_fan.fan.centers)
+
+    def emit(self, beamlet: int, rng_state: RNGState) -> Primary:
+        """Emit one primary for ``beamlet``; consumes exactly six uniforms."""
+        if not 0 <= beamlet < self.n_beamlets:
+            raise IndexError(f"beamlet {beamlet} outside fan of {self.n_beamlets}")
+        return self._spot_fan.emit_from_plane(self._spectrum, beamlet, rng_state)
+
+    def sample_beamlet_batch(
+        self, seed: int, history_offset: int, n: int, beamlet: int
+    ) -> dict[str, npt.NDArray[Any]]:
+        """Vectorized per-beamlet batch; chunk-invariant and beamlet-blind."""
+        if not 0 <= beamlet < self.n_beamlets:
+            raise IndexError(f"beamlet {beamlet} outside fan of {self.n_beamlets}")
+        return self._spot_fan.sample_from_plane_batch(
+            self._spectrum, beamlet, seed, history_offset, n
+        )

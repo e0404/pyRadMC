@@ -38,16 +38,25 @@ Stated v1 approximations (each also noted where it bites):
 
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
 import numpy as np
 from numpy.typing import NDArray
 
+from pyRadMC.data.interface import CrossSectionSource
+from pyRadMC.geometry.source import BeamletSource, Primary, Source
+from pyRadMC.rng import RNGState
+
 __all__ = [
     "MLC",
     "BeamFrame",
     "BeamLimitingStack",
+    "CollimatedBeamletSource",
+    "CollimatedSource",
     "JawPair",
+    "TransmissionMaskBeamletSource",
+    "TransmissionMaskSource",
     "project_between_planes",
 ]
 
@@ -429,3 +438,347 @@ class BeamLimitingStack:
             for device in self.devices
         ]
         return np.column_stack(columns)
+
+
+class _RayWeightModel(ABC):
+    """A deterministic per-ray weight factor in [0, 1] (transmission, mask value).
+
+    The scalar ``emit`` path (:meth:`factor_for`) is implemented on top of the
+    vectorized :meth:`factors`, so both engine routes evaluate one arithmetic and
+    can never acquire a route-relative weight bias.
+    """
+
+    @abstractmethod
+    def factors(self, energies: _F64, origins: _F64, directions: _F64) -> _F64:
+        """Per-ray weight factors in [0, 1], vectorized over ``(n,)``/``(n, 3)``."""
+
+    def factor_for(self, primary: Primary) -> float:
+        """Evaluate the scalar ``emit`` path — same table, same arithmetic."""
+        factors = self.factors(
+            np.array([primary.energy]),
+            np.array([[primary.x, primary.y, primary.z]]),
+            np.array([[primary.ux, primary.uy, primary.uz]]),
+        )
+        return float(factors[0])
+
+
+class _StackTransmission(_RayWeightModel):
+    """Narrow-beam transmission through a stack: ``exp(-sum_i (mu/rho)_i(E) rho_i t_i)``.
+
+    One per-device log-log table of ``mu_over_rho_total`` is built at construction
+    through the :class:`~pyRadMC.data.interface.CrossSectionSource` interface
+    (AGENTS.md 2.6 — never a hardcoded cross-section), and **both** the scalar
+    ``emit`` path and the vectorized batch path evaluate this same table, so the
+    two engine routes can never acquire a route-relative weight bias.
+
+    Stated approximations (Beer-Lambert with the **total** attenuation
+    coefficient, coherent included): narrow-beam geometry — photons scattered in
+    the devices are removed, none are transported onward (slightly conservative,
+    since coherent and small-angle incoherent scatter is forward-peaked; the head
+    pre-solve is the higher-fidelity path that keeps the first Compton photon) —
+    and no electron contamination from the device surfaces. Energies below
+    ``e_min`` clamp to the table edge (log-log interpolation; the W K-edge at
+    69.5 keV sits below any MV spectrum's useful range).
+    """
+
+    def __init__(
+        self,
+        stack: BeamLimitingStack,
+        cross_sections: CrossSectionSource,
+        e_max: float,
+        e_min: float,
+        n_table: int,
+    ) -> None:
+        if max(stack.materials) >= cross_sections.n_materials:
+            raise ValueError(
+                f"stack material index {max(stack.materials)} is beyond this "
+                f"cross-section source ({cross_sections.n_materials} materials); "
+                "device materials like tungsten need the tabulated backend"
+            )
+        if not 0.0 < e_min < e_max:
+            raise ValueError(f"need 0 < e_min < e_max, got {e_min}, {e_max}")
+        self._stack = stack
+        energies = np.geomspace(e_min, e_max, n_table)
+        self._log_energies = np.log(energies)
+        self._log_mu = np.stack(
+            [
+                np.log([cross_sections.mu_over_rho_total(float(e), material) for e in energies])
+                for material in stack.materials
+            ]
+        )
+        self._densities = np.asarray(stack.densities, dtype=np.float64)
+
+    def factors(self, energies: _F64, origins: _F64, directions: _F64) -> _F64:
+        """Per-ray transmission factors in [0, 1], vectorized."""
+        thickness = self._stack.path_lengths(origins, directions)  # (n, n_devices)
+        log_e = np.log(np.asarray(energies, dtype=np.float64))
+        mu = np.exp(
+            np.stack([np.interp(log_e, self._log_energies, row) for row in self._log_mu])
+        )  # (n_devices, n)
+        # A ray trapped parallel to a slab has infinite thickness: 0 * inf would be
+        # NaN for a zero-mu device, but mu is strictly positive here, so tau is inf
+        # and the factor cleanly zero.
+        tau = (mu.T * self._densities * thickness).sum(axis=1)
+        return np.asarray(np.exp(-tau), dtype=np.float64)
+
+
+class _MaskTransmission(_RayWeightModel):
+    """A user 0..1 transmission mask on a plane rectangle (pure fluence shaping).
+
+    ``mask[i, j]`` covers pixel ``i`` along ``u_axis`` and ``j`` along ``v_axis``;
+    pixel centres tile the ``width_u x width_v`` rectangle about ``plane_center``.
+    Lookups interpolate bilinearly between pixel centres — written in the
+    incremental form ``v00 + fu*(v10-v00) + ...`` so a plateau of equal pixels
+    (an all-open mask in particular) evaluates to the pixel value *exactly* —
+    clamped in the half-pixel border band. A ray crossing the plane outside the
+    rectangle, or running parallel to it, carries weight zero. Energy plays no
+    role: this is configuration 2 of the BLD workstream (forward fields and
+    sequenced shapes for aperture optimization), not an attenuation model.
+
+    The plane is intersected along the ray's full line (the stack convention), so
+    the wrapped source may emit on either side of it.
+    """
+
+    def __init__(
+        self,
+        mask: NDArray[np.float64],
+        plane_center: tuple[float, float, float],
+        width_u: float,
+        width_v: float,
+        u_axis: tuple[float, float, float],
+        v_axis: tuple[float, float, float],
+    ) -> None:
+        values = np.asarray(mask, dtype=np.float64)
+        if values.ndim != 2 or values.size == 0:
+            raise ValueError(f"the mask must be a non-empty 2D array, got shape {values.shape}")
+        if not np.all(np.isfinite(values)) or values.min() < 0.0 or values.max() > 1.0:
+            raise ValueError("mask values must be finite and within 0..1")
+        if width_u <= 0.0 or width_v <= 0.0:
+            raise ValueError(f"widths must be positive, got {width_u}, {width_v}")
+        u = np.asarray(_as_unit(u_axis, "u_axis"))
+        v = np.asarray(_as_unit(v_axis, "v_axis"))
+        if abs(float(np.dot(u, v))) > 1.0e-9:
+            raise ValueError("u_axis and v_axis must be orthogonal")
+        self._mask = values
+        self._center = np.asarray(plane_center, dtype=np.float64)
+        self._widths = (float(width_u), float(width_v))
+        self._u_axis = u
+        self._v_axis = v
+        self._normal = np.cross(u, v)
+
+    def _interpolate(self, coordinate: _F64, axis: int) -> tuple[NDArray[np.int64], _F64]:
+        """Clamped integer pixel index and fractional offset along one mask axis."""
+        n_pixels = self._mask.shape[axis]
+        width = self._widths[axis]
+        pixel = np.clip(
+            (coordinate + width / 2.0) / (width / n_pixels) - 0.5, 0.0, float(n_pixels - 1)
+        )
+        low = np.minimum(pixel.astype(np.int64), max(n_pixels - 2, 0))
+        return low, pixel - low
+
+    def factors(self, energies: _F64, origins: _F64, directions: _F64) -> _F64:
+        """Per-ray mask values in [0, 1]; ``energies`` is unused (fluence-only)."""
+        del energies
+        p = np.asarray(origins, dtype=np.float64)
+        d = np.asarray(directions, dtype=np.float64)
+        denominator = d @ self._normal
+        safe = np.where(denominator == 0.0, 1.0, denominator)
+        t = ((self._center - p) @ self._normal) / safe
+        offset = p + t[:, None] * d - self._center
+        u = offset @ self._u_axis
+        v = offset @ self._v_axis
+        inside = (
+            (denominator != 0.0)
+            & (np.abs(u) <= self._widths[0] / 2.0)
+            & (np.abs(v) <= self._widths[1] / 2.0)
+        )
+        i0, fu = self._interpolate(u, 0)
+        j0, fv = self._interpolate(v, 1)
+        i1 = np.minimum(i0 + 1, self._mask.shape[0] - 1)
+        j1 = np.minimum(j0 + 1, self._mask.shape[1] - 1)
+        v00 = self._mask[i0, j0]
+        v10 = self._mask[i1, j0]
+        v01 = self._mask[i0, j1]
+        v11 = self._mask[i1, j1]
+        # Incremental bilinear form: equal neighbours make every difference term
+        # exactly zero, so plateaus (and the all-ones mask) are bit-inert.
+        value = v00 + fu * (v10 - v00) + fv * (v01 - v00) + fu * fv * (v11 - v10 - v01 + v00)
+        return np.asarray(np.where(inside, value, 0.0), dtype=np.float64)
+
+
+def _attenuated_batch(
+    columns: dict[str, NDArray[np.generic]], model: _RayWeightModel
+) -> dict[str, NDArray[np.generic]]:
+    """Multiply a pre-sampling batch's weight column by the model's ray factors."""
+    origins = np.stack([columns["x"], columns["y"], columns["z"]], axis=1).astype(np.float64)
+    directions = np.stack([columns["ux"], columns["uy"], columns["uz"]], axis=1).astype(np.float64)
+    factors = model.factors(columns["energy"].astype(np.float64), origins, directions)
+    out = dict(columns)
+    out["weight"] = (columns["weight"].astype(np.float64) * factors).astype(np.float32)
+    return out
+
+
+class _FactorWrappedSource(Source):
+    """Shared delegation for open-field wrappers: inner source, per-ray factor.
+
+    The wrapper consumes **zero extra uniforms**, so the inner source's RNG
+    contract (draw count, correlated replay, chunk-invariant vectorized batches)
+    survives wrapping unchanged. A factor of zero leaves the history in flight at
+    weight zero — cheap, and it keeps the draw count fixed.
+    """
+
+    def __init__(self, inner: Source, model: _RayWeightModel) -> None:
+        self._inner = inner
+        self._model = model
+
+    @property
+    def max_energy(self) -> float:
+        """The inner source's maximum energy (a weight factor never raises it)."""
+        return self._inner.max_energy
+
+    def emit(self, rng_state: RNGState) -> Primary:
+        """Emit the inner primary with its weight rescaled; no draws consumed here."""
+        primary = self._inner.emit(rng_state)
+        return primary._replace(weight=primary.weight * self._model.factor_for(primary))
+
+    def sample_batch(self, seed: int, history_offset: int, n: int) -> dict[str, np.ndarray]:
+        """Return the inner batch with the weight column rescaled (vectorized)."""
+        return _attenuated_batch(self._inner.sample_batch(seed, history_offset, n), self._model)
+
+
+class _FactorWrappedBeamletSource(BeamletSource):
+    """Shared delegation for beamlet wrappers: inner source, per-ray factor.
+
+    The factor is deterministic in ``(energy, ray)``, so under correlated
+    sampling every beamlet still replays the same energy and aperture offset —
+    only the beamlet's ray, and hence its factor, differs. Per-column sigmas
+    stay valid; the Phase 4 rule (never combine column sigmas in quadrature) is
+    untouched.
+    """
+
+    def __init__(self, inner: BeamletSource, model: _RayWeightModel) -> None:
+        self._inner = inner
+        self._model = model
+
+    @property
+    def max_energy(self) -> float:
+        """The inner source's maximum energy (a weight factor never raises it)."""
+        return self._inner.max_energy
+
+    @property
+    def n_beamlets(self) -> int:
+        """The inner source's beamlet count."""
+        return self._inner.n_beamlets
+
+    def emit(self, beamlet: int, rng_state: RNGState) -> Primary:
+        """Emit the inner beamlet primary with its weight rescaled."""
+        primary = self._inner.emit(beamlet, rng_state)
+        return primary._replace(weight=primary.weight * self._model.factor_for(primary))
+
+    def sample_beamlet_batch(
+        self, seed: int, history_offset: int, n: int, beamlet: int
+    ) -> dict[str, np.ndarray]:
+        """Return the inner beamlet batch with the weight column rescaled (vectorized)."""
+        return _attenuated_batch(
+            self._inner.sample_beamlet_batch(seed, history_offset, n, beamlet), self._model
+        )
+
+
+class CollimatedSource(_FactorWrappedSource):
+    """A source seen through a beam-limiting stack: deterministic weight attenuation.
+
+    Delegates emission to ``inner`` and multiplies each primary's statistical
+    weight by the stack transmission along its ray. Physics and approximations:
+    :class:`_StackTransmission`. This is the Dij-compatible baseline configuration
+    ("attenuation"); the head pre-solve (``geometry/head.py``) is the
+    higher-fidelity forward path.
+
+    The full-line stack convention means the inner source may emit upstream of the
+    devices (a focal-spot fan) or downstream of them (the planar exit source) —
+    either way the emitted ray's line crosses the stack and is attenuated once.
+    """
+
+    def __init__(
+        self,
+        inner: Source,
+        stack: BeamLimitingStack,
+        cross_sections: CrossSectionSource,
+        *,
+        e_min: float = 0.010,
+        n_table: int = 512,
+    ) -> None:
+        """Build the shared transmission table up to the inner source's max energy."""
+        super().__init__(
+            inner, _StackTransmission(stack, cross_sections, inner.max_energy, e_min, n_table)
+        )
+
+
+class CollimatedBeamletSource(_FactorWrappedBeamletSource):
+    """A beamlet source seen through a beam-limiting stack (Dij configuration).
+
+    See :class:`CollimatedSource`; the beamlet-dependent transmission along each
+    bixel's rays is precisely the collimation signal in the Dij columns.
+    """
+
+    def __init__(
+        self,
+        inner: BeamletSource,
+        stack: BeamLimitingStack,
+        cross_sections: CrossSectionSource,
+        *,
+        e_min: float = 0.010,
+        n_table: int = 512,
+    ) -> None:
+        """Build the shared transmission table up to the inner source's max energy."""
+        super().__init__(
+            inner, _StackTransmission(stack, cross_sections, inner.max_energy, e_min, n_table)
+        )
+
+
+class TransmissionMaskSource(_FactorWrappedSource):
+    """A source shaped by a user 0..1 transmission mask on a plane rectangle.
+
+    Configuration 2 of the BLD workstream: forward fields and sequenced shapes
+    for aperture optimization, applied as a deterministic per-ray weight with no
+    cross-sections involved. Mask conventions, bilinear lookup, and the
+    outside-rectangle/parallel-ray zero: :class:`_MaskTransmission`.
+    """
+
+    def __init__(
+        self,
+        inner: Source,
+        *,
+        mask: NDArray[np.float64],
+        plane_center: tuple[float, float, float],
+        width_u: float,
+        width_v: float,
+        u_axis: tuple[float, float, float] = (1.0, 0.0, 0.0),
+        v_axis: tuple[float, float, float] = (0.0, 1.0, 0.0),
+    ) -> None:
+        """Wrap ``inner`` with a mask plane given in the engine frame (cm)."""
+        super().__init__(
+            inner, _MaskTransmission(mask, plane_center, width_u, width_v, u_axis, v_axis)
+        )
+
+
+class TransmissionMaskBeamletSource(_FactorWrappedBeamletSource):
+    """A beamlet source shaped by a user 0..1 transmission mask (Dij configuration).
+
+    See :class:`TransmissionMaskSource`.
+    """
+
+    def __init__(
+        self,
+        inner: BeamletSource,
+        *,
+        mask: NDArray[np.float64],
+        plane_center: tuple[float, float, float],
+        width_u: float,
+        width_v: float,
+        u_axis: tuple[float, float, float] = (1.0, 0.0, 0.0),
+        v_axis: tuple[float, float, float] = (0.0, 1.0, 0.0),
+    ) -> None:
+        """Wrap ``inner`` with a mask plane given in the engine frame (cm)."""
+        super().__init__(
+            inner, _MaskTransmission(mask, plane_center, width_u, width_v, u_axis, v_axis)
+        )

@@ -19,6 +19,11 @@ from pyRadMC.rng.host import HostRNG
 from tests.conftest import SEED
 from tests.phsp_fixtures import Rec, write_phsp
 
+# These tests deliberately oversample tiny synthetic phase spaces; the finite-
+# reuse latent-variance caveat is expected and acknowledged (pinned explicitly
+# in the tripwire tests).
+pytestmark = pytest.mark.filterwarnings("ignore:.*latent variance:UserWarning")
+
 
 def _rng_state(seed: int = SEED, history: int = 0):
     return HostRNG().init_state(seed, history)
@@ -138,3 +143,19 @@ class TestSampleBatch:
         b = src.sample_batch(SEED, 0, 300)
         assert 9.0 not in set(np.round(b["energy"]))
         assert set(np.unique(b["particle_type"])) == {1}
+
+
+class TestLatentVarianceTripwire:
+    """The file-backed source carries the same finite-reuse caveat as the in-memory one."""
+
+    def test_oversampling_the_file_warns_once(self, tmp_path: Path) -> None:
+        recs = [Rec(1, 2.0, 1.0, 1.0, 0.0), Rec(1, 4.0, 2.0, 2.0, 0.0)]
+        src = PhaseSpaceSource(write_phsp(tmp_path / "s", recs))
+        with pytest.warns(UserWarning, match="latent variance"):
+            src.sample_batch(SEED, 0, 3)
+        # Once per source: later chunks stay silent.
+        import warnings as warnings_module
+
+        with warnings_module.catch_warnings():
+            warnings_module.simplefilter("error")
+            src.sample_batch(SEED, 3, 4)
