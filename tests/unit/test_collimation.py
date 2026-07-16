@@ -28,6 +28,8 @@ from pyRadMC.geometry.collimation import (
     BeamFrame,
     BeamLimitingStack,
     JawPair,
+    jaw_path_length,
+    mlc_path_length,
     project_between_planes,
 )
 
@@ -158,6 +160,66 @@ class TestJawPair:
             self.jaws(edge_pos=6.0).path_lengths(origins, directions),
             np.array([expected]),
         )
+
+    def test_focused_defaults_off(self) -> None:
+        """The default jaw is straight; ``focused`` is an opt-in geometry choice."""
+        assert self.jaws().focused is False
+
+    def test_focused_focal_ray_through_the_block_sees_full_thickness(self) -> None:
+        """A focal-point ray landing inside the block sees the full slant thickness.
+
+        A focused edge is a plane through the focal spot, so every focal ray is
+        either wholly inside the block or wholly in the opening: the straight-edge
+        partial-transmission band collapses. Here the ray lands at u = 2.1 on the
+        mid-plane (just inside edge_pos = 2); the focused block gives the full
+        (z_bottom - z_top) / cos(theta) chord, the straight block strictly less.
+        """
+        z_mid = (40.0 + 47.0) / 2.0
+        origins, directions = _rays(((0.0, 0.0, 0.0), (2.1, 0.0, z_mid)))
+        full_slant = 7.0 / directions[0, 2]
+        focused = self.jaws(focused=True).path_lengths(origins, directions)
+        np.testing.assert_allclose(focused, [full_slant])
+        straight = self.jaws().path_lengths(origins, directions)
+        assert straight[0] < full_slant - 1.0e-6  # the straight partial band
+
+    def test_focused_focal_ray_in_the_opening_sees_nothing(self) -> None:
+        """A focal ray landing in the opening (u = 1.9 < edge_pos at mid-plane) misses."""
+        z_mid = (40.0 + 47.0) / 2.0
+        origins, directions = _rays(((0.0, 0.0, 0.0), (1.9, 0.0, z_mid)))
+        np.testing.assert_array_equal(
+            self.jaws(focused=True).path_lengths(origins, directions), [0.0]
+        )
+
+    def test_focused_focal_ray_into_the_negative_block(self) -> None:
+        """The -axis focused block is symmetric: a focal ray past edge_neg is full."""
+        z_mid = (40.0 + 47.0) / 2.0
+        origins, directions = _rays(((0.0, 0.0, 0.0), (-2.1, 0.0, z_mid)))
+        full_slant = 7.0 / directions[0, 2]
+        np.testing.assert_allclose(
+            self.jaws(focused=True).path_lengths(origins, directions), [full_slant]
+        )
+
+    def test_focused_off_focal_ray_cuts_the_exact_wedge_chord(self) -> None:
+        """A non-focal (axial) ray cuts an exact partial chord through the wedge.
+
+        A vertical ray at u = edge_pos = 2 meets the focused +block boundary
+        ``z_mid * u = edge_pos * w`` at w = z_mid, so the block spans [z_top, z_mid]
+        — a 3.5 cm chord — where the straight block would give the full 7 cm.
+        """
+        z_mid = (40.0 + 47.0) / 2.0
+        origins, directions = _rays(((2.0, 0.0, 0.0), (0.0, 0.0, 1.0)))
+        np.testing.assert_allclose(
+            self.jaws(focused=True).path_lengths(origins, directions), [z_mid - 40.0]
+        )
+        np.testing.assert_allclose(self.jaws().path_lengths(origins, directions), [7.0])
+
+    def test_focused_matches_straight_deep_in_the_block(self) -> None:
+        """Far from the edge the focused wedge is indistinguishable from a straight block."""
+        origins, directions = _rays(((10.0, 0.0, 0.0), (0.0, 0.0, 1.0)))
+        focused = self.jaws(focused=True).path_lengths(origins, directions)
+        straight = self.jaws().path_lengths(origins, directions)
+        np.testing.assert_allclose(focused, straight)
+        np.testing.assert_allclose(focused, [7.0])
 
     def test_ray_parallel_to_the_slab(self) -> None:
         """d_w = 0: empty outside the slab; infinite within a block (transmission 0)."""
@@ -418,3 +480,152 @@ class TestBeamLimitingStack:
     def test_empty_stack_raises(self) -> None:
         with pytest.raises(ValueError, match="device"):
             BeamLimitingStack(frame=BeamFrame(origin=(0.0, 0.0, 0.0)), devices=())
+
+
+class TestScalarGeometryTwins:
+    """The scalar path-length functions are the single-ray kernel source.
+
+    They are the ``@wp.func``-compilable twins the device pre-solve kernel calls;
+    :meth:`JawPair.path_lengths` / :meth:`MLC.path_lengths` remain the vectorized
+    host production path. This suite pins the twin to the vectorized answer on many
+    random *local-frame* rays (host float64, exact) so the two definitions cannot
+    drift; the cross-target float32 check lives in the Warp contract test.
+    """
+
+    @staticmethod
+    def _match(scalar: list[float], vector: np.ndarray) -> None:
+        s = np.asarray(scalar, dtype=np.float64)
+        v = np.asarray(vector, dtype=np.float64)
+        inf = np.isinf(v)
+        np.testing.assert_array_equal(np.isinf(s), inf, err_msg="infinite chords disagree")
+        np.testing.assert_allclose(s[~inf], v[~inf], rtol=1e-9, atol=1e-9)
+
+    @staticmethod
+    def _random_rays(n: int, seed: int) -> tuple[np.ndarray, np.ndarray]:
+        rng = np.random.default_rng(seed)
+        origins = rng.uniform([-8.0, -8.0, 0.0], [8.0, 8.0, 60.0], size=(n, 3))
+        directions = rng.normal(size=(n, 3))
+        directions /= np.linalg.norm(directions, axis=1, keepdims=True)
+        return origins, directions
+
+    @pytest.mark.parametrize("focused", [False, True])
+    @pytest.mark.parametrize("axis", ["u", "v"])
+    @pytest.mark.parametrize("from_origin", [0, 1])
+    def test_jaw_twin_matches_vectorized(self, focused: bool, axis: str, from_origin: int) -> None:
+        jaw = JawPair(
+            axis=axis,
+            z_top=40.0,
+            z_bottom=47.0,
+            edge_neg=-2.0,
+            edge_pos=2.0,
+            material=TUNGSTEN,
+            density=18.0,
+            focused=focused,
+        )
+        origins, directions = self._random_rays(4000, seed=11)
+        vector = jaw.path_lengths(origins, directions, from_origin=bool(from_origin))
+        q = 0 if axis == "u" else 1
+        scalar = [
+            jaw_path_length(
+                float(origins[k, q]),
+                float(directions[k, q]),
+                float(origins[k, 2]),
+                float(directions[k, 2]),
+                40.0,
+                47.0,
+                -2.0,
+                2.0,
+                int(focused),
+                from_origin,
+            )
+            for k in range(origins.shape[0])
+        ]
+        self._match(scalar, vector)
+
+    def test_jaw_twin_handles_infinite_chords(self) -> None:
+        """A ray trapped parallel to the slab inside a block has infinite chord."""
+        # (u, v, w) = (3, 0, 43) along +v: inside the +u block, parallel to the slab.
+        assert math.isinf(jaw_path_length(3.0, 0.0, 43.0, 0.0, 40.0, 47.0, -2.0, 2.0, 0, 0))
+        # Open field at u = 0, same direction: never in a block.
+        assert jaw_path_length(0.0, 0.0, 43.0, 0.0, 40.0, 47.0, -2.0, 2.0, 0, 0) == 0.0
+
+    @pytest.mark.parametrize("from_origin", [0, 1])
+    def test_mlc_twin_matches_vectorized(self, from_origin: int) -> None:
+        mlc = MLC(
+            z_top=48.0,
+            z_bottom=52.0,
+            leaf_edges_v=(-3.0, -1.0, 1.0, 3.0),
+            tips_neg=(-1.0, 0.5, -1.0),
+            tips_pos=(1.0, 0.5, 1.0),
+            tip_radius=10.0,
+            material=TUNGSTEN,
+            density=18.0,
+        )
+        origins, directions = self._random_rays(4000, seed=22)
+        vector = mlc.path_lengths(origins, directions, from_origin=bool(from_origin))
+        edges = np.asarray(mlc.leaf_edges_v, dtype=np.float64)
+        tips_neg = np.asarray(mlc.tips_neg, dtype=np.float64)
+        tips_pos = np.asarray(mlc.tips_pos, dtype=np.float64)
+        scalar = [
+            mlc_path_length(
+                float(origins[k, 0]),
+                float(origins[k, 1]),
+                float(origins[k, 2]),
+                float(directions[k, 0]),
+                float(directions[k, 1]),
+                float(directions[k, 2]),
+                48.0,
+                52.0,
+                10.0,
+                mlc.n_pairs,
+                0,
+                0,
+                edges,
+                tips_neg,
+                tips_pos,
+                from_origin,
+            )
+            for k in range(origins.shape[0])
+        ]
+        self._match(scalar, vector)
+
+    def test_mlc_twin_respects_array_offsets(self) -> None:
+        """Two MLCs flattened into shared arrays are addressed by their offsets."""
+        mlc = MLC(
+            z_top=48.0,
+            z_bottom=52.0,
+            leaf_edges_v=(-3.0, -1.0, 1.0, 3.0),
+            tips_neg=(-1.0, -1.0, -1.0),
+            tips_pos=(1.0, 1.0, 1.0),
+            tip_radius=10.0,
+            material=TUNGSTEN,
+            density=18.0,
+        )
+        # Prepend two padding leaves; address the real MLC via nonzero offsets.
+        edges = np.concatenate([[99.0, 99.0], np.asarray(mlc.leaf_edges_v)])
+        tips_neg = np.concatenate([[99.0], np.asarray(mlc.tips_neg)])
+        tips_pos = np.concatenate([[99.0], np.asarray(mlc.tips_pos)])
+        origins, directions = self._random_rays(1500, seed=33)
+        vector = mlc.path_lengths(origins, directions)
+        scalar = [
+            mlc_path_length(
+                float(origins[k, 0]),
+                float(origins[k, 1]),
+                float(origins[k, 2]),
+                float(directions[k, 0]),
+                float(directions[k, 1]),
+                float(directions[k, 2]),
+                48.0,
+                52.0,
+                10.0,
+                mlc.n_pairs,
+                2,
+                1,
+                edges,
+                tips_neg,
+                tips_pos,
+                0,
+            )
+            for k in range(origins.shape[0])
+        ]
+        self._match(scalar, vector)

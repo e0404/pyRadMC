@@ -55,6 +55,11 @@ __all__ = ["WarpEngine"]
 
 _E_MAX_MARGIN = 1.0 + 1.0e-6  # table upper edge strictly above the primary energy
 
+# Salt so the device pre-solve buffer's record-sampling stream is independent of the
+# transport stream, which is seeded from the bare (seed, history) — a within-device
+# concern only; cross-target agreement is statistical (AGENTS.md 2.3).
+_PRESOLVE_SAMPLING_SALT = 0x50524553
+
 # IAEA particle code (from a source's sample_batch columns) -> transport constant,
 # as a lookup indexed by the code (1/2/3); slot 0 is unused.
 _IAEA_TO_TRANSPORT = np.array([-1, PHOTON, ELECTRON, POSITRON], dtype=np.int32)
@@ -173,7 +178,15 @@ class WarpEngine:
                 f"n_histories={n_histories} not divisible by n_batches={n_batches}; "
                 "unequal batches would weight batch means inconsistently"
             )
+        from pyRadMC.backends.warp.presolve import DevicePhaseSpace
+
         in_kernel = isinstance(source, PencilBeamSource | ParallelBeamSource)
+        is_device_ps = isinstance(source, DevicePhaseSpace)
+        if is_device_ps and source.device != self.device:
+            raise ValueError(
+                f"the device pre-solve buffer is on {source.device!r} but this engine "
+                f"runs on {self.device!r}; pre-solve on the engine's device"
+            )
         if in_kernel:
             if primary_kind not in ("photon", "electron"):
                 raise ValueError(f"unknown primary_kind {primary_kind!r}")
@@ -204,8 +217,12 @@ class WarpEngine:
         # source books per chunk).
         generator = None
         emitted = None
-        if not in_kernel and source.warp_sampler is not None:
+        if not in_kernel and not is_device_ps and source.warp_sampler is not None:
             generator = kernels.make_generator_kernel(source.warp_sampler)
+            emitted = wp.zeros(1, dtype=wp.int64, device=device)
+        if is_device_ps:
+            # The seeding kernel books emitted weight-energy into this counter,
+            # like the wrapped-generator route, read once after the batches.
             emitted = wp.zeros(1, dtype=wp.int64, device=device)
 
         n_voxels = scoring.n_voxels
@@ -255,6 +272,31 @@ class WarpEngine:
                         ecut,
                         transport_electrons,
                         dose_to_water,
+                        device,
+                    )
+                elif is_device_ps:
+                    self._transport_chunk_device_buffer(
+                        source,
+                        seed,
+                        history,
+                        n_chunk,
+                        gi,
+                        si,
+                        density,
+                        material,
+                        tab,
+                        queues,
+                        slots,
+                        edep,
+                        escaped,
+                        unscored,
+                        deposited,
+                        violations,
+                        pcut,
+                        ecut,
+                        transport_electrons,
+                        dose_to_water,
+                        emitted,
                         device,
                     )
                 elif generator is not None:
@@ -889,6 +931,90 @@ class WarpEngine:
             np.sum(
                 batch["weight"].astype(np.float64) * (batch["energy"].astype(np.float64) + latent)
             )
+        )
+
+    def _transport_chunk_device_buffer(
+        self,
+        source,
+        seed,
+        history_offset,
+        n_chunk,
+        gi,
+        si,
+        density,
+        material,
+        tab,
+        queues,
+        slots,
+        edep,
+        escaped,
+        unscored,
+        deposited,
+        violations,
+        pcut,
+        ecut,
+        transport_electrons,
+        dose_to_water,
+        emitted,
+        device,
+    ) -> None:
+        """Seed the transport queues straight from a device pre-solve buffer, then drain.
+
+        The no-copy path (``DevicePhaseSpace``): no host ``sample_batch`` and no
+        re-upload — one kernel samples a record per history from the on-device
+        population and atomic-appends it to the photon or electron queue as a source
+        primary, booking the emitted weight-energy into ``emitted``. Transport is
+        then identical to every other route.
+        """
+        q_photon, q_photon_alt, q_electron, q_electron_alt = queues
+        for q in queues:
+            _reset_count(q, device)
+        buf = source.buffer
+        wp.launch(
+            kernels.generate_from_exit_buffer,
+            dim=n_chunk,
+            inputs=[
+                seed,
+                seed ^ _PRESOLVE_SAMPLING_SALT,
+                history_offset,
+                source.count,
+                buf.particle_type,
+                buf.energy,
+                buf.x,
+                buf.y,
+                buf.z,
+                buf.ux,
+                buf.uy,
+                buf.uz,
+                buf.weight,
+                q_photon,
+                q_electron,
+                slots,
+                emitted,
+            ],
+            device=device,
+        )
+        self._drain_queues(
+            q_photon,
+            q_photon_alt,
+            q_electron,
+            q_electron_alt,
+            gi,
+            si,
+            density,
+            material,
+            tab,
+            slots,
+            edep,
+            escaped,
+            unscored,
+            deposited,
+            violations,
+            pcut,
+            ecut,
+            transport_electrons,
+            dose_to_water,
+            device,
         )
 
     def _seed_queue(self, queue, seed, hist_g, beamlet_g, kind_g, batch, mask, device) -> None:

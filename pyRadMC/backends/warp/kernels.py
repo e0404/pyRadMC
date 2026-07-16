@@ -69,6 +69,7 @@ __all__ = [
     "electron_kernel",
     "finalize_run",
     "generate_beamlet_lattice",
+    "generate_from_exit_buffer",
     "generate_from_upload",
     "generate_parallel_beam",
     "generate_pencil_beam",
@@ -1502,6 +1503,78 @@ def generate_from_upload(
     q.uy[tid] = dy[tid]
     q.uz[tid] = dz[tid]
     q.rng[tid] = init_slot(seed, hist[tid])
+
+
+@wp.kernel
+def generate_from_exit_buffer(
+    seed: int,
+    sampling_seed: int,
+    history_offset: int,
+    count: int,
+    particle_type: wp.array(dtype=wp.int32),
+    b_energy: wp.array(dtype=float),
+    b_x: wp.array(dtype=float),
+    b_y: wp.array(dtype=float),
+    b_z: wp.array(dtype=float),
+    b_ux: wp.array(dtype=float),
+    b_uy: wp.array(dtype=float),
+    b_uz: wp.array(dtype=float),
+    b_weight: wp.array(dtype=float),
+    q_photon: Queue,
+    q_electron: Queue,
+    slots: wp.array(dtype=wp.uint32),
+    emitted: wp.array(dtype=wp.int64),
+):
+    """Sample one exit-plane record per history from a device pre-solve buffer.
+
+    The device-resident twin of the phase-space path: instead of a host
+    ``sample_batch`` + :func:`generate_from_upload`, each history draws a record
+    index into the on-device population from a stream keyed on ``sampling_seed``
+    (distinct from the transport stream ``init_slot(seed, h)``), books the emitted
+    weight-energy, and atomic-appends the record into the photon or electron queue
+    as a source primary. Sampling is with replacement over the ``count`` records,
+    the same contract as :class:`~pyRadMC.geometry.phasespace.InMemoryPhaseSpaceSource`,
+    so the no-copy path and the host-handoff path estimate one dose. The pre-solve
+    emits only IAEA photons (1) and electrons (2); there is no positron latent term.
+    """
+    tid = wp.tid()
+    h = history_offset + tid
+    slots[tid] = init_slot(seed, h)
+    sampler = wp.rand_init(sampling_seed, h)
+    k = int(wp.randf(sampler) * float(count))
+    if k >= count:
+        k = count - 1
+    energy = b_energy[k]
+    weight = b_weight[k]
+    _escape(emitted, weight * energy)
+    if particle_type[k] == 1:
+        _push_source(
+            q_photon,
+            PHOTON,
+            energy,
+            weight,
+            b_x[k],
+            b_y[k],
+            b_z[k],
+            b_ux[k],
+            b_uy[k],
+            b_uz[k],
+            slots[tid],
+        )
+    else:
+        _push_source(
+            q_electron,
+            ELECTRON,
+            energy,
+            weight,
+            b_x[k],
+            b_y[k],
+            b_z[k],
+            b_ux[k],
+            b_uy[k],
+            b_uz[k],
+            slots[tid],
+        )
 
 
 @wp.kernel

@@ -61,6 +61,13 @@ _KERNEL_MODULES: dict[str, tuple[str, ...] | None] = {
         "slab_entry_distance",
         "distance_to_voxel_boundary",
     ),
+    "pyRadMC.geometry.collimation": (
+        "_clip_len",
+        "_affine_interval_length",
+        "_mlc_tip_length",
+        "jaw_path_length",
+        "mlc_path_length",
+    ),
 }
 
 _MISSING = object()

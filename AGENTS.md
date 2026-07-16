@@ -473,17 +473,54 @@ on both backends where transport is involved:
   ``examples/collimation_demo.py`` is the runnable demonstration (BEV
   transmission map, wrapper-vs-pre-solve profiles, depth dose).
 
-Carried items from this workstream: **focused jaw edges** (the v1 straight edge
-throws a geometric partial-transmission band — the nightly penumbra gate is
-derived from that model, measured 15.8 mm vs the 8.9 mm band at 10 cm depth;
-a focused option should reach clinical 4-8 mm); **tongue-and-groove/interleaf
-leakage**; **W-alloy registry entries** (pure W at alloy density ships, binders'
-atomic weights already present); **a Warp port of the pre-solve** (measured
-host throughput ~5e5 rays/s jaws-only, ~1e5 rays/s with a 10-pair MLC — take
-only if a use case needs more); and the **roulette-cap/attenuated-weight
-graininess** in deep-leakage regions (absolute cap 4.0 vs ~1e-4 primary
+Carried items from this workstream: **focused jaw edges — the geometry SHIPPED
+2026-07-16** (``JawPair(focused=True)``: the edge face pivots through the focal
+spot, ``z_mid * q >= edge * w``, so a focal-spot ray sees full-thickness-or-
+nothing and the geometric partial-transmission band collapses — verified pure-
+geometry, 5.3 mm straight band → 0 mm focused at the validation jaw setting;
+default stays straight, so nothing else changed). **Remaining, EPICS-gated:** the
+nightly penumbra gate still tests the straight default (measured 15.8 mm vs the
+8.9 mm band at 10 cm depth), so re-deriving a focused-edge gate window and
+switching the tungsten demo figure to focused both need the EPICS tungsten data +
+a warp run and are deferred until that data is on hand (regenerating the demo with
+the water fallback would degrade the committed tungsten figure). **Tongue-and-
+groove/interleaf leakage**; **W-alloy registry entries** (pure W at alloy density
+ships, binders' atomic weights already present); and the **roulette-cap/attenuated-
+weight graininess** in deep-leakage regions (absolute cap 4.0 vs ~1e-4 primary
 weights; evidence in ``tests/dij/test_weighted_beamlet_ledger.py`` — revisit
 only with a measured dosimetric case, per 2.10 as a default replacement).
+
+**Warp port of the pre-solve — DONE 2026-07-16** (maintainer-requested; the carried
+item above is retired). ``pyRadMC/backends/warp/presolve.py`` ``presolve_head_device``
+runs the head MC as one kernel launch, one thread per primary, on cpu and cuda. The
+host ``presolve_head`` stays the ``ref`` oracle (2.2). Structure: the collimation
+geometry gained pure scalar ``@wp.func``-compilable twins — ``jaw_path_length`` /
+``mlc_path_length`` in ``geometry/collimation.py`` (registered in the Warp physics
+loader, pinned equal to the vectorized ``path_lengths`` on the host and float32-checked
+on device), so host and device share one geometry definition; the *port deleted no
+physics duplication yet but reuses* the existing scalar Compton/direction ``@wp.func``s
+directly. A ``BeamLimitingStack.flatten()`` → ``CompiledStack`` → ``StackArrays``
+uploads the heterogeneous stack (jaws + MLC, frame, shared leaf arrays) column-parallel;
+mu is a device twin of ``_MuTables``. Primaries are still host-sampled
+(``source.sample_batch``, cheap) and uploaded; the kernel does the stack + air forced
+first Compton and atomic-appends exit particles into an ``ExitBuffer``, normalized per
+primary on-device. **Validation (analytic water, EPDL-free, cpu+cuda):** attenuation
+mode reproduces the host to float32 exactly (deterministic geometry/mu path — the strong
+check); first-Compton totals/counts agree statistically (~0.06 % at 1.2e5 histories,
+different RNG stream per 2.3). **The no-copy transport path is wired end to end:** ``return_device_source=True``
+returns a ``DevicePhaseSpace`` (population left on the device, only the ``count`` scalar
+read back), and ``WarpEngine.run`` transports it directly — a new
+``kernels.generate_from_exit_buffer`` samples one record per history from the device
+buffer (with replacement, distinct stream from transport), atomic-appends it to the
+photon/electron queue as a source primary via the existing ``_push_source``, and books
+emitted weight-energy through ``_escape``; ``_transport_chunk_device_buffer`` then drains
+like every other route. Validated on cpu+cuda: device-resident vs host-handoff transport
+are chi-squared-consistent on a water phantom (independent seeds, same population) and the
+no-copy run's energy ledger closes (``tests/integration/test_device_presolve_transport.py``).
+The host-handoff ``InMemoryPhaseSpaceSource`` remains the default and carries the same
+population (``DevicePhaseSpace.to_phase_space`` materializes it). Ruff: the Warp
+loop-variable ``float()``/``int()`` casts need inline ``# noqa: UP018``/``RUF046`` (the
+convention already in ``kernels.py``; no per-file blanket ignore).
 
 **Dij consumer hooks — DONE 2026-07-15.** The last pyRadMC-side pieces the
 pyRadPlan adapter needs; with these, **pyRadMC's side of the adapter workstream

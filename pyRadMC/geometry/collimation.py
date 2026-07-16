@@ -23,7 +23,10 @@ source emits *downstream of* them. (:meth:`BeamLimitingStack.path_lengths` offer
 
 Stated v1 approximations (each also noted where it bites):
 
-- Jaw edges are straight (unfocused); a focused-edge option is deferred.
+- Jaw edges are straight (unfocused) **by default**; :class:`JawPair` also offers
+  ``focused=True``, whose edge face pivots through the focal spot so a focal-spot
+  ray sees full-thickness-or-nothing (the geometric partial-transmission band
+  collapses). MLC leaf ends are already focused via their rounded tips.
 - MLC leaves have rounded tips (exact circular chords) but **no tongue-and-groove
   step and no interleaf gap**: adjacent leaves tile the ``v`` axis exactly, so
   interleaf leakage is absent by construction. Divergent (focused) leaf *sides*
@@ -38,12 +41,14 @@ Stated v1 approximations (each also noted where it bites):
 
 from __future__ import annotations
 
+import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
 import numpy as np
 from numpy.typing import NDArray
 
+from pyRadMC.data.handles import Table1D
 from pyRadMC.data.interface import CrossSectionSource
 from pyRadMC.geometry.source import BeamletSource, Primary, Source
 from pyRadMC.rng import RNGState
@@ -54,9 +59,12 @@ __all__ = [
     "BeamLimitingStack",
     "CollimatedBeamletSource",
     "CollimatedSource",
+    "CompiledStack",
     "JawPair",
     "TransmissionMaskBeamletSource",
     "TransmissionMaskSource",
+    "jaw_path_length",
+    "mlc_path_length",
     "project_between_planes",
 ]
 
@@ -164,6 +172,27 @@ def _halfspace_interval(p: _F64, d: _F64, edge: float, *, above: bool) -> tuple[
     return t_lo, t_hi
 
 
+def _focused_halfspace_interval(a: _F64, b: _F64, *, above: bool) -> tuple[_F64, _F64]:
+    """Give the t-interval where ``a + t*b >= 0`` (``<=`` for ``above=False``).
+
+    The focused-edge analogue of :func:`_halfspace_interval`: the boundary is a
+    plane through the focal spot (the frame origin), so the half-space condition
+    is still affine in t but with a general slope ``b`` instead of a lone
+    direction cosine. ``a``/``b`` are the constant and t-coefficient of the signed
+    distance to that plane, formed by the caller from the mid-plane edge.
+    """
+    safe = np.where(b == 0.0, 1.0, b)
+    t_root = -a / safe
+    # For b > 0 the ray enters {a + t*b >= 0} at t_root; for b < 0 it leaves there.
+    opens_up = (b > 0.0) == above
+    t_lo = np.where(opens_up, t_root, -np.inf)
+    t_hi = np.where(opens_up, np.inf, t_root)
+    inside = (a >= 0.0) if above else (a <= 0.0)
+    t_lo = np.where(b == 0.0, np.where(inside, -np.inf, np.inf), t_lo)
+    t_hi = np.where(b == 0.0, np.where(inside, np.inf, -np.inf), t_hi)
+    return t_lo, t_hi
+
+
 def _intersect(a: tuple[_F64, _F64], b: tuple[_F64, _F64]) -> tuple[_F64, _F64]:
     return np.maximum(a[0], b[0]), np.minimum(a[1], b[1])
 
@@ -203,21 +232,257 @@ def _length(interval: tuple[_F64, _F64]) -> _F64:
     return np.maximum(0.0, hi - lo)
 
 
+# --- kernel-side scalar twins ------------------------------------------------------
+#
+# The device pre-solve traces one ray per thread, so it cannot use the vectorized
+# primitives above. These pure, scalar, allocation-free functions are the
+# single-ray twins of :meth:`JawPair.path_lengths` / :meth:`MLC.path_lengths`: the
+# Warp physics loader compiles them to ``@wp.func`` (like the ``geometry.grid`` point
+# queries), and they run under NumPy on the host. They take the ray already in the
+# **local beam frame** (the kernel applies :meth:`BeamFrame.to_local` once) and the
+# same mid-plane device parameters the dataclasses hold. Empty t-intervals are
+# encoded ``(+inf, -inf)`` and infinite (parallel-trapped) chords stay ``inf``,
+# exactly as in the vectorized path; ``tests/unit/test_collimation.py`` pins the twin
+# equal to the vectorized answer on random rays, so the two definitions cannot drift.
+# They keep ``math`` (not NumPy) and unrolled control flow so one source compiles for
+# ref, cpu and cuda (AGENTS.md 2.5).
+
+
+def _clip_len(lo: float, hi: float) -> float:
+    """Length of the t-interval ``[lo, hi]``; zero if empty (also for ``inf<=inf``)."""
+    if hi <= lo:
+        return 0.0
+    return hi - lo
+
+
+def _affine_interval_length(s_lo: float, s_hi: float, a: float, b: float, above: bool) -> float:
+    """Length of ``[s_lo, s_hi]`` intersected with the half-space ``a + t*b >= 0``.
+
+    ``above=False`` uses ``a + t*b <= 0``. This is the scalar form of a slab
+    intersected with :func:`_halfspace_interval` (straight edge: ``a = q0 - edge``,
+    ``b = d_q``) or :func:`_focused_halfspace_interval` (focused edge: ``a``/``b``
+    the affine coefficients of the pivoting plane).
+    """
+    if b == 0.0:
+        inside = a >= 0.0 if above else a <= 0.0
+        if not inside:
+            return 0.0
+        return _clip_len(s_lo, s_hi)
+    t_root = -a / b
+    opens_up = b > 0.0 if above else b < 0.0
+    if opens_up:
+        return _clip_len(max(s_lo, t_root), s_hi)
+    return _clip_len(s_lo, min(s_hi, t_root))
+
+
+def jaw_path_length(
+    p_q: float,
+    d_q: float,
+    p_w: float,
+    d_w: float,
+    z_top: float,
+    z_bottom: float,
+    edge_neg: float,
+    edge_pos: float,
+    focused: int,
+    from_origin: int,
+) -> float:
+    """Scalar chord length of one local-frame ray through a jaw pair (cm).
+
+    ``p_q``/``d_q`` are the block-limited coordinate (local ``u`` or ``v``, the
+    caller selects by ``axis``); ``p_w``/``d_w`` the beam-axis coordinate. Twin of
+    :meth:`JawPair.path_lengths`; ``focused`` and ``from_origin`` are 0/1 flags.
+    """
+    if d_w == 0.0:
+        if p_w < z_top or p_w > z_bottom:
+            return 0.0
+        s_lo = -math.inf
+        s_hi = math.inf
+    else:
+        t_a = (z_top - p_w) / d_w
+        t_b = (z_bottom - p_w) / d_w
+        s_lo = min(t_a, t_b)
+        s_hi = max(t_a, t_b)
+    if from_origin != 0:
+        s_lo = max(s_lo, 0.0)
+    if focused != 0:
+        z_mid = 0.5 * (z_top + z_bottom)
+        a_pos = z_mid * p_q - edge_pos * p_w
+        b_pos = z_mid * d_q - edge_pos * d_w
+        a_neg = z_mid * p_q - edge_neg * p_w
+        b_neg = z_mid * d_q - edge_neg * d_w
+    else:
+        a_pos = p_q - edge_pos
+        b_pos = d_q
+        a_neg = p_q - edge_neg
+        b_neg = d_q
+    return _affine_interval_length(s_lo, s_hi, a_pos, b_pos, True) + _affine_interval_length(
+        s_lo, s_hi, a_neg, b_neg, False
+    )
+
+
+def _mlc_tip_length(
+    is_lo: float,
+    is_hi: float,
+    p_u: float,
+    d_u: float,
+    p_w: float,
+    d_w: float,
+    center_u: float,
+    z_mid: float,
+    radius: float,
+    above: bool,
+) -> float:
+    """Inclusion-exclusion chord of one rounded leaf end within a strip interval.
+
+    ``[is_lo, is_hi]`` is the ray's t-interval inside the slab-and-strip. The leaf
+    end is the flat body half-space (``u >= center_u`` for ``above``) unioned with
+    the tip disc of ``radius`` centred at ``(center_u, z_mid)`` in the ``(u, w)``
+    plane, so the chord is ``len(body) + len(disc) - len(body & disc)`` — the scalar
+    form of :meth:`MLC.path_lengths`'s per-tip term.
+    """
+    # Flat body half-space bounds along t.
+    if d_u == 0.0:
+        inside = p_u >= center_u if above else p_u <= center_u
+        if inside:
+            bo_lo = -math.inf
+            bo_hi = math.inf
+        else:
+            bo_lo = math.inf
+            bo_hi = -math.inf
+    else:
+        t_edge = (center_u - p_u) / d_u
+        opens_up = d_u > 0.0 if above else d_u < 0.0
+        if opens_up:
+            bo_lo = t_edge
+            bo_hi = math.inf
+        else:
+            bo_lo = -math.inf
+            bo_hi = t_edge
+    # Tip-disc bounds: |r(t) - c|^2 <= R^2 in the (u, w) plane.
+    off_u = p_u - center_u
+    off_w = p_w - z_mid
+    a_q = d_u * d_u + d_w * d_w
+    b_q = 2.0 * (d_u * off_u + d_w * off_w)
+    c_q = off_u * off_u + off_w * off_w - radius * radius
+    if a_q > 0.0:
+        discriminant = b_q * b_q - 4.0 * a_q * c_q
+        if discriminant > 0.0:
+            half_width = math.sqrt(discriminant)
+            di_lo = (-b_q - half_width) / (2.0 * a_q)
+            di_hi = (-b_q + half_width) / (2.0 * a_q)
+        else:
+            di_lo = math.inf
+            di_hi = -math.inf
+    else:
+        # a_q == 0: the ray runs parallel to the cylinder axis — fully in or out.
+        if c_q <= 0.0:
+            di_lo = -math.inf
+            di_hi = math.inf
+        else:
+            di_lo = math.inf
+            di_hi = -math.inf
+    body_len = _clip_len(max(is_lo, bo_lo), min(is_hi, bo_hi))
+    disc_len = _clip_len(max(is_lo, di_lo), min(is_hi, di_hi))
+    both_len = _clip_len(max(is_lo, max(bo_lo, di_lo)), min(is_hi, min(bo_hi, di_hi)))
+    return body_len + disc_len - both_len
+
+
+def mlc_path_length(
+    p_u: float,
+    p_v: float,
+    p_w: float,
+    d_u: float,
+    d_v: float,
+    d_w: float,
+    z_top: float,
+    z_bottom: float,
+    tip_radius: float,
+    n_pairs: int,
+    edges_off: int,
+    tips_off: int,
+    leaf_edges_v: Table1D,
+    tips_neg: Table1D,
+    tips_pos: Table1D,
+    from_origin: int,
+) -> float:
+    """Scalar chord length of one local-frame ray through both MLC banks (cm).
+
+    Twin of :meth:`MLC.path_lengths`. Leaf data is addressed through flat array
+    handles so several MLCs can share the device buffers: pair ``i`` reads
+    ``leaf_edges_v[edges_off+i : edges_off+i+2]`` and ``tips_{neg,pos}[tips_off+i]``.
+    """
+    if d_w == 0.0:
+        if p_w < z_top or p_w > z_bottom:
+            return 0.0
+        s_lo = -math.inf
+        s_hi = math.inf
+    else:
+        t_a = (z_top - p_w) / d_w
+        t_b = (z_bottom - p_w) / d_w
+        s_lo = min(t_a, t_b)
+        s_hi = max(t_a, t_b)
+    if from_origin != 0:
+        s_lo = max(s_lo, 0.0)
+    z_mid = 0.5 * (z_top + z_bottom)
+    total = float(0.0)  # noqa: UP018 -- Warp needs a float() cast to declare a loop-mutated var
+    for i in range(n_pairs):
+        edge_lo = leaf_edges_v[edges_off + i]
+        edge_hi = leaf_edges_v[edges_off + i + 1]
+        if d_v == 0.0:
+            if p_v < edge_lo or p_v > edge_hi:
+                st_lo = math.inf
+                st_hi = -math.inf
+            else:
+                st_lo = -math.inf
+                st_hi = math.inf
+        else:
+            v_a = (edge_lo - p_v) / d_v
+            v_b = (edge_hi - p_v) / d_v
+            st_lo = min(v_a, v_b)
+            st_hi = max(v_a, v_b)
+        is_lo = max(s_lo, st_lo)
+        is_hi = min(s_hi, st_hi)
+        tip_pos = tips_pos[tips_off + i]
+        tip_neg = tips_neg[tips_off + i]
+        total += _mlc_tip_length(
+            is_lo, is_hi, p_u, d_u, p_w, d_w, tip_pos + tip_radius, z_mid, tip_radius, True
+        )
+        total += _mlc_tip_length(
+            is_lo, is_hi, p_u, d_u, p_w, d_w, tip_neg - tip_radius, z_mid, tip_radius, False
+        )
+    return total
+
+
 @dataclass(frozen=True)
 class JawPair:
-    """One pair of straight-edged jaw blocks limiting one transverse coordinate.
+    """One pair of jaw blocks limiting one transverse coordinate.
 
     The pair is a slab ``z_top <= w <= z_bottom`` (local frame, cm downstream of
     the focal spot) holding two laterally unbounded blocks: the ``-axis`` block
-    occupies ``q <= edge_neg`` and the ``+axis`` block ``q >= edge_pos``, where
-    ``q`` is the local ``u`` or ``v`` coordinate selected by ``axis``. Edges are
-    physical coordinates at the device mid-plane; because the edge faces are
-    parallel to ``w`` (straight, unfocused jaws — the v1 approximation stated in
-    the module docstring), the mid-plane edge is also the edge at every depth.
+    occupies ``q <= edge_neg`` and the ``+axis`` block ``q >= edge_pos`` **at the
+    device mid-plane** ``z_mid``, where ``q`` is the local ``u`` or ``v``
+    coordinate selected by ``axis``. Edges are always physical coordinates at the
+    mid-plane; ``focused`` selects how the edge face runs through the slab:
+
+    - ``focused=False`` (default): straight, unfocused edges — the face is
+      parallel to ``w``, so the mid-plane edge is the edge at every depth. A ray
+      near the edge crosses partial thickness over a wide lateral band (the v1
+      approximation stated in the module docstring).
+    - ``focused=True``: the edge face is the plane containing the focal spot (the
+      frame origin) and the mid-plane edge line, so the ``+axis`` block is
+      ``z_mid * q >= edge_pos * w`` (``<=`` with ``edge_neg`` for ``-axis``). Every
+      ray *from the focal spot* then sees either the full slant thickness or
+      nothing — the geometric partial-transmission band collapses to the focal
+      spot size — while off-focal rays (e.g. from a planar source) still cut the
+      exact chord of the wedge-shaped block. This is the physically faithful
+      geometry of a divergent-machine jaw; the default stays straight so existing
+      configurations are unchanged.
 
     ``edge_neg <= edge_pos`` (the blocks may touch — a closed pair — but never
-    interpenetrate). ``density`` is in g/cm^3 and ``material`` is a registry index
-    (:data:`pyRadMC.data.materials.TUNGSTEN` for a real jaw).
+    interpenetrate; the two focused planes meet only at the focal spot, so the
+    ordering holds at every depth). ``density`` is in g/cm^3 and ``material`` is a
+    registry index (:data:`pyRadMC.data.materials.TUNGSTEN` for a real jaw).
     """
 
     axis: str
@@ -227,6 +492,7 @@ class JawPair:
     edge_pos: float
     material: int
     density: float
+    focused: bool = False
 
     def __post_init__(self) -> None:
         """Validate the axis choice, slab extents, edge ordering, and material data."""
@@ -243,6 +509,28 @@ class JawPair:
         if self.density <= 0.0:
             raise ValueError(f"density must be positive, got {self.density}")
 
+    def _edge_intervals(
+        self, q: _F64, d_q: _F64, w: _F64, d_w: _F64
+    ) -> tuple[tuple[_F64, _F64], tuple[_F64, _F64]]:
+        """Give the (+block, -block) half-space t-intervals for this edge style."""
+        if not self.focused:
+            return (
+                _halfspace_interval(q, d_q, self.edge_pos, above=True),
+                _halfspace_interval(q, d_q, self.edge_neg, above=False),
+            )
+        # Focused edge: the face pivots through the focal spot (frame origin), so
+        # the block half-space z_mid * q >= edge * w is affine in t with the
+        # constant a = z_mid * q0 - edge * w0 and slope b = z_mid * d_q - edge * d_w.
+        z_mid = (self.z_top + self.z_bottom) / 2.0
+        a_pos = z_mid * q - self.edge_pos * w
+        b_pos = z_mid * d_q - self.edge_pos * d_w
+        a_neg = z_mid * q - self.edge_neg * w
+        b_neg = z_mid * d_q - self.edge_neg * d_w
+        return (
+            _focused_halfspace_interval(a_pos, b_pos, above=True),
+            _focused_halfspace_interval(a_neg, b_neg, above=False),
+        )
+
     def path_lengths(self, p_local: _F64, d_local: _F64, *, from_origin: bool = False) -> _F64:
         """Material chord length of each ray through the pair (full line, cm).
 
@@ -257,8 +545,7 @@ class JawPair:
         slab = _slab_interval(p[:, 2], d[:, 2], self.z_top, self.z_bottom)
         if from_origin:
             slab = np.maximum(slab[0], 0.0), slab[1]
-        block_pos = _halfspace_interval(p[:, q_index], d[:, q_index], self.edge_pos, above=True)
-        block_neg = _halfspace_interval(p[:, q_index], d[:, q_index], self.edge_neg, above=False)
+        block_pos, block_neg = self._edge_intervals(p[:, q_index], d[:, q_index], p[:, 2], d[:, 2])
         return _length(_intersect(slab, block_pos)) + _length(_intersect(slab, block_neg))
 
 
@@ -438,6 +725,111 @@ class BeamLimitingStack:
             for device in self.devices
         ]
         return np.column_stack(columns)
+
+    def flatten(self) -> CompiledStack:
+        """Flatten the stack into parallel arrays for the device pre-solve.
+
+        The heterogeneous ``devices`` tuple becomes the column-parallel
+        :class:`CompiledStack`: one row per device (jaws and MLCs share the same
+        rows, each reading only the fields its ``kind`` uses), plus the frame and
+        the concatenated MLC leaf arrays addressed by per-device offsets. This is
+        the host, Warp-free half of putting the geometry on the device — a backend
+        uploads these arrays and the kernel indexes them, exactly as
+        :func:`pyRadMC.data.tables.build_cross_section_tables` does for the
+        cross-sections. The vectorized :meth:`path_lengths` stays the host path.
+        """
+        n = len(self.devices)
+        rot = np.array([self.frame.u_axis, self.frame.v_axis, self.frame.w_axis], dtype=np.float64)
+        kind = np.zeros(n, dtype=np.int32)
+        z_top = np.zeros(n, dtype=np.float64)
+        z_bottom = np.zeros(n, dtype=np.float64)
+        jaw_axis = np.zeros(n, dtype=np.int32)
+        jaw_edge_neg = np.zeros(n, dtype=np.float64)
+        jaw_edge_pos = np.zeros(n, dtype=np.float64)
+        jaw_focused = np.zeros(n, dtype=np.int32)
+        mlc_tip_radius = np.zeros(n, dtype=np.float64)
+        mlc_n_pairs = np.zeros(n, dtype=np.int32)
+        mlc_edges_off = np.zeros(n, dtype=np.int32)
+        mlc_tips_off = np.zeros(n, dtype=np.int32)
+        leaf_edges: list[float] = []
+        tips_neg: list[float] = []
+        tips_pos: list[float] = []
+        for j, device in enumerate(self.devices):
+            z_top[j] = device.z_top
+            z_bottom[j] = device.z_bottom
+            if isinstance(device, JawPair):
+                kind[j] = 0
+                jaw_axis[j] = 0 if device.axis == "u" else 1
+                jaw_edge_neg[j] = device.edge_neg
+                jaw_edge_pos[j] = device.edge_pos
+                jaw_focused[j] = 1 if device.focused else 0
+            else:
+                kind[j] = 1
+                mlc_tip_radius[j] = device.tip_radius
+                mlc_n_pairs[j] = device.n_pairs
+                mlc_edges_off[j] = len(leaf_edges)
+                mlc_tips_off[j] = len(tips_pos)
+                leaf_edges.extend(device.leaf_edges_v)
+                tips_neg.extend(device.tips_neg)
+                tips_pos.extend(device.tips_pos)
+        # Never expose a zero-length leaf array: a backend may reject an empty
+        # device buffer, and the offsets addressing them are unused when no MLC is
+        # present (every ``mlc_n_pairs`` is then zero, so the arrays are not read).
+        return CompiledStack(
+            n_devices=n,
+            origin=np.asarray(self.frame.origin, dtype=np.float64),
+            rotation=rot.reshape(-1),
+            kind=kind,
+            z_top=z_top,
+            z_bottom=z_bottom,
+            material=np.asarray(self.materials, dtype=np.int32),
+            density=np.asarray(self.densities, dtype=np.float64),
+            jaw_axis=jaw_axis,
+            jaw_edge_neg=jaw_edge_neg,
+            jaw_edge_pos=jaw_edge_pos,
+            jaw_focused=jaw_focused,
+            mlc_tip_radius=mlc_tip_radius,
+            mlc_n_pairs=mlc_n_pairs,
+            mlc_edges_off=mlc_edges_off,
+            mlc_tips_off=mlc_tips_off,
+            leaf_edges_v=np.asarray(leaf_edges or [0.0], dtype=np.float64),
+            tips_neg=np.asarray(tips_neg or [0.0], dtype=np.float64),
+            tips_pos=np.asarray(tips_pos or [0.0], dtype=np.float64),
+        )
+
+
+@dataclass(frozen=True)
+class CompiledStack:
+    """A :class:`BeamLimitingStack` flattened into device-uploadable arrays.
+
+    Column-parallel over ``n_devices``: ``kind[j]`` is 0 for a jaw pair (reading
+    ``jaw_*[j]``) and 1 for an MLC (reading ``mlc_*[j]`` and the shared leaf arrays
+    at ``mlc_edges_off[j]`` / ``mlc_tips_off[j]``). ``rotation`` is the row-major
+    ``(u, v, w)`` frame basis; a kernel maps an engine-frame ray to the local frame
+    by ``p_local_i = rotation[i] . (p - origin)``. All arrays are host NumPy; the
+    backend casts on upload (float32 for Warp). Produced by
+    :meth:`BeamLimitingStack.flatten`.
+    """
+
+    n_devices: int
+    origin: _F64
+    rotation: _F64
+    kind: NDArray[np.int32]
+    z_top: _F64
+    z_bottom: _F64
+    material: NDArray[np.int32]
+    density: _F64
+    jaw_axis: NDArray[np.int32]
+    jaw_edge_neg: _F64
+    jaw_edge_pos: _F64
+    jaw_focused: NDArray[np.int32]
+    mlc_tip_radius: _F64
+    mlc_n_pairs: NDArray[np.int32]
+    mlc_edges_off: NDArray[np.int32]
+    mlc_tips_off: NDArray[np.int32]
+    leaf_edges_v: _F64
+    tips_neg: _F64
+    tips_pos: _F64
 
 
 class _RayWeightModel(ABC):

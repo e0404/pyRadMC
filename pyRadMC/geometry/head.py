@@ -55,9 +55,10 @@ grid is silently interaction-free (under-counted, never double-counted).
 
 Measured throughput (2026-07-15, one host core): ~5e5 rays/s through two jaw
 pairs + air, ~1e5 rays/s with a 10-pair rounded-tip MLC added — the MLC's
-per-leaf inclusion-exclusion dominates. A Warp port of the pre-solve is the
-recorded follow-up if a use case needs more; the output already feeds GPU
-transport either way.
+per-leaf inclusion-exclusion dominates. For a many-field or high-statistics
+workload, :func:`pyRadMC.backends.warp.presolve.presolve_head_device` runs this
+same physics as a Warp kernel on cpu or cuda (validated against this host oracle);
+this module stays the reference and the Warp-free host path.
 """
 
 from __future__ import annotations
@@ -336,6 +337,39 @@ def _roulette_below(weight: _F64, floor: float, generator: np.random.Generator) 
     return out
 
 
+def resolve_presolve(
+    stack: BeamLimitingStack | None,
+    frame: BeamFrame | None,
+    air: AirColumn | None,
+    exit_z: float,
+    mode: str,
+) -> tuple[str, BeamFrame]:
+    """Validate the pre-solve geometry and resolve ``mode`` and the beam frame.
+
+    Shared by the host :func:`presolve_head` and the Warp device pre-solve so the
+    two entry points enforce one contract: a valid ``mode``, a frame (the stack's
+    if given), and an ``exit_z`` at or below the stack exit and the air-column end.
+    Returns the resolved mode (``auto`` -> ``first_compton``) and the frame.
+    """
+    if mode not in _MODES:
+        raise ValueError(f"mode must be one of {_MODES}, got {mode!r}")
+    resolved = "first_compton" if mode == "auto" else mode
+    if stack is not None:
+        frame = stack.frame
+    if frame is None:
+        raise ValueError("without a stack, pass the beam frame explicitly")
+    if stack is not None and exit_z < stack.exit_z:
+        raise ValueError(f"exit_z {exit_z} is above the stack exit {stack.exit_z}")
+    if air is not None:
+        if stack is not None and air.z_start < stack.exit_z:
+            raise ValueError(
+                f"the air column starts at {air.z_start}, inside the stack (exit {stack.exit_z})"
+            )
+        if exit_z < air.z_end:
+            raise ValueError(f"exit_z {exit_z} is above the air column end {air.z_end}")
+    return resolved, frame
+
+
 def presolve_head(
     source: Source,
     *,
@@ -367,22 +401,7 @@ def presolve_head(
     the stored phase space, never applied to the transmitted primaries, which are
     the deterministic backbone. Zero disables it.
     """
-    if mode not in _MODES:
-        raise ValueError(f"mode must be one of {_MODES}, got {mode!r}")
-    resolved = "first_compton" if mode == "auto" else mode
-    if stack is not None:
-        frame = stack.frame
-    if frame is None:
-        raise ValueError("without a stack, pass the beam frame explicitly")
-    if stack is not None and exit_z < stack.exit_z:
-        raise ValueError(f"exit_z {exit_z} is above the stack exit {stack.exit_z}")
-    if air is not None:
-        if stack is not None and air.z_start < stack.exit_z:
-            raise ValueError(
-                f"the air column starts at {air.z_start}, inside the stack (exit {stack.exit_z})"
-            )
-        if exit_z < air.z_end:
-            raise ValueError(f"exit_z {exit_z} is above the air column end {air.z_end}")
+    resolved, frame = resolve_presolve(stack, frame, air, exit_z, mode)
 
     columns = source.sample_batch(seed, 0, n_histories)
     if not np.all(columns["particle_type"] == IAEA_PHOTON):

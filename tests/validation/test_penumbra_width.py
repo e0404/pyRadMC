@@ -8,9 +8,13 @@ jaw values. A straight edge of height ``H`` at distance ``z_mid`` throws a
 partial-transmission band whose projection at measurement distance ``D`` is
 ``u_edge * D * (1/z_top - 1/z_bottom)`` — here ~8.9 mm — on top of which sit the
 spot size (~1.7 mm projected) and the in-phantom transport blur (~4-6 mm at
-depth for 6 MV). Measured 2026-07-15: 15.8 mm, consistent with that stack-up;
-a future focused-edge option should collapse the geometric band and bring the
-width toward the clinical 4-8 mm. The gate brackets the model so a projection,
+depth for 6 MV). Measured 2026-07-15: 15.8 mm, consistent with that stack-up.
+
+``JawPair(focused=True)`` (shipped 2026-07-16) collapses the geometric band —
+every focal-spot ray is then full-thickness-or-nothing, so the penumbra falls to
+spot size plus in-phantom blur (the clinical 4-8 mm). This gate keeps the
+**straight** default it was derived for; the focused-edge window awaits its own
+measurement against this beam. The gate brackets the model so a projection,
 frame, or pre-solve regression is caught; it needs the EPICS libraries (skips
 without the env paths).
 """
