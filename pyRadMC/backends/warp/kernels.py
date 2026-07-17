@@ -63,10 +63,13 @@ __all__ = [
     "GridInfo",
     "Queue",
     "Tables",
+    "accumulate_dij_batch",
     "accumulate_run_batch",
     "compact_column",
     "count_kept_per_column",
     "electron_kernel",
+    "fill_int32",
+    "fill_int64",
     "finalize_run",
     "generate_beamlet_lattice",
     "generate_from_exit_buffer",
@@ -76,7 +79,6 @@ __all__ = [
     "make_beamlet_generator_kernel",
     "make_generator_kernel",
     "photon_kernel",
-    "reduce_dij_group",
 ]
 
 ENERGY_QUANTUM_MEV: float = 1.0e-9
@@ -324,15 +326,14 @@ def make_beamlet_generator_kernel(sampler):
     ``sampler(beamlet: int, within_index: int, state) -> (energy, x, y, z, ux, uy, uz,
     weight)`` is the advanced Warp Dij route
     (:attr:`pyRadMC.geometry.source.BeamletSource.warp_beamlet_sampler`): the returned
-    kernel bakes the same flat-block history mapping as
-    :func:`generate_beamlet_lattice` — group-local beamlet ``t // n_per``, within-beamlet
-    index ``r``, batch ``r // per_batch``, global history ``h = beamlet*n_per + r``,
-    correlated key ``r`` — calls the sampler for the primary, and writes a photon at the
-    sampled weight tagged with the batch-resolved column ``local*n_batches + batch``
-    (the weight carries deterministic source-side attenuation; it must match what the
-    host ``emit`` returns or the backends disagree systematically). Emitted
-    ``weight * energy`` is booked into a signed fixed-point counter. Memoized per
-    sampler.
+    kernel bakes the same one-batch block mapping as :func:`generate_beamlet_lattice` —
+    group-local beamlet ``t // per_batch``, within-beamlet index
+    ``r = batch*per_batch + i``, global history ``h = beamlet*n_per + r``, correlated key
+    ``r`` — calls the sampler for the primary, and writes a photon at the sampled weight
+    tagged with the column ``local`` (the weight carries deterministic source-side
+    attenuation; it must match what the host ``emit`` returns or the backends disagree
+    systematically). Emitted ``weight * energy`` is booked into a signed fixed-point
+    counter. Memoized per sampler.
     """
     cached = _beamlet_generator_cache.get(sampler)
     if cached is not None:
@@ -344,7 +345,7 @@ def make_beamlet_generator_kernel(sampler):
         group_start: int,
         n_per: int,
         per_batch: int,
-        n_batches: int,
+        batch: int,
         t_offset: int,
         correlated: int,
         slots: wp.array(dtype=wp.uint32),
@@ -353,9 +354,9 @@ def make_beamlet_generator_kernel(sampler):
     ):
         tid = wp.tid()
         t = t_offset + tid
-        local = t // n_per
-        r = t - local * n_per
-        batch = r // per_batch
+        local = t // per_batch
+        i = t - local * per_batch
+        r = batch * per_batch + i
         beamlet = group_start + local
         h = beamlet * n_per + r
         key = h
@@ -368,7 +369,7 @@ def make_beamlet_generator_kernel(sampler):
         energy, x, y, z, ux, uy, uz, weight = sampler(beamlet, r, state)
         _escape(emitted, weight * energy)  # photon; no positron latent in a Dij
         q.kind[tid] = PHOTON
-        q.beamlet[tid] = local * n_batches + batch
+        q.beamlet[tid] = local
         q.primary[tid] = 1
         q.energy[tid] = energy
         q.weight[tid] = weight
@@ -626,41 +627,38 @@ def _mean_sigma(s1: wp.float64, s2: wp.float64, n_batches: int):
 
 
 @wp.kernel
-def reduce_dij_group(
+def accumulate_dij_batch(
     edep: wp.array(dtype=wp.int64),
     voxel_mass: wp.array(dtype=wp.float64),
-    n_batches: int,
     n_voxels: int,
     nhist: wp.float64,
     quantum: wp.float64,
-    mean_out: wp.array(dtype=wp.float64),
-    sigma_out: wp.array(dtype=wp.float64),
+    s1: wp.array(dtype=wp.float64),
+    s2: wp.array(dtype=wp.float64),
     total_quanta: wp.array(dtype=wp.int64),
 ):
-    """Reduce one beamlet group's ``(local, batch, voxel)`` map to per-column dose.
+    """Fold one batch of a beamlet group into the running per-column dose sums.
 
-    One thread per ``(local, voxel)`` folds the batch axis (edep is tagged
-    ``local * n_batches + batch``), writing ``mean_out``/``sigma_out`` flat over
-    ``(local, voxel)`` and accumulating the group's total fixed-point quanta (the
-    dose-to-medium deposited-energy book; dose-to-water uses its physical counter).
+    The Dij counterpart of :func:`accumulate_run_batch`: one thread per
+    ``(local, voxel)`` over the group's ``group * n_voxels`` dense map, launched once
+    per statistical batch. A voxel is touched by a single thread per launch and the
+    launches are sequential in batch order, so ``s1`` accumulates ``sum_b dose_b``
+    as the same left fold, term for term, that the batch-axis loop it replaces
+    performed — which is what keeps ``run`` and ``run_dij`` bitwise equal for a 1x1
+    lattice, and keeps the Dij invariant to the batch-vs-device-axis scheduling.
+
+    ``total_quanta`` accumulates the group's fixed-point quanta (the dose-to-medium
+    deposited-energy book; dose-to-water uses its physical counter). Integer
+    addition is associative, so its atomic accumulation is order-independent.
     """
     tid = wp.tid()
     local = tid // n_voxels
     vox = tid - local * n_voxels
-    mass = voxel_mass[vox]
-    s1 = wp.float64(0.0)
-    s2 = wp.float64(0.0)
-    col_quanta = wp.int64(0)
-    for b in range(n_batches):
-        q = edep[(local * n_batches + b) * n_voxels + vox]
-        col_quanta += q
-        d = _batch_dose(q, mass, nhist, quantum)
-        s1 += d
-        s2 += d * d
-    mean, sigma = _mean_sigma(s1, s2, n_batches)
-    mean_out[tid] = mean
-    sigma_out[tid] = sigma
-    wp.atomic_add(total_quanta, 0, col_quanta)
+    q = edep[tid]
+    d = _batch_dose(q, voxel_mass[vox], nhist, quantum)
+    s1[tid] = s1[tid] + d
+    s2[tid] = s2[tid] + d * d
+    wp.atomic_add(total_quanta, 0, q)
 
 
 @wp.kernel
@@ -678,7 +676,7 @@ def accumulate_run_batch(
     Launched once per statistical batch (one thread per voxel, no race — a voxel is
     touched by a single thread per launch, and launches are sequential), so ``s1``
     accumulates ``sum_b dose_b`` in batch order — the same left fold, term for term,
-    that :func:`reduce_dij_group` performs for a 1x1 column, hence the bitwise
+    that :func:`accumulate_dij_batch` performs for a 1x1 column, hence the bitwise
     equality between ``run`` and ``run_dij`` on one device.
     """
     vox = wp.tid()
@@ -714,6 +712,23 @@ def finalize_run(
 # arithmetic), and the keep test ``mean >= truncation * col_max and mean > 0`` uses
 # the same float64 product as ``DijAssembler.add_block``, so the sparse pattern and
 # values are byte-identical to the host truncation on the same dose maps.
+
+
+@wp.kernel
+def fill_int32(a: wp.array(dtype=wp.int32), value: int):
+    """Stream-aware int32 fill.
+
+    ``array.zero_()`` and host uploads run on the device's *current* stream; a
+    batch lane running on its own stream must set queue counts with an operation
+    it can order on that stream, which a plain kernel launch is.
+    """
+    a[wp.tid()] = value
+
+
+@wp.kernel
+def fill_int64(a: wp.array(dtype=wp.int64), value: wp.int64):
+    """Stream-aware int64 fill; the lane-stream counterpart of ``edep.zero_()``."""
+    a[wp.tid()] = value
 
 
 @wp.kernel
@@ -1619,7 +1634,7 @@ def generate_beamlet_lattice(
     group_start: int,
     n_histories_per_beamlet: int,
     per_batch: int,
-    n_batches: int,
+    batch: int,
     t_offset: int,
     correlated: int,
     energy: float,
@@ -1631,17 +1646,21 @@ def generate_beamlet_lattice(
     slots: wp.array(dtype=wp.uint32),
     q: Queue,
 ):
-    """Primaries for one chunk of a beamlet group, tagged with a (beamlet, batch) slot.
+    """Primaries for one chunk of *one batch* of a beamlet group, tagged by beamlet.
 
-    Thread ``tid`` handles flat index ``t = t_offset + tid`` of the group's whole
-    history block (all batches at once — one drain sequence and one readback per
-    group): group-local beamlet ``t // n_per``, within-beamlet index
-    ``r = t % n_per``, batch ``r // per_batch``. The global history index follows
-    the project-wide mapping fixed by ``ReferenceEngine.run_dij`` —
+    Thread ``tid`` handles flat index ``t = t_offset + tid`` of this batch's block:
+    group-local beamlet ``t // per_batch``, within-batch index ``i = t % per_batch``,
+    and so within-beamlet index ``r = batch * per_batch + i``. The global history
+    index follows the project-wide mapping fixed by ``ReferenceEngine.run_dij`` —
     ``h = j * n_per + r`` — so streams, and with them the whole Dij, are invariant
-    to grouping, batch merging, and chunking (test-pinned). The column tag is the
-    batch-resolved slot ``local * n_batches + batch``: batches stay separable for
-    the sigma estimate without per-batch launches.
+    to grouping, batch merging, and chunking (test-pinned).
+
+    The column tag is ``local`` alone. Batches are separated *in time* (one drain
+    per batch, folded into running float64 sums by ``accumulate_dij_batch``) rather
+    than along a device axis, so the group's dense buffer costs
+    ``group * n_voxels`` int64 instead of ``group * n_batches * n_voxels``. Each
+    history still draws exactly the stream its ``(seed, key)`` names, so this is a
+    pure scheduling change.
 
     Correlated sampling (Phase 4) keys the stream on ``r`` instead of ``h`` —
     see ``ReferenceEngine.run_dij`` for the mapping's definition and caveats.
@@ -1656,9 +1675,9 @@ def generate_beamlet_lattice(
     """
     tid = wp.tid()
     t = t_offset + tid
-    local = t // n_histories_per_beamlet
-    r = t - local * n_histories_per_beamlet
-    batch = r // per_batch
+    local = t // per_batch
+    i = t - local * per_batch
+    r = batch * per_batch + i
     h = (group_start + local) * n_histories_per_beamlet + r
     key = h
     if correlated != 0:
@@ -1670,7 +1689,7 @@ def generate_beamlet_lattice(
     x = x_lo[local] + x_extent[local] * uniform(state)
     y = y_lo[local] + y_extent[local] * uniform(state)
     q.kind[tid] = PHOTON
-    q.beamlet[tid] = local * n_batches + batch
+    q.beamlet[tid] = local
     q.primary[tid] = 1  # source photon: the only one that may split
     q.energy[tid] = energy
     q.weight[tid] = 1.0

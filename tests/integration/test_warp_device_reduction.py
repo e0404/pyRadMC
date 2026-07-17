@@ -62,7 +62,14 @@ def _synthetic_quanta(n_cols: int, n_batches: int, n_voxels: int) -> np.ndarray:
 
 
 @pytest.mark.parametrize("n_batches", [1, 5])
-def test_reduce_dij_group_matches_host_beamlet_scorer(device: str, n_batches: int) -> None:
+def test_dij_batch_accumulation_matches_host_beamlet_scorer(device: str, n_batches: int) -> None:
+    """The streamed Dij fold: one accumulate launch per batch, then a finalize.
+
+    The engine never materializes the batch axis — it reuses one ``group * n_voxels``
+    quanta map per batch and folds it into running sums — so the kernels are driven
+    here exactly as the engine drives them, batch by batch, and compared against the
+    host scorer fed the same blocks in the same order.
+    """
     sg = _scoring_grid()
     n_voxels = sg.n_voxels
     group = 3
@@ -76,32 +83,40 @@ def test_reduce_dij_group_matches_host_beamlet_scorer(device: str, n_batches: in
         scorer.end_batch(per_batch)
     block = scorer.finalize()
 
-    # Device reduction over the tag = local * n_batches + batch layout.
-    edep = wp.array(quanta.reshape(-1), dtype=wp.int64, device=device)
     mass = wp.array(sg.voxel_mass.reshape(n_voxels), dtype=wp.float64, device=device)
-    mean_out = wp.zeros(group * n_voxels, dtype=wp.float64, device=device)
-    sigma_out = wp.zeros(group * n_voxels, dtype=wp.float64, device=device)
+    s1 = wp.zeros(group * n_voxels, dtype=wp.float64, device=device)
+    s2 = wp.zeros(group * n_voxels, dtype=wp.float64, device=device)
     total_q = wp.zeros(1, dtype=wp.int64, device=device)
+    for b in range(n_batches):
+        # One batch's (local, voxel) map, tagged by beamlet alone.
+        edep = wp.array(quanta[:, b, :].reshape(-1), dtype=wp.int64, device=device)
+        wp.launch(
+            kernels.accumulate_dij_batch,
+            dim=group * n_voxels,
+            inputs=[
+                edep,
+                mass,
+                n_voxels,
+                float(per_batch),
+                float(ENERGY_QUANTUM_MEV),
+                s1,
+                s2,
+                total_q,
+            ],
+            device=device,
+        )
+    # The engine aliases the outputs onto the sums; do the same here so the aliasing
+    # is covered, not just the arithmetic.
     wp.launch(
-        kernels.reduce_dij_group,
+        kernels.finalize_run,
         dim=group * n_voxels,
-        inputs=[
-            edep,
-            mass,
-            n_batches,
-            n_voxels,
-            float(per_batch),
-            float(ENERGY_QUANTUM_MEV),
-            mean_out,
-            sigma_out,
-            total_q,
-        ],
+        inputs=[s1, s2, n_batches, s1, s2],
         device=device,
     )
     wp.synchronize_device(device)
 
-    mean = mean_out.numpy().reshape(group, n_voxels)
-    sigma = sigma_out.numpy().reshape(group, n_voxels)
+    mean = s1.numpy().reshape(group, n_voxels)
+    sigma = s2.numpy().reshape(group, n_voxels)
     np.testing.assert_allclose(mean, block.dose, rtol=1e-12, atol=0.0)
     np.testing.assert_allclose(sigma, block.sigma, rtol=1e-12, atol=0.0)
     assert int(total_q.numpy()[0]) == int(quanta.sum())

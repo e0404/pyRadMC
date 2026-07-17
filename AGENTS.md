@@ -700,5 +700,23 @@ history.
 - **Positrons stay Moller-approximated** (no Bhabha, annihilation at rest). If
   ever upgraded, Bhabha and annihilation in flight land together as the new
   default per section 2.10, with a test showing the dosimetric effect.
+- **BUG (open, found 2026-07-17): ``warp_physics()`` leaks the kernel-side
+  ``uniform`` into ``pyRadMC.geometry.spectrum``.** Constructing a ``WarpEngine``
+  therefore breaks the *reference* backend's spectral source for the rest of the
+  process: ``spectrum.sample_energy`` calls the ``@wp.func`` shim with a numpy
+  Generator and raises ``no overload found for arguments (Generator(PCG64) ...)``.
+  ``physics.py::_load()`` patches ``sys.modules["pyRadMC.rng"]`` and restores only
+  the modules named in ``_KERNEL_MODULES``; ``geometry.spectrum`` is imported
+  transitively *inside* that window, binds ``uniform`` at module level, and keeps
+  the shim after the restore. Any module that binds ``pyRadMC.rng`` names at import
+  time and is not in ``_KERNEL_MODULES`` is exposed — spectrum is the one that bites
+  today, not necessarily the only one. Fix: snapshot ``sys.modules`` before patching
+  and evict anything newly added afterwards (forcing a clean re-import), or
+  pre-import every transitive dependency before the window; land it with a
+  regression test pinning ``spectrum.uniform is rng.uniform`` after
+  ``warp_physics()``. Repro (fails on the committed baseline too):
+  ``pytest tests/integration/test_warp_device_reduction.py tests/dij`` → 27 failed.
+  ``make test``'s tier order happens to hide it. It raises rather than silently
+  corrupting, which is why this is a task and not a stop-the-line.
 
 Do not begin Phase 5 without the maintainer's explicit go-ahead.

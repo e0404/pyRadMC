@@ -10,8 +10,10 @@ nothing physical lives here). The run loop is:
    bremsstrahlung and annihilation photons back, and delta rays into the next
    electron round.
 3. Reduce the int64 fixed-point energy maps to per-voxel dose mean and sigma **on
-   the device** (``kernels.accumulate_run_batch``/``reduce_dij_group``), so only the
-   reduced maps — not the dense per-group buffer — read back. The reduction mirrors
+   the device**: one ``kernels.accumulate_run_batch`` / ``kernels.accumulate_dij_batch``
+   launch per statistical batch folds that batch's map into running float64 sums, and
+   ``kernels.finalize_run`` turns the sums into mean and sigma — so a batch's map is
+   reused, never stored, and only the reduced maps read back. The reduction mirrors
    the reference ``BatchedDoseScorer`` batch statistics (AGENTS.md 2.4) and is shared
    by the open-field and Dij paths, so a 1x1 Dij column reduces to the open-field
    dose bit for bit on one device.
@@ -28,10 +30,17 @@ This module is Warp backend code: exempt from ``mypy --strict`` (AGENTS.md 5).
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import threading
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 import numpy as np
 import warp as wp
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Sequence
 
 from pyRadMC import DIJ_TRUNCATION_RELATIVE, ECUT_MEV, ELECTRON_MASS_MEV, PCUT_MEV
 from pyRadMC.backends.results import TransportResult
@@ -101,8 +110,68 @@ def _upload_queue(capacity: int, device: str) -> Queue:
     return q
 
 
-def _queue_count(q: Queue) -> int:
-    count = int(q.count.numpy()[0])
+@dataclass
+class _DijShard:
+    """One device's share of a Dij: its sparse blocks and its energy books.
+
+    The books stay in exact int64 quanta so the caller can sum shards without the
+    total depending on which device finished first.
+    """
+
+    blocks: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = field(
+        default_factory=dict
+    )
+    deposited_quanta: int = 0
+    escaped_quanta: int = 0
+    unscored_quanta: int = 0
+    emitted_quanta: int = 0
+    emitted_energy: float = 0.0
+
+
+@dataclass
+class _LaneResources:
+    """One batch lane's private device state.
+
+    A lane transports whole batches independently of its peers, so everything a
+    batch's transport writes — queues, RNG slots, the quanta map — is per lane;
+    the lane's ``stream`` orders its work and ``staging`` is the pinned element
+    its count readbacks go through. The sequential path is lane 0 with no stream.
+    """
+
+    stream: object
+    staging: object
+    queues: list
+    slots: object
+    edep: object
+
+
+def _launch(kernel, dim, inputs, device: str, stream) -> None:
+    """Launch on the device's current stream, or on an explicit lane stream.
+
+    Warp takes *either* ``device`` or ``stream`` (a stream names its device);
+    every launch on a Dij code path routes through here so that a batch lane's
+    work is ordered on the lane's stream and nothing leaks onto the default one.
+    """
+    if stream is None:
+        wp.launch(kernel, dim=dim, inputs=inputs, device=device)
+    else:
+        wp.launch(kernel, dim=dim, inputs=inputs, stream=stream)
+
+
+def _queue_count(q: Queue, stream=None, staging=None) -> int:
+    """Read a queue's count back to the host.
+
+    Without a stream this is the plain (default-stream) readback. On a lane
+    stream, ``numpy()`` would sync only the *default* stream and could read a
+    count the lane has not finished writing, so the value goes through a pinned
+    staging element copied and synchronized on the lane's own stream.
+    """
+    if stream is None:
+        count = int(q.count.numpy()[0])
+    else:
+        wp.copy(staging, q.count, stream=stream)
+        wp.synchronize_stream(stream)
+        count = int(staging.numpy()[0])
     if count > q.capacity:
         raise RuntimeError(
             f"particle queue overflow: {count} > capacity {q.capacity}. "
@@ -111,12 +180,18 @@ def _queue_count(q: Queue) -> int:
     return count
 
 
-def _reset_count(q: Queue, device: str) -> None:
-    q.count.zero_()
+def _reset_count(q: Queue, device: str, stream=None) -> None:
+    if stream is None:
+        q.count.zero_()
+    else:
+        _launch(kernels.fill_int32, 1, [q.count, 0], device, stream)
 
 
-def _set_count(q: Queue, value: int, device: str) -> None:
-    wp.copy(q.count, wp.array(np.array([value], dtype=np.int32), device=device))
+def _set_count(q: Queue, value: int, device: str, stream=None) -> None:
+    if stream is None:
+        wp.copy(q.count, wp.array(np.array([value], dtype=np.int32), device=device))
+    else:
+        _launch(kernels.fill_int32, 1, [q.count, value], device, stream)
 
 
 @dataclass(frozen=True)
@@ -420,9 +495,11 @@ class WarpEngine:
         transport_electrons: bool = True,
         truncation: float = DIJ_TRUNCATION_RELATIVE,
         correlated: bool = True,
-        beamlet_group_size: int = 32,
+        beamlet_group_size: int = 128,
         scoring_grid: ScoringGrid | None = None,
         scoring_mode: str = "dose_to_medium",
+        devices: Sequence[str] | None = None,
+        concurrent_batches: int = 1,
     ) -> DijResult:
         """Compute the Dij over the lattice; same contract as the reference engine.
 
@@ -435,13 +512,60 @@ class WarpEngine:
         Parameters
         ----------
         beamlet_group_size
-            Beamlets scored concurrently into one dense device buffer of
-            ``group * n_batches * n_voxels`` int64 quanta (the batch axis lives
-            on the device too, so a group needs only one queue-drain sequence
-            and one readback). Purely a memory/occupancy trade-off: streams are
-            pure functions of ``(seed, history)`` and scoring is associative, so
-            the result is bit-identical for any value (test-pinned), exactly
-            like ``chunk_size``.
+            Beamlets scored concurrently into one dense device buffer. Purely a
+            memory/occupancy trade-off: streams are pure functions of
+            ``(seed, history)`` and scoring is associative, so the result is
+            bit-identical for any value (test-pinned), exactly like ``chunk_size``.
+
+            This is the *only* dial for the dense device cost, which is
+            ``group * n_voxels * 24`` bytes — one int64 quanta map plus the two
+            float64 sums — and is **independent of** ``n_batches``: batches are
+            streamed one drain at a time and folded into the sums, not stored
+            along a device axis. It is also what sets the launch width, since a
+            batch's block is ``group * n_histories_per_beamlet / n_batches``
+            histories; raise it until that block covers ``chunk_size``, memory
+            permitting. The default sizes the dense buffer at 768 MB on a 64^3
+            grid; **lower it for a CT-resolution scoring grid**, where
+            ``n_voxels`` is an order up and the product will not fit — or coarsen
+            ``scoring_grid``, which shrinks this cubically.
+
+        devices
+            Devices to shard the beamlet groups over, one host thread each; default
+            (``None``) runs everything on the engine's own ``device``. Groups are
+            independent — no cross-device reduction — so this scales with the device
+            count rather than trading anything away, and each device pays the full
+            per-device footprint (geometry, tables, queues, and the dense
+            ``group * n_voxels * 24`` maps) since nothing is shared.
+
+            Scheduling is greedy from a shared ordered queue: a device pulls the
+            next group the moment it is free, so an idle device always receives new
+            work before any deeper concurrency (``concurrent_batches`` lanes) on a
+            busy one, and a slow device in a mixed set self-limits to the groups it
+            can finish instead of holding an equal share hostage.
+
+            Reproducibility: every column is computed wholly on one device, so
+            scheduling never changes *what* a device computes for a beamlet — only
+            which device computes it (test-pinned). Over identical devices the Dij
+            is therefore bit-identical however the pulls interleave. Over a
+            *heterogeneous* set (e.g. ``["cuda:0", "cpu"]``) the column-to-device
+            assignment is timing-dependent run to run — columns stay statistically
+            equivalent, the cpu/cuda relationship AGENTS.md 2.3 defines, but the
+            same run twice may place them differently; pass a single device where
+            strict run-to-run bit reproducibility matters on mixed hardware. The
+            energy books stay exact either way, being integer quanta summed in
+            device-list order.
+        concurrent_batches
+            Batch lanes per CUDA device: up to this many batches of the current
+            group transport concurrently, each lane on its own stream with its own
+            queues, RNG slots, and quanta map. **Bitwise inert** (test-pinned): the
+            float64 fold of batch sums is serialized in batch order across lanes,
+            so any value reproduces the sequential Dij exactly — the knob only
+            trades memory for overlap, like ``chunk_size``. Extra lanes cost their
+            queues and one ``group * n_voxels`` int64 map each; a cpu device has no
+            streams and ignores the setting. On this engine's development hardware
+            (laptop RTX 4070) the drain gaps lanes can hide measured at 2-3% of
+            Dij wall time — the knob exists for larger cards, where the balance
+            may differ; measure before defaulting it on.
 
         ``scoring_grid`` (semantics as in :meth:`run`) is the memory lever here:
         ``n_voxels`` above is the *scoring* voxel count, so a coarser dose grid
@@ -460,15 +584,152 @@ class WarpEngine:
             )
         if beamlet_group_size < 1:
             raise ValueError(f"need a positive beamlet group size, got {beamlet_group_size}")
+        if concurrent_batches < 1:
+            raise ValueError(f"need at least one lane, got concurrent_batches={concurrent_batches}")
         dose_to_water = 1 if validate_scoring_mode(scoring_mode, transport_electrons) else 0
 
-        device = self.device
-        gi, density, material = self._upload_grid(device)
         scoring = scoring_grid if scoring_grid is not None else ScoringGrid.for_grid(self.grid)
+        n_beamlets = source.n_beamlets
+        per_batch = n_histories_per_beamlet // n_batches
+
+        device_list = [self.device] if devices is None else list(dict.fromkeys(devices))
+        if not device_list:
+            raise ValueError("devices must name at least one device")
+
+        # Beamlet groups are independent — no cross-group reduction — so sharding them
+        # over devices needs no communication at all. Assignment is greedy from a
+        # shared ordered queue: a device pulls the next group the moment it is free,
+        # so an idle device always takes new work before any deeper concurrency
+        # (batch lanes) on a busy one — the scheduling preference this engine
+        # promises. Each column is computed wholly on one device, so scheduling can
+        # never change a column's value on a given device, only which device
+        # produces it (test-pinned). Over *identical* devices the whole Dij is
+        # therefore bit-identical however the pulls interleave; over a mixed set
+        # (e.g. cuda + cpu) the column-to-device assignment is timing-dependent run
+        # to run, each column still bit-equal to a whole run of its computing device
+        # — pass a single device where strict run-to-run reproducibility on mixed
+        # hardware matters. The energy books are exact integer quanta either way.
+        group_starts = list(range(0, n_beamlets, beamlet_group_size))
+        pending = deque(group_starts)
+        pending_lock = threading.Lock()
+
+        def _next_group() -> int | None:
+            with pending_lock:
+                return pending.popleft() if pending else None
+
+        assembler = DijAssembler(
+            grid_shape=scoring.shape,
+            n_beamlets=n_beamlets,
+            n_histories_per_beamlet=n_histories_per_beamlet,
+            n_batches=n_batches,
+            truncation=truncation,
+            correlated=correlated,
+            scoring_mode=scoring_mode,
+        )
+
+        args = dict(
+            source=source,
+            n_histories_per_beamlet=n_histories_per_beamlet,
+            n_batches=n_batches,
+            per_batch=per_batch,
+            seed=seed,
+            pcut=pcut,
+            ecut=ecut,
+            transport_electrons=transport_electrons,
+            truncation=truncation,
+            correlated=correlated,
+            beamlet_group_size=beamlet_group_size,
+            scoring=scoring,
+            dose_to_water=dose_to_water,
+            concurrent_batches=concurrent_batches,
+        )
+        # Kernel modules are loaded up front whenever any host thread beyond this
+        # one will launch (device workers or batch lanes): warp's module loading is
+        # not thread-safe. Everything after takes its device explicitly, so the
+        # threads share no warp state.
+        if len(device_list) > 1 or concurrent_batches > 1:
+            for d in device_list:
+                wp.load_module(kernels, device=d)
+        if len(device_list) == 1:
+            shard_results = [self._run_dij_shard(device_list[0], _next_group, **args)]
+        else:
+            # One host thread per device: warp launches are asynchronous but the drain
+            # loop's count readbacks block, so a single thread would serialize the
+            # devices on those readbacks.
+            with ThreadPoolExecutor(max_workers=len(device_list)) as pool:
+                futures = [
+                    pool.submit(self._run_dij_shard, d, _next_group, **args) for d in device_list
+                ]
+                shard_results = [f.result() for f in futures]
+
+        # Energy books in exact integer quanta (Python ints, unbounded), converted
+        # to MeV once at the end: float accumulation order would otherwise make
+        # the tallies — unlike the matrix — depend on the group size. Summed over
+        # shards in device-list order, so the books do not depend on which device
+        # finished first.
+        deposited_quanta = sum(r.deposited_quanta for r in shard_results)
+        escaped_quanta = sum(r.escaped_quanta for r in shard_results)
+        unscored_quanta = sum(r.unscored_quanta for r in shard_results)
+        emitted_quanta = sum(r.emitted_quanta for r in shard_results)
+        emitted_energy = sum(r.emitted_energy for r in shard_results)
+
+        # The assembler takes blocks in ascending, gap-free beamlet order; shards
+        # finish in whatever order the devices happen to, so feed it from the merged
+        # map rather than as the blocks arrive.
+        blocks = {gs: block for r in shard_results for gs, block in r.blocks.items()}
+        for group_start in group_starts:
+            counts, indices, dose, sigma = blocks[group_start]
+            assembler.add_sparse_block(group_start, counts, indices, dose, sigma)
+
+        use_lattice = isinstance(source, BeamletGridSource)
+        if use_lattice:
+            emitted_energy = n_beamlets * n_histories_per_beamlet * source.max_energy
+        elif emitted_quanta:
+            emitted_energy = float(emitted_quanta) * ENERGY_QUANTUM_MEV
+        return assembler.finalize(
+            energy_emitted=emitted_energy,
+            energy_deposited=deposited_quanta * ENERGY_QUANTUM_MEV,
+            energy_escaped=escaped_quanta * ENERGY_QUANTUM_MEV,
+            energy_unscored=unscored_quanta * ENERGY_QUANTUM_MEV,
+        )
+
+    def _run_dij_shard(
+        self,
+        device: str,
+        next_group: Callable[[], int | None],
+        *,
+        source,
+        n_histories_per_beamlet: int,
+        n_batches: int,
+        per_batch: int,
+        seed: int,
+        pcut: float,
+        ecut: float,
+        transport_electrons: bool,
+        truncation: float,
+        correlated: bool,
+        beamlet_group_size: int,
+        scoring: ScoringGrid,
+        dose_to_water: int,
+        concurrent_batches: int,
+    ) -> _DijShard:
+        """Pull beamlet groups from the shared queue and run them on one device.
+
+        Owns every device resource it touches (geometry, tables, queues, dense maps,
+        energy counters), so shards on different devices share nothing and may run
+        concurrently on their own host threads. Returns the shard's sparse blocks
+        keyed by group start, plus its energy books in exact quanta for the caller
+        to merge in a device-order-independent way.
+
+        ``concurrent_batches`` > 1 transports that many batches of the current group
+        concurrently, each lane on its own CUDA stream with its own queues, RNG
+        slots, and quanta map (``_run_dij_group_lanes``); a cpu device has no
+        streams and always runs the sequential path.
+        """
+        gi, density, material = self._upload_grid(device)
         si = _scoring_info(scoring)
         tab = self._upload_tables(source.max_energy, pcut, ecut, device)
         n_beamlets = source.n_beamlets
-        per_batch = n_histories_per_beamlet // n_batches
         n_voxels = scoring.n_voxels
         # Route by capability: the built-in lattice generates in-kernel from analytic
         # bounds; a source with a warp_beamlet_sampler is generated in-kernel by a
@@ -488,124 +749,127 @@ class WarpEngine:
         unscored = wp.zeros(1, dtype=wp.int64, device=device)
         deposited = wp.zeros(1, dtype=wp.int64, device=device)
         violations = wp.zeros(1, dtype=wp.int32, device=device)
-        assembler = DijAssembler(
-            grid_shape=scoring.shape,
-            n_beamlets=n_beamlets,
-            n_histories_per_beamlet=n_histories_per_beamlet,
-            n_batches=n_batches,
-            truncation=truncation,
-            correlated=correlated,
-            scoring_mode=scoring_mode,
-        )
-        # Energy books in exact integer quanta (Python ints, unbounded), converted
-        # to MeV once at the end: float accumulation order would otherwise make
-        # the tallies — unlike the matrix — depend on the group size.
+        shard = _DijShard()
         deposited_quanta = 0
         escaped_quanta = 0
         unscored_quanta = 0
-        emitted_energy = 0.0
 
-        for group_start in range(0, n_beamlets, beamlet_group_size):
+        # Group-invariant device buffers, allocated once at the largest group's size
+        # and reused per group. Allocating these *inside* the loop costs twice their
+        # footprint at the peak: the successor is allocated while the predecessor is
+        # still referenced. A trailing short group uses a prefix of each buffer, which
+        # is why every launch below is dimensioned from ``group`` rather than from the
+        # buffer length.
+        #
+        # The batch axis is streamed, not stored: ``edep`` holds one batch at a time
+        # and each batch is folded into the running float64 sums s1/s2, so the dense
+        # cost is group * n_voxels * (8 + 8 + 8) independent of n_batches, rather than
+        # group * n_batches * n_voxels * 8. s1/s2 are then overwritten in place with
+        # the mean/sigma they imply (see the finalize_run launch), so the group needs
+        # no separate dense output maps.
+        max_group = min(beamlet_group_size, n_beamlets)
+        max_capacity = max(1, min(self.chunk_size, max_group * per_batch)) * self.queue_factor
+        # A cpu device has no streams; lanes beyond the first would serialize on the
+        # single device queue anyway, so they collapse to the sequential path.
+        lanes = 1
+        if concurrent_batches > 1 and wp.get_device(device).is_cuda:
+            lanes = min(concurrent_batches, n_batches)
+        lane_resources = [
+            _LaneResources(
+                stream=wp.Stream(device) if lanes > 1 else None,
+                staging=(
+                    wp.zeros(1, dtype=wp.int32, device="cpu", pinned=True) if lanes > 1 else None
+                ),
+                queues=[_upload_queue(max_capacity, device) for _ in range(4)],
+                slots=wp.zeros(max_capacity, dtype=wp.uint32, device=device),
+                edep=wp.zeros(max_group * n_voxels, dtype=wp.int64, device=device),
+            )
+            for _ in range(lanes)
+        ]
+        fold_stream = wp.Stream(device) if lanes > 1 else None
+        s1 = wp.zeros(max_group * n_voxels, dtype=wp.float64, device=device)
+        s2 = wp.zeros(max_group * n_voxels, dtype=wp.float64, device=device)
+        counts_dev = wp.zeros(max_group, dtype=wp.int32, device=device)
+        total_q = wp.zeros(1, dtype=wp.int64, device=device)
+
+        route_args = dict(
+            source=source,
+            beamlet_generator=beamlet_generator,
+            emitted_counter=emitted_counter,
+            use_lattice=use_lattice,
+            seed=seed,
+            n_per=n_histories_per_beamlet,
+            per_batch=per_batch,
+            correlated=correlated,
+            gi=gi,
+            si=si,
+            density=density,
+            material=material,
+            tab=tab,
+            escaped=escaped,
+            unscored=unscored,
+            deposited=deposited,
+            violations=violations,
+            pcut=pcut,
+            ecut=ecut,
+            transport_electrons=transport_electrons,
+            dose_to_water=dose_to_water,
+            device=device,
+        )
+        fold_args = dict(
+            voxel_mass=voxel_mass,
+            n_voxels=n_voxels,
+            per_batch=per_batch,
+            s1=s1,
+            s2=s2,
+            total_q=total_q,
+            device=device,
+        )
+
+        while (group_start := next_group()) is not None:
             group = min(beamlet_group_size, n_beamlets - group_start)
-            block_histories = group * n_histories_per_beamlet  # all batches at once
+            block_histories = group * per_batch  # one batch's block
             chunk = min(self.chunk_size, block_histories)
-            capacity = chunk * self.queue_factor
-            queues = [_upload_queue(capacity, device) for _ in range(4)]
-            slots = wp.zeros(capacity, dtype=wp.uint32, device=device)
-            edep = wp.zeros(group * n_batches * n_voxels, dtype=wp.int64, device=device)
+            lattice_bounds = None
+            if use_lattice:
+                lattice_bounds = self._upload_lattice_bounds(source, group_start, group, device)
+            s1.zero_()
+            s2.zero_()
+            total_q.zero_()
             escaped.zero_()
             unscored.zero_()
             deposited.zero_()
 
-            if use_lattice:
-                self._generate_group_lattice(
-                    source,
-                    group_start,
-                    group,
-                    seed,
-                    n_histories_per_beamlet,
-                    per_batch,
-                    n_batches,
-                    correlated,
-                    chunk,
-                    block_histories,
-                    gi,
-                    si,
-                    density,
-                    material,
-                    tab,
-                    queues,
-                    slots,
-                    edep,
-                    escaped,
-                    unscored,
-                    deposited,
-                    violations,
-                    pcut,
-                    ecut,
-                    transport_electrons,
-                    dose_to_water,
-                    device,
-                )
-            elif beamlet_generator is not None:
-                self._generate_group_beamlet_wrapped(
-                    beamlet_generator,
-                    group_start,
-                    group,
-                    seed,
-                    n_histories_per_beamlet,
-                    per_batch,
-                    n_batches,
-                    correlated,
-                    chunk,
-                    block_histories,
-                    gi,
-                    si,
-                    density,
-                    material,
-                    tab,
-                    queues,
-                    slots,
-                    edep,
-                    escaped,
-                    unscored,
-                    deposited,
-                    violations,
-                    pcut,
-                    ecut,
-                    transport_electrons,
-                    dose_to_water,
-                    emitted_counter,
-                    device,
-                )
+            if lanes == 1:
+                # One drain per batch, folded into s1/s2 before the next batch
+                # reuses edep. Batch order is the fold order (accumulate_dij_batch).
+                res = lane_resources[0]
+                for batch in range(n_batches):
+                    res.edep.zero_()
+                    shard.emitted_energy += self._run_dij_batch(
+                        res,
+                        group_start,
+                        group,
+                        batch,
+                        chunk,
+                        block_histories,
+                        lattice_bounds,
+                        **route_args,
+                    )
+                    self._fold_dij_batch(res.edep, group, None, **fold_args)
             else:
-                emitted_energy += self._generate_group_presampled(
-                    source,
+                self._run_dij_group_lanes(
+                    lane_resources,
+                    fold_stream,
                     group_start,
                     group,
-                    seed,
-                    n_histories_per_beamlet,
-                    per_batch,
                     n_batches,
-                    correlated,
                     chunk,
-                    gi,
-                    si,
-                    density,
-                    material,
-                    tab,
-                    queues,
-                    slots,
-                    edep,
-                    escaped,
-                    unscored,
-                    deposited,
-                    violations,
-                    pcut,
-                    ecut,
-                    transport_electrons,
-                    dose_to_water,
-                    device,
+                    block_histories,
+                    lattice_bounds,
+                    shard,
+                    route_args,
+                    fold_args,
                 )
 
             wp.synchronize_device(device)
@@ -615,29 +879,19 @@ class WarpEngine:
                     "The geometry contains material or density the majorant "
                     "declaration did not cover."
                 )
-            # Reduce the group's dense (local, batch, voxel) fixed-point map to
-            # per-column dose mean and sigma on the device; only those two dense
-            # maps read back, not the full per-batch buffer. total_q sums the
-            # physical quanta (dose-to-medium book); dose-to-water uses its counter.
-            mean_dev = wp.zeros(group * n_voxels, dtype=wp.float64, device=device)
-            sigma_dev = wp.zeros(group * n_voxels, dtype=wp.float64, device=device)
-            total_q = wp.zeros(1, dtype=wp.int64, device=device)
+            # Turn the group's accumulated sums into per-column dose mean and sigma,
+            # in place: each thread reads s1[tid]/s2[tid] and writes only its own
+            # element, so aliasing the outputs onto the inputs is safe and saves two
+            # dense group * n_voxels float64 maps. Only these read back, never a
+            # per-batch buffer. total_q summed the physical quanta over the batch
+            # loop (dose-to-medium book); dose-to-water uses its counter.
             wp.launch(
-                kernels.reduce_dij_group,
+                kernels.finalize_run,
                 dim=group * n_voxels,
-                inputs=[
-                    edep,
-                    voxel_mass,
-                    n_batches,
-                    n_voxels,
-                    float(per_batch),
-                    float(ENERGY_QUANTUM_MEV),
-                    mean_dev,
-                    sigma_dev,
-                    total_q,
-                ],
+                inputs=[s1, s2, n_batches, s1, s2],
                 device=device,
             )
+            mean_dev, sigma_dev = s1, s2
             wp.synchronize_device(device)
             if dose_to_water != 0:
                 deposited_quanta += int(deposited.numpy()[0])
@@ -651,7 +905,6 @@ class WarpEngine:
             # a maximum and the keep test uses the same float64 threshold product as
             # DijAssembler.add_block, so this is byte-identical to host truncation on
             # these maps — and deterministic (one thread per column, ascending scan).
-            counts_dev = wp.zeros(group, dtype=wp.int32, device=device)
             wp.launch(
                 kernels.count_kept_per_column,
                 dim=group,
@@ -659,7 +912,7 @@ class WarpEngine:
                 device=device,
             )
             wp.synchronize_device(device)
-            counts = counts_dev.numpy()
+            counts = counts_dev.numpy()[:group]
             offsets = np.zeros(group, dtype=np.int32)
             np.cumsum(counts[:-1], out=offsets[1:])  # exclusive prefix sum
             nnz = int(counts.sum())
@@ -683,24 +936,277 @@ class WarpEngine:
                 device=device,
             )
             wp.synchronize_device(device)
-            assembler.add_sparse_block(
-                group_start,
-                counts,
-                out_indices.numpy(),
-                out_dose.numpy(),
-                out_sigma.numpy(),
+            # Copy, do not alias: on a cpu device ``numpy()`` is a *view* of the warp
+            # array, and these blocks outlive both the reused ``counts_dev`` and this
+            # group's compaction buffers. (The blocks are the sparse result itself, so
+            # owning them costs nothing beyond what the DijResult holds anyway.)
+            shard.blocks[group_start] = (
+                counts.copy(),
+                out_indices.numpy().copy(),
+                out_dose.numpy().copy(),
+                out_sigma.numpy().copy(),
             )
 
+        shard.deposited_quanta = deposited_quanta
+        shard.escaped_quanta = escaped_quanta
+        shard.unscored_quanta = unscored_quanta
+        if emitted_counter is not None:
+            shard.emitted_quanta = int(emitted_counter.numpy()[0])
+        return shard
+
+    def _run_dij_batch(
+        self,
+        res: _LaneResources,
+        group_start,
+        group,
+        batch,
+        chunk,
+        block_histories,
+        lattice_bounds,
+        *,
+        source,
+        beamlet_generator,
+        emitted_counter,
+        use_lattice,
+        seed,
+        n_per,
+        per_batch,
+        correlated,
+        gi,
+        si,
+        density,
+        material,
+        tab,
+        escaped,
+        unscored,
+        deposited,
+        violations,
+        pcut,
+        ecut,
+        transport_electrons,
+        dose_to_water,
+        device,
+    ) -> float:
+        """Generate and drain one batch of one group with a lane's resources.
+
+        The single routing point for the three generation routes; sequential and
+        lane execution differ only in which :class:`_LaneResources` they pass.
+        Returns the batch's host-summed emitted energy (nonzero only on the
+        pre-sampled route; the other two book emitted energy on the device).
+        """
         if use_lattice:
-            emitted_energy = n_beamlets * n_histories_per_beamlet * source.max_energy
-        elif emitted_counter is not None:
-            emitted_energy = float(emitted_counter.numpy()[0]) * ENERGY_QUANTUM_MEV
-        return assembler.finalize(
-            energy_emitted=emitted_energy,
-            energy_deposited=deposited_quanta * ENERGY_QUANTUM_MEV,
-            energy_escaped=escaped_quanta * ENERGY_QUANTUM_MEV,
-            energy_unscored=unscored_quanta * ENERGY_QUANTUM_MEV,
+            self._generate_group_lattice(
+                source,
+                lattice_bounds,
+                group_start,
+                group,
+                seed,
+                n_per,
+                per_batch,
+                batch,
+                correlated,
+                chunk,
+                block_histories,
+                gi,
+                si,
+                density,
+                material,
+                tab,
+                res.queues,
+                res.slots,
+                res.edep,
+                escaped,
+                unscored,
+                deposited,
+                violations,
+                pcut,
+                ecut,
+                transport_electrons,
+                dose_to_water,
+                device,
+                res.stream,
+                res.staging,
+            )
+            return 0.0
+        if beamlet_generator is not None:
+            self._generate_group_beamlet_wrapped(
+                beamlet_generator,
+                group_start,
+                group,
+                seed,
+                n_per,
+                per_batch,
+                batch,
+                correlated,
+                chunk,
+                block_histories,
+                gi,
+                si,
+                density,
+                material,
+                tab,
+                res.queues,
+                res.slots,
+                res.edep,
+                escaped,
+                unscored,
+                deposited,
+                violations,
+                pcut,
+                ecut,
+                transport_electrons,
+                dose_to_water,
+                emitted_counter,
+                device,
+                res.stream,
+                res.staging,
+            )
+            return 0.0
+        return self._generate_group_presampled(
+            source,
+            group_start,
+            group,
+            seed,
+            n_per,
+            per_batch,
+            batch,
+            correlated,
+            chunk,
+            gi,
+            si,
+            density,
+            material,
+            tab,
+            res.queues,
+            res.slots,
+            res.edep,
+            escaped,
+            unscored,
+            deposited,
+            violations,
+            pcut,
+            ecut,
+            transport_electrons,
+            dose_to_water,
+            device,
+            res.stream,
+            res.staging,
         )
+
+    def _fold_dij_batch(
+        self,
+        edep,
+        group,
+        stream,
+        *,
+        voxel_mass,
+        n_voxels,
+        per_batch,
+        s1,
+        s2,
+        total_q,
+        device,
+    ) -> None:
+        """Fold one batch's quanta map into the running sums (accumulate_dij_batch)."""
+        _launch(
+            kernels.accumulate_dij_batch,
+            group * n_voxels,
+            [
+                edep,
+                voxel_mass,
+                n_voxels,
+                float(per_batch),
+                float(ENERGY_QUANTUM_MEV),
+                s1,
+                s2,
+                total_q,
+            ],
+            device,
+            stream,
+        )
+
+    def _run_dij_group_lanes(
+        self,
+        lane_resources,
+        fold_stream,
+        group_start,
+        group,
+        n_batches,
+        chunk,
+        block_histories,
+        lattice_bounds,
+        shard,
+        route_args,
+        fold_args,
+    ) -> None:
+        """Transport up to ``len(lane_resources)`` batches of one group concurrently.
+
+        Each lane is a host thread driving its own CUDA stream: lane ``l`` takes
+        batches ``l, l+lanes, ...``, so the batch-to-lane map is static and the
+        transports are fully independent (private queues, slots, quanta map; the
+        shared energy counters take int64 atomics, order-independent by integer
+        associativity).
+
+        The one float64 reduction — the fold of batch sums into ``s1``/``s2`` — is
+        forced into batch order: a lane finishing batch ``b`` waits its turn on the
+        shared counter, issues the fold on the single fold stream, and synchronizes
+        it before releasing the next turn (and before reusing its own quanta map).
+        The fold sequence is therefore the identical left fold the sequential path
+        performs, which is what makes ``concurrent_batches`` bitwise inert
+        (test-pinned). The wait costs little: folds are one cheap pass over
+        ``group * n_voxels`` against a whole batch transport.
+
+        The pre-sampled route's host-side emitted sums are collected per batch and
+        folded into the shard in batch order after the join, so that float sum
+        cannot depend on lane timing either.
+        """
+        device = route_args["device"]
+        lanes = len(lane_resources)
+        # The group-start zeroing and any bounds upload ran on the default stream;
+        # order them before the first lane-stream launch.
+        wp.synchronize_device(device)
+        state = {"next_fold": 0, "failed": False}
+        cond = threading.Condition()
+        emitted_by_batch = [0.0] * n_batches
+
+        def lane(lane_index: int) -> None:
+            res = lane_resources[lane_index]
+            try:
+                for b in range(lane_index, n_batches, lanes):
+                    _launch(kernels.fill_int64, len(res.edep), [res.edep, 0], device, res.stream)
+                    emitted_by_batch[b] = self._run_dij_batch(
+                        res,
+                        group_start,
+                        group,
+                        b,
+                        chunk,
+                        block_histories,
+                        lattice_bounds,
+                        **route_args,
+                    )
+                    # Transport is complete on the device here: the drain loop's
+                    # final count readback synchronized the lane stream.
+                    with cond:
+                        while state["next_fold"] != b and not state["failed"]:
+                            cond.wait()
+                        if state["failed"]:
+                            return
+                        self._fold_dij_batch(res.edep, group, fold_stream, **fold_args)
+                        wp.synchronize_stream(fold_stream)
+                        state["next_fold"] = b + 1
+                        cond.notify_all()
+            except BaseException:
+                with cond:
+                    state["failed"] = True
+                    cond.notify_all()
+                raise
+
+        with ThreadPoolExecutor(max_workers=lanes) as pool:
+            futures = [pool.submit(lane, index) for index in range(lanes)]
+            for f in futures:
+                f.result()
+        for emitted in emitted_by_batch:
+            shard.emitted_energy += emitted
 
     # -- internals --------------------------------------------------------------
 
@@ -1017,37 +1523,48 @@ class WarpEngine:
             device,
         )
 
-    def _seed_queue(self, queue, seed, hist_g, beamlet_g, kind_g, batch, mask, device) -> None:
+    def _seed_queue(
+        self, queue, seed, hist_g, beamlet_g, kind_g, batch, mask, device, stream=None
+    ) -> None:
         """Upload one kind-group's primaries (tagged by ``beamlet_g``) into ``queue``."""
         n = int(hist_g.shape[0])
         if n == 0:
-            _set_count(queue, 0, device)
+            _set_count(queue, 0, device, stream)
             return
-        cols = {
+        uploads = {
             name: wp.array(batch[name][mask], dtype=float, device=device)
             for name in ("energy", "x", "y", "z", "ux", "uy", "uz", "weight")
         }
-        wp.launch(
+        uploads["hist"] = wp.array(hist_g, dtype=wp.int32, device=device)
+        uploads["beamlet"] = wp.array(beamlet_g, dtype=wp.int32, device=device)
+        uploads["kind"] = wp.array(kind_g, dtype=wp.int32, device=device)
+        if stream is not None:
+            # Host uploads run on the device's *default* stream; the launch below
+            # runs on the lane's. Wait for the copies (only — other lanes' streams
+            # are untouched) so the lane cannot read a half-arrived buffer.
+            wp.synchronize_stream(wp.get_stream(device))
+        _launch(
             kernels.generate_from_upload,
-            dim=n,
-            inputs=[
+            n,
+            [
                 seed,
-                wp.array(hist_g, dtype=wp.int32, device=device),
-                wp.array(beamlet_g, dtype=wp.int32, device=device),
-                wp.array(kind_g, dtype=wp.int32, device=device),
-                cols["energy"],
-                cols["x"],
-                cols["y"],
-                cols["z"],
-                cols["ux"],
-                cols["uy"],
-                cols["uz"],
-                cols["weight"],
+                uploads["hist"],
+                uploads["beamlet"],
+                uploads["kind"],
+                uploads["energy"],
+                uploads["x"],
+                uploads["y"],
+                uploads["z"],
+                uploads["ux"],
+                uploads["uy"],
+                uploads["uz"],
+                uploads["weight"],
                 queue,
             ],
-            device=device,
+            device,
+            stream,
         )
-        _set_count(queue, n, device)
+        _set_count(queue, n, device, stream)
 
     def _drain_queues(
         self,
@@ -1071,15 +1588,22 @@ class WarpEngine:
         transport_electrons,
         dose_to_water,
         device,
+        stream=None,
+        staging=None,
     ) -> None:
-        """Ping-pong the photon and electron kernels until every queue is empty."""
+        """Ping-pong the photon and electron kernels until every queue is empty.
+
+        With ``stream`` set (a Dij batch lane), every launch, count reset, and
+        count readback is ordered on that stream, so lanes on the same device
+        never observe each other's queues.
+        """
         while True:
-            n_photon = _queue_count(q_photon)
+            n_photon = _queue_count(q_photon, stream, staging)
             if n_photon > 0:
-                wp.launch(
+                _launch(
                     kernels.photon_kernel,
-                    dim=n_photon,
-                    inputs=[
+                    n_photon,
+                    [
                         gi,
                         si,
                         density,
@@ -1099,17 +1623,18 @@ class WarpEngine:
                         dose_to_water,
                         violations,
                     ],
-                    device=device,
+                    device,
+                    stream,
                 )
-                _reset_count(q_photon, device)
+                _reset_count(q_photon, device, stream)
                 q_photon, q_photon_alt = q_photon_alt, q_photon
 
-            n_electron = _queue_count(q_electron)
+            n_electron = _queue_count(q_electron, stream, staging)
             if n_electron > 0:
-                wp.launch(
+                _launch(
                     kernels.electron_kernel,
-                    dim=n_electron,
-                    inputs=[
+                    n_electron,
+                    [
                         gi,
                         si,
                         density,
@@ -1127,9 +1652,10 @@ class WarpEngine:
                         ecut,
                         dose_to_water,
                     ],
-                    device=device,
+                    device,
+                    stream,
                 )
-                _reset_count(q_electron, device)
+                _reset_count(q_electron, device, stream)
                 q_electron, q_electron_alt = q_electron_alt, q_electron
 
             if n_photon == 0 and n_electron == 0:
@@ -1177,15 +1703,34 @@ class WarpEngine:
         else:
             raise ValueError(f"unsupported source type {type(source).__name__}")
 
+    def _upload_lattice_bounds(self, source, group_start, group, device):
+        """Upload one group's beamlet bounds once, shared by every batch and lane.
+
+        Hoisted out of the per-batch generation for two reasons: the bounds do not
+        change across batches, and host uploads run on the device's *default*
+        stream — done here, before any lane stream launches, the single
+        ``synchronize_device`` in the group loop orders them for every lane.
+        """
+        bounds = np.array(
+            [source.beamlet_bounds(group_start + k) for k in range(group)], dtype=np.float64
+        )
+        return (
+            wp.array(bounds[:, 0].astype(np.float32), dtype=float, device=device),
+            wp.array((bounds[:, 1] - bounds[:, 0]).astype(np.float32), dtype=float, device=device),
+            wp.array(bounds[:, 2].astype(np.float32), dtype=float, device=device),
+            wp.array((bounds[:, 3] - bounds[:, 2]).astype(np.float32), dtype=float, device=device),
+        )
+
     def _generate_group_lattice(
         self,
         source,
+        lattice_bounds,
         group_start,
         group,
         seed,
         n_per,
         per_batch,
-        n_batches,
+        batch,
         correlated,
         chunk,
         block_histories,
@@ -1206,33 +1751,25 @@ class WarpEngine:
         transport_electrons,
         dose_to_water,
         device,
+        stream=None,
+        staging=None,
     ) -> None:
-        """Built-in lattice: generate the whole group's block in-kernel, in flat chunks."""
-        bounds = np.array(
-            [source.beamlet_bounds(group_start + k) for k in range(group)], dtype=np.float64
-        )
-        x_lo = wp.array(bounds[:, 0].astype(np.float32), dtype=float, device=device)
-        x_extent = wp.array(
-            (bounds[:, 1] - bounds[:, 0]).astype(np.float32), dtype=float, device=device
-        )
-        y_lo = wp.array(bounds[:, 2].astype(np.float32), dtype=float, device=device)
-        y_extent = wp.array(
-            (bounds[:, 3] - bounds[:, 2]).astype(np.float32), dtype=float, device=device
-        )
+        """Built-in lattice: generate one batch of the group's block in-kernel, in chunks."""
+        x_lo, x_extent, y_lo, y_extent = lattice_bounds
         t = 0
         while t < block_histories:
             n_chunk = min(chunk, block_histories - t)
             for q in queues:
-                _reset_count(q, device)
-            wp.launch(
+                _reset_count(q, device, stream)
+            _launch(
                 kernels.generate_beamlet_lattice,
-                dim=n_chunk,
-                inputs=[
+                n_chunk,
+                [
                     seed,
                     group_start,
                     n_per,
                     per_batch,
-                    n_batches,
+                    batch,
                     t,
                     1 if correlated else 0,
                     source.energy,
@@ -1244,9 +1781,10 @@ class WarpEngine:
                     slots,
                     queues[0],
                 ],
-                device=device,
+                device,
+                stream,
             )
-            _set_count(queues[0], n_chunk, device)
+            _set_count(queues[0], n_chunk, device, stream)
             self._drain_queues(
                 queues[0],
                 queues[1],
@@ -1268,6 +1806,8 @@ class WarpEngine:
                 transport_electrons,
                 dose_to_water,
                 device,
+                stream,
+                staging,
             )
             t += n_chunk
 
@@ -1279,7 +1819,7 @@ class WarpEngine:
         seed,
         n_per,
         per_batch,
-        n_batches,
+        batch,
         correlated,
         chunk,
         block_histories,
@@ -1301,11 +1841,13 @@ class WarpEngine:
         dose_to_water,
         emitted,
         device,
+        stream=None,
+        staging=None,
     ) -> None:
-        """Advanced Dij route: generate the group's block in-kernel via a wrapped sampler.
+        """Advanced Dij route: generate one batch of the group in-kernel via a sampler.
 
-        Same flat-block chunking as the built-in lattice, but the per-primary position
-        comes from the user's ``warp_beamlet_sampler`` (wrapped by
+        Same per-batch block chunking as the built-in lattice, but the per-primary
+        position comes from the user's ``warp_beamlet_sampler`` (wrapped by
         :func:`~pyRadMC.backends.warp.kernels.make_beamlet_generator_kernel`) instead of
         analytic bounds; the wrapper books emitted energy into ``emitted``.
         """
@@ -1313,25 +1855,26 @@ class WarpEngine:
         while t < block_histories:
             n_chunk = min(chunk, block_histories - t)
             for q in queues:
-                _reset_count(q, device)
-            wp.launch(
+                _reset_count(q, device, stream)
+            _launch(
                 generator,
-                dim=n_chunk,
-                inputs=[
+                n_chunk,
+                [
                     seed,
                     group_start,
                     n_per,
                     per_batch,
-                    n_batches,
+                    batch,
                     t,
                     1 if correlated else 0,
                     slots,
                     emitted,
                     queues[0],
                 ],
-                device=device,
+                device,
+                stream,
             )
-            _set_count(queues[0], n_chunk, device)
+            _set_count(queues[0], n_chunk, device, stream)
             self._drain_queues(
                 queues[0],
                 queues[1],
@@ -1353,6 +1896,8 @@ class WarpEngine:
                 transport_electrons,
                 dose_to_water,
                 device,
+                stream,
+                staging,
             )
             t += n_chunk
 
@@ -1364,7 +1909,7 @@ class WarpEngine:
         seed,
         n_per,
         per_batch,
-        n_batches,
+        batch,
         correlated,
         chunk,
         gi,
@@ -1384,33 +1929,38 @@ class WarpEngine:
         transport_electrons,
         dose_to_water,
         device,
+        stream=None,
+        staging=None,
     ) -> float:
-        """Host pre-sample each beamlet's primaries and upload them, tagged for the Dij.
+        """Host pre-sample one batch of each beamlet's primaries and upload them.
 
-        For beamlet ``j`` the within-beamlet index ``r`` keys the transport RNG on ``r``
-        (correlated) or ``h = j*n_per + r`` (independent) — the mapping
-        ``ReferenceEngine.run_dij`` defines — and the column tag is
-        ``local * n_batches + (r // per_batch)`` into the group's dense buffer, so the
-        result is bit-invariant to grouping/chunking. Every beamlet primary is a photon
-        at the sampled energy/position carrying the sampled statistical weight (the
-        collimated sources attenuate by weight), and the emitted book sums
-        ``weight * energy``, matching the reference Dij. Returns the group's emitted
-        energy.
+        For beamlet ``j`` the within-beamlet index ``r = batch*per_batch + i`` keys the
+        transport RNG on ``r`` (correlated) or ``h = j*n_per + r`` (independent) — the
+        mapping ``ReferenceEngine.run_dij`` defines — and the column tag is ``local``,
+        the batch being separated in time instead (see ``accumulate_dij_batch``), so the
+        result is bit-invariant to grouping/chunking. Only this batch's ``per_batch``
+        primaries are sampled, at history offset ``offset + batch*per_batch``:
+        ``_presample`` keys each history on ``init_state(seed, history_offset + i)``, so
+        a per-batch sub-range yields exactly the primaries the full-range sample would
+        have put at those indices. Every beamlet primary is a photon at the sampled
+        energy/position carrying the sampled statistical weight (the collimated sources
+        attenuate by weight), and the emitted book sums ``weight * energy``, matching
+        the reference Dij. Returns this batch's emitted energy for the group.
         """
         emitted = 0.0
         for local in range(group):
             beamlet = group_start + local
-            offset = 0 if correlated else beamlet * n_per
-            cols = source.sample_beamlet_batch(seed, offset, n_per, beamlet)
+            offset = (0 if correlated else beamlet * n_per) + batch * per_batch
+            cols = source.sample_beamlet_batch(seed, offset, per_batch, beamlet)
             emitted += float(
                 np.sum(cols["weight"].astype(np.float64) * cols["energy"].astype(np.float64))
             )
-            r = np.arange(n_per, dtype=np.int64)
-            key = (offset + r).astype(np.int32)
-            tag = (local * n_batches + (r // per_batch)).astype(np.int32)
+            i = np.arange(per_batch, dtype=np.int64)
+            key = (offset + i).astype(np.int32)
+            tag = np.full(per_batch, local, dtype=np.int32)
             r0 = 0
-            while r0 < n_per:
-                r1 = min(r0 + chunk, n_per)
+            while r0 < per_batch:
+                r1 = min(r0 + chunk, per_batch)
                 nc = r1 - r0
                 sub = slice(r0, r1)
                 sub_batch = {
@@ -1418,7 +1968,7 @@ class WarpEngine:
                     for name in ("energy", "x", "y", "z", "ux", "uy", "uz", "weight")
                 }
                 for q in queues:
-                    _reset_count(q, device)
+                    _reset_count(q, device, stream)
                 self._seed_queue(
                     queues[0],
                     seed,
@@ -1428,6 +1978,7 @@ class WarpEngine:
                     sub_batch,
                     np.ones(nc, dtype=bool),
                     device,
+                    stream,
                 )
                 self._drain_queues(
                     queues[0],
@@ -1450,6 +2001,8 @@ class WarpEngine:
                     transport_electrons,
                     dose_to_water,
                     device,
+                    stream,
+                    staging,
                 )
                 r0 = r1
         return emitted
@@ -1471,7 +2024,7 @@ class WarpEngine:
     def _upload_tables(self, e_max: float, pcut: float, ecut: float, device: str) -> Tables:
         host = self.cross_sections.build_tables(ecut=ecut, pcut=pcut, e_max=e_max * _E_MAX_MARGIN)
         tab = Tables()
-        for field in (
+        for table_name in (
             "mu_compton",
             "mu_photo",
             "mu_pair",
@@ -1485,8 +2038,8 @@ class WarpEngine:
         ):
             setattr(
                 tab,
-                field,
-                wp.array(getattr(host, field).astype(np.float32), dtype=float, device=device),
+                table_name,
+                wp.array(getattr(host, table_name).astype(np.float32), dtype=float, device=device),
             )
         tab.coherent_x = wp.array(host.coherent_x.astype(np.float32), dtype=float, device=device)
         tab.coherent_cumulative = wp.array(
