@@ -20,6 +20,7 @@ from pyRadMC.backends.results import TransportResult
 from pyRadMC.data.interface import CrossSectionSource
 from pyRadMC.geometry.grid import VoxelGrid
 from pyRadMC.geometry.source import BeamletSource, Source
+from pyRadMC.progress import ProgressCallback, ProgressEmitter
 from pyRadMC.rng.interface import RNG
 from pyRadMC.scoring.dij import BatchedBeamletScorer, DijAssembler, DijResult
 from pyRadMC.scoring.dose import BatchedDoseScorer
@@ -79,6 +80,7 @@ class ReferenceEngine:
         primary_kind: str = "photon",
         scoring_grid: ScoringGrid | None = None,
         scoring_mode: str = "dose_to_medium",
+        progress: ProgressCallback | None = None,
     ) -> TransportResult:
         """Transport ``n_histories`` primaries in ``n_batches`` equal batches.
 
@@ -125,6 +127,13 @@ class ReferenceEngine:
             :mod:`pyRadMC.scoring.dose_to_water`): transport is identical, only
             the per-deposit tally weighting differs, and the energy books stay
             physical in both modes. Requires ``transport_electrons=True``.
+        progress
+            Optional callback invoked with a :class:`~pyRadMC.progress.ProgressEvent`
+            once per completed batch (``n_batches`` ticks total, each covering
+            ``n_histories / n_batches`` histories). See
+            :mod:`pyRadMC.progress` — the same tick cadence as
+            :meth:`~pyRadMC.backends.warp.engine.WarpEngine.run`, so a callback
+            written against one backend behaves identically against the other.
         """
         if n_histories < 1:
             raise ValueError(f"need at least one history, got {n_histories}")
@@ -145,6 +154,7 @@ class ReferenceEngine:
         per_batch = n_histories // n_batches
         energy_emitted = 0.0
         energy_escaped = 0.0
+        emitter = ProgressEmitter(progress, n_histories)
 
         history = 0
         for _ in range(n_batches):
@@ -181,6 +191,7 @@ class ReferenceEngine:
                     deposit_weight=deposit_weight,
                 )
             scorer.end_batch(per_batch)
+            emitter.tick(per_batch)
 
         dose = scorer.finalize()
         return TransportResult(
@@ -208,6 +219,7 @@ class ReferenceEngine:
         correlated: bool = True,
         scoring_grid: ScoringGrid | None = None,
         scoring_mode: str = "dose_to_medium",
+        progress: ProgressCallback | None = None,
     ) -> DijResult:
         """Compute the beamlet-resolved dose influence matrix over the lattice.
 
@@ -268,6 +280,16 @@ class ReferenceEngine:
         scoring_mode
             Tally weighting of the columns, as in :meth:`run`; recorded in
             ``DijResult.scoring_mode``.
+        progress
+            Optional callback, as in :meth:`run`. Ticks once per completed batch
+            (``n_batches`` ticks total), each covering
+            ``n_beamlets * n_histories_per_beamlet / n_batches`` histories — this
+            engine iterates batch-outer, beamlet-inner, so a batch spans every
+            beamlet. :meth:`~pyRadMC.backends.warp.engine.WarpEngine.run_dij`
+            ticks on a different axis (per beamlet group, not per batch): both
+            reach the same total, but tick count and spacing differ between
+            backends. Treat ``histories_done / histories_total`` as the portable
+            signal (see :mod:`pyRadMC.progress`).
         """
         if n_histories_per_beamlet < 1:
             raise ValueError(
@@ -288,6 +310,7 @@ class ReferenceEngine:
         scorer = BatchedBeamletScorer(scoring, n_batches, n_beamlets)
         energy_emitted = 0.0
         energy_escaped = 0.0
+        emitter = ProgressEmitter(progress, n_beamlets * n_histories_per_beamlet)
 
         for batch in range(n_batches):
             for beamlet in range(n_beamlets):
@@ -318,6 +341,7 @@ class ReferenceEngine:
                         deposit_weight=deposit_weight,
                     )
             scorer.end_batch(per_batch)
+            emitter.tick(n_beamlets * per_batch)
 
         block = scorer.finalize()
         assembler = DijAssembler(

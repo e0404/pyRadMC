@@ -575,6 +575,33 @@ dose-to-water (no tracked electron to evaluate the ratio on).
 ``examples/dose_grid_demo.py`` is the runnable demonstration (2 mm transport vs
 3 mm dose grid, subregion ledger, and the bone/lung D_w/D_m profile).
 
+**Progress callback — DONE 2026-07-18** (maintainer-requested; adjacent to the
+pyRadPlan adapter, which currently only sees beam-level completion). New
+``pyRadMC/progress.py``: a dependency-free ``ProgressEvent``
+(``histories_done``/``histories_total``/``elapsed_s``/``rate_hz``) and
+``ProgressEmitter``, a thread-safe fan-in a caller passes as
+``progress=`` to ``run``/``run_dij`` on both engines. Ticks land at
+existing hard-sync points, so no new syncs are introduced: per batch for
+``run`` on both backends and for ``ReferenceEngine.run_dij`` (batch-outer,
+beamlet-inner), per **beamlet group** for ``WarpEngine.run_dij`` (group-outer,
+scheduled off the shared device work queue) — the two Dij backends tick on
+different axes that both sum to the same total, so a consumer should read
+``histories_done / histories_total`` as the portable signal, not tick count.
+The emitter is shared across every ``devices=[...]`` shard thread; its lock
+serializes the update-and-dispatch, so the callback is never invoked
+concurrently and always sees strictly increasing ``histories_done`` regardless
+of which device finishes a group first (``concurrent_batches`` lanes do not
+tick individually — only the shard's per-group point does). Every tick also
+logs at ``DEBUG`` on ``logging.getLogger("pyRadMC.progress")``, callback or
+not, so a caller gets a trace for free without wiring anything (AGENTS.md
+section 5). Purely a host-side observation hook — no RNG stream or fold order
+changes, so bit-identity and statistical tests are unaffected; pinned in
+``tests/unit/test_progress.py`` (the emitter's concurrency guarantee, isolated
+from transport) and ``tests/dij/test_dij_progress.py`` (both backends, both
+methods, plus the multi-device/concurrent-batches fan-in, GPU-gated). The
+pyRadPlan-side bridge into its own ``ProgressReporter``/``StatusReport`` is
+adapter work, out of scope here (section 6).
+
 Phases 0 through 4 have exited. Phase 4's exit record is reproduced below — it defines
 the machinery Phase 5 builds on and carries the warnings that target Phase 5;
 earlier records live in the git history of this section.

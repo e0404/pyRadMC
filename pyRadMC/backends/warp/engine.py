@@ -55,6 +55,7 @@ from pyRadMC.geometry.source import (
     PencilBeamSource,
     Source,
 )
+from pyRadMC.progress import ProgressCallback, ProgressEmitter
 from pyRadMC.scoring.dij import DijAssembler, DijResult
 from pyRadMC.scoring.dose_to_water import validate_scoring_mode
 from pyRadMC.scoring.grid import ScoringGrid
@@ -230,6 +231,7 @@ class WarpEngine:
         primary_kind: str = "photon",
         scoring_grid: ScoringGrid | None = None,
         scoring_mode: str = "dose_to_medium",
+        progress: ProgressCallback | None = None,
     ) -> TransportResult:
         """Transport ``n_histories`` primaries; same contract as the reference engine.
 
@@ -238,12 +240,14 @@ class WarpEngine:
         included: the dose grid deposits accumulate on, default the transport grid,
         with off-grid deposits booked to ``energy_unscored``; and ``scoring_mode``:
         dose-to-water weights each deposit in-kernel by the stopping-power ratio
-        from the flattened tables while the books stay physical). A source with an
-        in-kernel generator (the built-in mono beams) is generated on-device from
-        analytic parameters, all of one ``primary_kind``. Any other source (a phase
-        space, or a user :class:`~pyRadMC.geometry.source.Source`) is transported by
-        host-sampling each chunk via ``sample_batch`` and seeding the photon and
-        electron queues by the per-record kind; ``primary_kind`` is then ignored and
+        from the flattened tables while the books stay physical; ``progress``: one
+        tick per completed batch, the identical cadence to the reference engine —
+        see :mod:`pyRadMC.progress`). A source with an in-kernel generator (the
+        built-in mono beams) is generated on-device from analytic parameters, all
+        of one ``primary_kind``. Any other source (a phase space, or a user
+        :class:`~pyRadMC.geometry.source.Source`) is transported by host-sampling
+        each chunk via ``sample_batch`` and seeding the photon and electron queues
+        by the per-record kind; ``primary_kind`` is then ignored and
         ``energy_emitted`` is booked from the sampled records.
         """
         if n_histories < 1:
@@ -314,6 +318,7 @@ class WarpEngine:
         energy_unscored = 0.0
         energy_deposited = 0.0  # dose-to-water physical book (summed per-batch counter)
         energy_emitted = 0.0
+        emitter = ProgressEmitter(progress, n_histories)
 
         history = 0
         for _ in range(n_batches):
@@ -453,6 +458,7 @@ class WarpEngine:
             energy_unscored += float(unscored.numpy()[0]) * ENERGY_QUANTUM_MEV
             if dose_to_water != 0:
                 energy_deposited += float(deposited.numpy()[0]) * ENERGY_QUANTUM_MEV
+            emitter.tick(per_batch)
 
         if in_kernel:
             # Mono beams: every primary is one unit-weight photon at the beam energy
@@ -500,6 +506,7 @@ class WarpEngine:
         scoring_mode: str = "dose_to_medium",
         devices: Sequence[str] | None = None,
         concurrent_batches: int = 1,
+        progress: ProgressCallback | None = None,
     ) -> DijResult:
         """Compute the Dij over the lattice; same contract as the reference engine.
 
@@ -572,6 +579,21 @@ class WarpEngine:
         shrinks the per-group device buffer and the sparse Dij cubically while
         transport keeps the full CT resolution. ``scoring_mode`` weights the
         column tallies as in :meth:`run`; the energy books stay physical.
+        progress
+            Optional callback, as in :meth:`run` (see :mod:`pyRadMC.progress`).
+            Ticks once per **beamlet group** drained (``ceil(n_beamlets /
+            beamlet_group_size)`` ticks total), each covering that group's full
+            ``group_size * n_histories_per_beamlet`` histories across all of its
+            batches — a different axis from the reference engine's per-batch
+            ticks, since this engine schedules groups off a shared queue rather
+            than iterating batches outermost. Both reach the same total; treat
+            ``histories_done / histories_total`` as the portable signal, not tick
+            count or spacing. One :class:`~pyRadMC.progress.ProgressEmitter` is
+            shared across every device shard and, within a shard, is unaffected
+            by ``concurrent_batches`` (only the shard's outer per-group point
+            ticks): the emitter's own lock serializes ticks arriving from
+            multiple device threads, so the callback is thread-safe without any
+            extra care on the caller's part.
         """
         if n_histories_per_beamlet < 1:
             raise ValueError(
@@ -627,6 +649,7 @@ class WarpEngine:
             scoring_mode=scoring_mode,
         )
 
+        emitter = ProgressEmitter(progress, n_beamlets * n_histories_per_beamlet)
         args = dict(
             source=source,
             n_histories_per_beamlet=n_histories_per_beamlet,
@@ -642,6 +665,7 @@ class WarpEngine:
             scoring=scoring,
             dose_to_water=dose_to_water,
             concurrent_batches=concurrent_batches,
+            emitter=emitter,
         )
         # Kernel modules are loaded up front whenever any host thread beyond this
         # one will launch (device workers or batch lanes): warp's module loading is
@@ -712,6 +736,7 @@ class WarpEngine:
         scoring: ScoringGrid,
         dose_to_water: int,
         concurrent_batches: int,
+        emitter: ProgressEmitter,
     ) -> _DijShard:
         """Pull beamlet groups from the shared queue and run them on one device.
 
@@ -879,6 +904,7 @@ class WarpEngine:
                     "The geometry contains material or density the majorant "
                     "declaration did not cover."
                 )
+            emitter.tick(group * n_histories_per_beamlet)
             # Turn the group's accumulated sums into per-column dose mean and sigma,
             # in place: each thread reads s1[tid]/s2[tid] and writes only its own
             # element, so aliasing the outputs onto the inputs is safe and saves two
