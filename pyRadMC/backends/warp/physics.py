@@ -113,6 +113,13 @@ def _load() -> types.SimpleNamespace:
         "pyRadMC.data.handles": _make_handles_shim(),
     }
 
+    # Everything importable before the patch window opens. Any pyRadMC module that
+    # first arrives *inside* the window was imported under the shims and may have
+    # bound the kernel-side rng at module level; it must not survive the restore
+    # (the leak recorded in AGENTS.md: geometry.spectrum kept the shim ``uniform``
+    # and broke the reference backend's spectral sources in-process).
+    modules_before = set(sys.modules)
+
     saved_modules = {name: sys.modules.pop(name, None) for name in (*patched, *_KERNEL_MODULES)}
     # Re-importing a submodule also rebinds it as an attribute of its parent
     # package; save those bindings so the host packages are restored exactly.
@@ -147,6 +154,20 @@ def _load() -> types.SimpleNamespace:
                     delattr(parents[name], short_name)
             else:
                 setattr(parents[name], short_name, saved)
+        # Evict pyRadMC modules first imported inside the window (transitive
+        # dependencies of the kernel modules that are not themselves in
+        # _KERNEL_MODULES): they bound the shims and would poison later host
+        # imports. Dropping both the sys.modules entry and the parent-package
+        # attribute forces a clean re-import — `from package import submodule`
+        # returns the stale attribute if only the sys.modules entry goes.
+        for name in set(sys.modules) - modules_before - set(saved_modules):
+            if not name.startswith("pyRadMC"):
+                continue  # third-party imports bind no pyRadMC shims
+            module = sys.modules.pop(name)
+            parent_name, _, short_name = name.rpartition(".")
+            parent = sys.modules.get(parent_name)
+            if parent is not None and getattr(parent, short_name, None) is module:
+                delattr(parent, short_name)
     return namespace
 
 
