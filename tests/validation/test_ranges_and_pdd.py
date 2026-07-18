@@ -52,8 +52,17 @@ def test_electron_r50_tracks_the_estar_csda_range(energy: float) -> None:
     """
     result, depth, r_csda = _electron_beam(energy, depth_cm=1.5 * r_csda_estimate(energy), n_z=60)
     dose_z = result.dose.mean(axis=(0, 1))
-    above_half = np.nonzero(dose_z >= 0.5 * dose_z.max())[0]
-    r50 = float(depth[above_half[-1]])
+    # R50 by linear interpolation of the half-maximum crossing. The previous
+    # last-bin-above-half estimator was systematically low by up to one bin
+    # (~0.025 R_CSDA at this n_z), which parked the 2 MeV point close enough to
+    # the window floor that any stream-changing transport edit flipped the test
+    # by seed luck — measured at 262k histories, the physics sits at ~0.75
+    # across stepping configurations. The window itself is unchanged.
+    half = 0.5 * dose_z.max()
+    i = int(np.nonzero(dose_z >= half)[0][-1])
+    dz = float(depth[1] - depth[0])
+    frac = float((dose_z[i] - half) / (dose_z[i] - dose_z[i + 1])) if i + 1 < dose_z.size else 0.5
+    r50 = float(depth[i]) + frac * dz
     assert 0.72 * r_csda <= r50 <= 0.92 * r_csda, (
         f"R50({energy} MeV) = {r50:.2f} cm vs R_CSDA = {r_csda:.2f} cm (ratio {r50 / r_csda:.2f})"
     )

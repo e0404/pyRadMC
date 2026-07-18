@@ -20,11 +20,15 @@ One particle at a time, for the reference backend. The scheme, per AGENTS.md 7.2
   511 keV photons wherever they stop; a positron leaving the grid carries its
   annihilation energy with it.
 
-Substeps are limited to a fraction of the CSDA range (energy-loss accuracy) and of
-the smallest voxel edge (heterogeneity accuracy). The reference backend keeps both
-conservative; the Warp backend mirrors this loop step for step and is validated
-against it — step aggressiveness beyond it must be bought with better transport
-mechanics, not by loosening the oracle.
+Substeps are limited three ways: a fraction of the CSDA range (energy-loss
+accuracy), a mean-square hinge-angle ceiling (multiple-scattering accuracy — the
+angular cap that replaced the historic half-voxel-edge limit; see
+:data:`STEP_HINGE_THETA2_MAX`), and truncation at the next voxel face
+(heterogeneity: a substep's density and material are exactly those of the voxel
+it runs in). The reference backend keeps the caps conservative; the Warp backend
+mirrors this loop step for step and is validated against it — step aggressiveness
+beyond it must be bought with better transport mechanics, not by loosening the
+oracle.
 
 Electrons at or below ECUT deposit their kinetic energy locally and terminate.
 """
@@ -61,7 +65,7 @@ from pyRadMC.transport.particles import (
 __all__ = [
     "BOUNDARY_NUDGE_CM",
     "STEP_ENERGY_FRACTION",
-    "STEP_VOXEL_FRACTION",
+    "STEP_HINGE_THETA2_MAX",
     "electron_steps",
 ]
 
@@ -73,11 +77,20 @@ Moller cross-section and scattering power at the substep's *initial* energy stay
 sub-percent approximation. Conservative on purpose: this is the oracle.
 """
 
-STEP_VOXEL_FRACTION: float = 0.5
-"""Maximum substep length as a fraction of the smallest voxel edge.
+STEP_HINGE_THETA2_MAX: float = 0.10
+"""Maximum mean-square hinge deflection per substep, in rad^2.
 
-Keeps the two continuous-deposit midpoints resolving the voxel structure and bounds
-the error of using one voxel's density for a substep that grazes a neighbour.
+The Gaussian random-hinge model's validity is *angular*, so the limiter is
+angular: the substep is capped at ``theta2_max / (T(E) rho)`` with the mass
+scattering power ``T``, bounding each hinge's accumulated ``<theta^2>``
+directly. Because ``T ~ 1/E^2`` outruns the shrinking range, a
+fraction-of-range cap alone lets hinge angles *grow* as the electron slows —
+the low-energy under-ranging the R50 validation gate caught when the historic
+half-voxel-edge cap (whose protection was an accident of voxel size; see the
+a6b6c07 revert) was removed without a replacement. This cap binds below a few
+MeV in water and leaves high-energy steps to the energy cap; heterogeneity is
+handled exactly by the voxel-face truncation below. The value is validated by
+the R50/R_CSDA detour-factor gates; do not change it without rerunning them.
 """
 
 _ENTRY_NUDGE_CM = 1.0e-9  # same convention as the photon loop
@@ -133,7 +146,6 @@ def electron_steps(
     escaped = 0.0
     e = energy
     w = weight
-    min_spacing = min(grid.spacing)
     latent = 2.0 * ELECTRON_MASS_MEV if is_positron else 0.0
 
     # Vacuum flight for a primary born outside the phantom (electron beams).
@@ -188,7 +200,8 @@ def electron_steps(
 
         # --- substep length --------------------------------------------------------
         range_cm = cross_sections.csda_range(e, material) / rho
-        s_max = min(STEP_ENERGY_FRACTION * range_cm, STEP_VOXEL_FRACTION * min_spacing)
+        s_theta = STEP_HINGE_THETA2_MAX / (cross_sections.scattering_power(e, material) * rho)
+        s_max = min(STEP_ENERGY_FRACTION * range_cm, s_theta)
         # Cap at the next voxel face (plus the nudge across it) so the substep's
         # density and material stay those of the voxel it starts in.
         s_boundary = (
@@ -207,13 +220,18 @@ def electron_steps(
         # geometry-truncated substep ends at the boundary with no interaction.
         moller_pending = s_interaction <= s_geometry
 
-        # --- continuous loss over the substep ---------------------------------------
-        de = cross_sections.restricted_stopping_power(e, material, ecut) * rho * s
-        if de >= e - ecut:
-            # The electron ranges out inside this substep: shorten it linearly.
-            s *= (e - ecut) / de
+        # --- continuous loss over the substep (exact, DPM-style) --------------------
+        # E_end = r^-1(r(E) - rho*s) with the restricted-collision range, replacing
+        # the first-order S(E_start)*rho*s linearization; the range-out shortening
+        # is exact by the same map. Sempau et al. 2000, doi:10.1088/0031-9155/45/8/315.
+        available = cross_sections.restricted_range(e, material, ecut)
+        if rho * s >= available:
+            # The electron ranges out inside this substep.
+            s = available / rho
             de = e - ecut
             moller_pending = False
+        else:
+            de = e - cross_sections.energy_after_mass_path(e, material, ecut, rho * s)
         emit_probability, local_brems = bremsstrahlung_step_parameters(
             e, cross_sections.radiative_stopping_power(e, material), rho, s, pcut
         )

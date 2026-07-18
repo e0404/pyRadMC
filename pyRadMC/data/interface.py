@@ -34,6 +34,14 @@ if TYPE_CHECKING:
 
 __all__ = ["CrossSectionSource", "PhotonProcess"]
 
+_RANGE_GRID_E_MAX: float = 64.0
+"""Upper edge (MeV) of the cached restricted-range grid: comfortably above the
+1-20 MeV engine scope; queries clamp to it."""
+
+_RANGE_GRID_POINTS: int = 4096
+"""Nodes of the cached range grid; trapezoid error at this log spacing sits far
+below the 1e-4 pins of the derivative and round-trip tests."""
+
 
 class PhotonProcess:
     """Enumeration of photon interaction channels.
@@ -184,6 +192,77 @@ class CrossSectionSource(ABC):
 
         Drives the multiple-elastic-scattering hinge deflection.
         """
+
+    # -- restricted-collision range (concrete: derived from the queries above) --
+
+    def restricted_range(self, energy: float, material: int, delta_cut: float) -> float:
+        r"""Restricted-collision range down to ``delta_cut``, in g/cm^2.
+
+        .. math::
+
+            r(E) = \int_{\Delta}^{E} \frac{dE'}{S_{col}(E', \Delta)}
+
+        with the *restricted collision* stopping power of
+        :meth:`restricted_stopping_power` — radiative and discrete-Moller losses
+        are booked separately by the Class II scheme, so this is exactly the mass
+        path over which the transport loop's continuous loss takes ``E`` to the
+        cutoff. Together with :meth:`energy_after_mass_path` it defines the
+        exact-energy-loss substep (DPM; Sempau et al. 2000,
+        doi:10.1088/0031-9155/45/8/315), replacing the first-order
+        ``S(E_start) * rho * s`` linearization.
+
+        Concrete on the interface: implementations answer through
+        :meth:`restricted_stopping_power`, so the range can never disagree with
+        the stopping power it integrates (trapezoid on a dense log grid, cached
+        per ``(material, delta_cut)``; node count pinned by the derivative and
+        round-trip tests).
+        """
+        log_e, cumulative = self._range_grid(material, delta_cut)
+        e = min(max(energy, delta_cut), _RANGE_GRID_E_MAX)
+        return float(np.interp(np.log(e), log_e, cumulative))
+
+    def energy_after_mass_path(
+        self, energy: float, material: int, delta_cut: float, mass_path: float
+    ) -> float:
+        """Energy after a continuous-loss mass path, ``r^-1(r(E) - mass_path)``.
+
+        Clamped to ``[delta_cut, energy]``: a path at or beyond the remaining
+        range returns exactly ``delta_cut`` (the loop's range-out branch), and
+        interpolation wiggle can never *gain* energy.
+        """
+        log_e, cumulative = self._range_grid(material, delta_cut)
+        remaining = self.restricted_range(energy, material, delta_cut) - mass_path
+        if remaining <= 0.0:
+            return delta_cut
+        e_end = float(np.exp(np.interp(remaining, cumulative, log_e)))
+        return min(max(e_end, delta_cut), energy)
+
+    def _range_grid(
+        self, material: int, delta_cut: float
+    ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
+        """Return the cached ``(log E nodes, cumulative range)`` grid for one key."""
+        cache: (
+            dict[tuple[int, float], tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]] | None
+        ) = getattr(self, "_restricted_range_cache", None)
+        if cache is None:
+            cache = {}
+            self._restricted_range_cache = cache
+        key = (material, delta_cut)
+        grids = cache.get(key)
+        if grids is None:
+            energies = np.geomspace(delta_cut, _RANGE_GRID_E_MAX, _RANGE_GRID_POINTS)
+            inv_s = np.array(
+                [
+                    1.0 / self.restricted_stopping_power(float(e), material, delta_cut)
+                    for e in energies
+                ]
+            )
+            cumulative = np.concatenate(
+                ([0.0], np.cumsum(np.diff(energies) * 0.5 * (inv_s[1:] + inv_s[:-1])))
+            )
+            grids = (np.log(energies), cumulative)
+            cache[key] = grids
+        return grids
 
     # -- construction -------------------------------------------------------
 

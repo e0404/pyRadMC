@@ -17,6 +17,7 @@ import numpy as np
 import pytest
 
 from pyRadMC.backends.ref.engine import ReferenceEngine
+from pyRadMC.backends.warp.kernels import ENERGY_QUANTUM_MEV
 from pyRadMC.data.analytic import AnalyticCrossSections
 from pyRadMC.geometry.grid import VoxelGrid
 from pyRadMC.geometry.source import ParallelBeamSource
@@ -124,7 +125,16 @@ def test_subregion_books_unscored_and_never_clamps(device: str) -> None:
 
     assert sub.energy_unscored > 0.0
     assert sub.energy_escaped == full.energy_escaped
-    assert sub.energy_deposited + sub.energy_unscored == full.energy_deposited
+
+    # The guarantee is exact in int64 *quanta* (quantization happens once, before
+    # routing); comparing in MeV would ask float64 addition to associate — the
+    # quanta sums are the invariant, so reconstruct and compare those.
+    def _quanta(energy_mev: float) -> int:
+        return round(energy_mev / ENERGY_QUANTUM_MEV)
+
+    assert _quanta(sub.energy_deposited) + _quanta(sub.energy_unscored) == _quanta(
+        full.energy_deposited
+    )
     assert sub.energy_deposited + sub.energy_unscored + sub.energy_escaped == pytest.approx(
         sub.energy_emitted, rel=ENERGY_BALANCE_RTOL
     )

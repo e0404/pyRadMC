@@ -58,7 +58,7 @@ from pyRadMC.rng.warp_shim import WarpRNGState, init_slot, spawn_stream, uniform
 from pyRadMC.transport.electron import (
     BOUNDARY_NUDGE_CM,
     STEP_ENERGY_FRACTION,
-    STEP_VOXEL_FRACTION,
+    STEP_HINGE_THETA2_MAX,
 )
 from pyRadMC.transport.particles import ELECTRON, PHOTON, POSITRON
 
@@ -173,12 +173,16 @@ class Tables:
     moller: wp.array2d(dtype=float)
     csda_range: wp.array2d(dtype=float)
     scattering_power: wp.array2d(dtype=float)
+    restricted_range: wp.array2d(dtype=float)
+    energy_of_restricted_range: wp.array2d(dtype=float)
     coherent_x: wp.array(dtype=float)
     coherent_cumulative: wp.array2d(dtype=float)
     p_log_e_min: float
     p_inv_dlog: float
     e_log_e_min: float
     e_inv_dlog: float
+    r_log_min: float
+    r_inv_dlog: float
     n_points: int
     n_coherent: int
 
@@ -1278,7 +1282,13 @@ def electron_kernel(
         range_cm = (
             lookup_2d(tab.csda_range, mat, tab.e_log_e_min, tab.e_inv_dlog, tab.n_points, e) / rho
         )
-        s_max = min(STEP_ENERGY_FRACTION * range_cm, STEP_VOXEL_FRACTION * gi.min_spacing)
+        # Angular cap: bound each hinge's mean-square deflection (see
+        # STEP_HINGE_THETA2_MAX); mirrors the reference loop's s_theta.
+        s_theta = STEP_HINGE_THETA2_MAX / (
+            lookup_2d(tab.scattering_power, mat, tab.e_log_e_min, tab.e_inv_dlog, tab.n_points, e)
+            * rho
+        )
+        s_max = min(STEP_ENERGY_FRACTION * range_cm, s_theta)
         # Cap at the next voxel face (plus the nudge across it) so the substep's
         # density and material stay those of the voxel it starts in.
         s_boundary = (
@@ -1313,18 +1323,28 @@ def electron_kernel(
                 s = s_interaction
                 moller_pending = True
 
-        # --- continuous loss over the substep -----------------------------------
-        de = (
-            lookup_2d(
-                tab.stopping_restricted, mat, tab.e_log_e_min, tab.e_inv_dlog, tab.n_points, e
-            )
-            * rho
-            * s
+        # --- continuous loss over the substep (exact, DPM-style) ----------------
+        # Mirror of the reference loop: E_end = r^-1(r(E) - rho*s) through the
+        # flattened restricted-range table and its inverse; clamped so table
+        # interpolation can never gain energy or undershoot the cutoff.
+        available = lookup_2d(
+            tab.restricted_range, mat, tab.e_log_e_min, tab.e_inv_dlog, tab.n_points, e
         )
-        if de >= e - ecut:
-            s *= (e - ecut) / de
+        if rho * s >= available:
+            s = available / rho
             de = e - ecut
             moller_pending = False
+        else:
+            e_end = lookup_2d(
+                tab.energy_of_restricted_range,
+                mat,
+                tab.r_log_min,
+                tab.r_inv_dlog,
+                tab.n_points,
+                available - rho * s,
+            )
+            e_end = min(max(e_end, ecut), e)
+            de = e - e_end
         emit_probability, local_brems = bremsstrahlung_step_parameters(
             e,
             lookup_2d(

@@ -2142,6 +2142,8 @@ class WarpEngine:
             "moller",
             "csda_range",
             "scattering_power",
+            "restricted_range",
+            "energy_of_restricted_range",
         ):
             setattr(
                 tab,
@@ -2156,6 +2158,8 @@ class WarpEngine:
         tab.p_inv_dlog = host.photon_inv_dlog
         tab.e_log_e_min = host.electron_log_e_min
         tab.e_inv_dlog = host.electron_inv_dlog
+        tab.r_log_min = host.range_log_r_min
+        tab.r_inv_dlog = host.range_inv_dlog
         tab.n_points = host.n_points
         tab.n_coherent = host.n_coherent
         return tab

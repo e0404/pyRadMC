@@ -61,6 +61,11 @@ COHERENT_POINTS: int = 512
 """Nodes on the coherent form-factor momentum-transfer grid; the cumulative is smooth
 and the sampler inverts it, so far fewer nodes than the energy grids suffice."""
 
+_RANGE_R_MIN_FRACTION: float = 1.0e-6
+"""Lowest node of the shared log-range grid as a fraction of the largest
+material's full range: below it the inverse lookup clamps to an energy within
+interpolation error of the cutoff."""
+
 _COHERENT_X_MIN_FRACTION: float = 1.0e-7
 """Lowest momentum-transfer node as a fraction of the maximum: small enough that the
 neglected coherent mass below it (~F(0)^2 x_min^2 / 2) is negligible."""
@@ -161,6 +166,15 @@ class CrossSectionTables:
     stopping_restricted, stopping_radiative, moller, csda_range, scattering_power
         Electron-grid quantities, ``(n_materials, n_points)``; the restricted
         stopping power and Moller cross-section are evaluated at ``ecut``.
+    restricted_range
+        Restricted-collision range to ``ecut`` in g/cm^2 on the electron grid,
+        ``(n_materials, n_points)`` — the exact-energy-loss substep's forward map
+        (:meth:`~pyRadMC.data.interface.CrossSectionSource.restricted_range`).
+    energy_of_restricted_range
+        The inverse map on a *shared* log-range grid, ``(n_materials, n_points)``:
+        the energy whose restricted range equals the node, clamped into each
+        material's own ``[ecut, e_max]``. ``range_log_r_min``/``range_inv_dlog``
+        are its lookup metadata (same log-linear scheme as the energy grids).
     """
 
     n_points: int
@@ -181,6 +195,10 @@ class CrossSectionTables:
     moller: npt.NDArray[np.float64]
     csda_range: npt.NDArray[np.float64]
     scattering_power: npt.NDArray[np.float64]
+    restricted_range: npt.NDArray[np.float64]
+    energy_of_restricted_range: npt.NDArray[np.float64]
+    range_log_r_min: float
+    range_inv_dlog: float
     # Coherent form-factor cumulative A(x) for angular sampling: abscissae ``coherent_x``
     # (momentum transfer, 1/angstrom, ascending) and ``coherent_cumulative`` per material.
     # The default source yields the flat (Thomson) cumulative; the tabulated one its EPDL
@@ -265,6 +283,25 @@ def build_cross_section_tables(
             electron_tables["csda_range"][material, j] = source.csda_range(e, material)
             electron_tables["scattering_power"][material, j] = source.scattering_power(e, material)
 
+    # Restricted-range forward map on the electron grid, plus its inverse on one
+    # shared log-range grid (a common axis keeps the kernel lookup's scalar
+    # metadata; per-material values clamp into their own [ecut, e_max], which the
+    # interface's energy_after_mass_path already guarantees).
+    restricted_range = np.empty((n_materials, n_points))
+    for material in range(n_materials):
+        for j, energy in enumerate(electron_energies):
+            restricted_range[material, j] = source.restricted_range(float(energy), material, ecut)
+    e_top = float(electron_energies[-1])
+    r_top = max(float(restricted_range[m, -1]) for m in range(n_materials))
+    range_nodes = np.geomspace(r_top * _RANGE_R_MIN_FRACTION, r_top, n_points)
+    energy_of_restricted_range = np.empty((n_materials, n_points))
+    for material in range(n_materials):
+        r_top_mat = float(restricted_range[material, -1])
+        for j, r in enumerate(range_nodes):
+            energy_of_restricted_range[material, j] = source.energy_after_mass_path(
+                e_top, material, ecut, r_top_mat - float(r)
+            )
+
     def grid_metadata(energies: npt.NDArray[np.float64]) -> tuple[float, float]:
         log_min = float(np.log(energies[0]))
         log_max = float(np.log(energies[-1]))
@@ -272,6 +309,8 @@ def build_cross_section_tables(
 
     photon_log_e_min, photon_inv_dlog = grid_metadata(photon_energies)
     electron_log_e_min, electron_inv_dlog = grid_metadata(electron_energies)
+    range_log_r_min = float(np.log(range_nodes[0]))
+    range_inv_dlog = (n_points - 1) / float(np.log(range_nodes[-1]) - np.log(range_nodes[0]))
 
     # Coherent form-factor cumulative: the momentum-transfer grid spans up to the maximum
     # transfer at e_max (backscatter), queried per material through the source so the flat
@@ -296,6 +335,10 @@ def build_cross_section_tables(
         mu_pair=channels[PhotonProcess.PAIR],
         mu_rayleigh=channels[PhotonProcess.RAYLEIGH],
         majorant=majorant,
+        restricted_range=restricted_range,
+        energy_of_restricted_range=energy_of_restricted_range,
+        range_log_r_min=range_log_r_min,
+        range_inv_dlog=range_inv_dlog,
         coherent_x=coherent_x,
         coherent_cumulative=coherent_cumulative,
         n_coherent=COHERENT_POINTS,
