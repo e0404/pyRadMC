@@ -795,7 +795,7 @@ def photon_kernel(
     gi: GridInfo,
     si: GridInfo,
     density: wp.array3d(dtype=float),
-    material: wp.array3d(dtype=wp.int32),
+    material: wp.array3d(dtype=wp.uint8),
     tab: Tables,
     q_in: Queue,
     q_electron: Queue,
@@ -865,7 +865,7 @@ def photon_kernel(
         iy = point_axis_index(y, gi.y_lo, gi.sy, gi.ny)
         iz = point_axis_index(z, gi.z_lo, gi.sz, gi.nz)
         rho = density[ix, iy, iz]
-        mat = material[ix, iy, iz]
+        mat = int(material[ix, iy, iz])  # uint8 voxel map -> table row index
         mu_compton = rho * lookup_2d(
             tab.mu_compton, mat, tab.p_log_e_min, tab.p_inv_dlog, tab.n_points, e
         )
@@ -1154,7 +1154,7 @@ def electron_kernel(
     gi: GridInfo,
     si: GridInfo,
     density: wp.array3d(dtype=float),
-    material: wp.array3d(dtype=wp.int32),
+    material: wp.array3d(dtype=wp.uint8),
     tab: Tables,
     q_in: Queue,
     q_photon: Queue,
@@ -1222,7 +1222,7 @@ def electron_kernel(
             t_ix = point_axis_index(x, gi.x_lo, gi.sx, gi.nx)
             t_iy = point_axis_index(y, gi.y_lo, gi.sy, gi.ny)
             t_iz = point_axis_index(z, gi.z_lo, gi.sz, gi.nz)
-            t_mat = material[t_ix, t_iy, t_iz]
+            t_mat = int(material[t_ix, t_iy, t_iz])  # uint8 voxel map -> table row index
             f = _spr_factor(tab, dose_to_water, e, t_mat, ecut)
             _deposit(edep, deposited, unscored, si, base, x, y, z, w * e, f, dose_to_water)
             if is_positron:
@@ -1249,7 +1249,7 @@ def electron_kernel(
         iy = point_axis_index(y, gi.y_lo, gi.sy, gi.ny)
         iz = point_axis_index(z, gi.z_lo, gi.sz, gi.nz)
         rho = density[ix, iy, iz]
-        mat = material[ix, iy, iz]
+        mat = int(material[ix, iy, iz])  # uint8 voxel map -> table row index
 
         # --- substep length ----------------------------------------------------
         range_cm = (

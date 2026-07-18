@@ -92,6 +92,42 @@ def _scoring_info(scoring: ScoringGrid) -> GridInfo:
     return si
 
 
+_GROUP_SIZE_FALLBACK = 128
+"""Beamlet group size when free device memory is unknown (cpu, or no query)."""
+
+_GROUP_SIZE_CAP = 1024
+"""Upper bound on an auto-sized group: past this the launches are already coarse
+and the marginal drain amortization is nil, while the dense maps keep growing."""
+
+_GROUP_MEMORY_FRACTION = 0.5
+"""Fraction of reported-free device memory budgeted for the dense group maps; the
+rest stays for geometry, tables, queues, and the sparse compaction output."""
+
+
+def _auto_group_size(free_bytes: int, n_voxels: int, n_beamlets: int, lanes: int) -> int:
+    """Largest beamlet group whose dense device maps fit the memory budget.
+
+    Group size is bit-inert (test-pinned), so this is pure scheduling policy.
+    Dense per-beamlet cost: one int64 quanta map per batch lane plus the two
+    float64 running sums — ``(8 * lanes + 16) * n_voxels`` bytes. The result is
+    clamped to ``[1, min(n_beamlets, cap)]``; unknown free memory falls back to
+    the documented default.
+    """
+    if free_bytes <= 0:
+        return min(_GROUP_SIZE_FALLBACK, n_beamlets)
+    per_beamlet = (8 * lanes + 16) * n_voxels
+    sized = int(free_bytes * _GROUP_MEMORY_FRACTION) // per_beamlet
+    return max(1, min(sized, n_beamlets, _GROUP_SIZE_CAP))
+
+
+def _device_free_bytes(device: str) -> int:
+    """Return a device's reported free memory; 0 where warp has nothing to report."""
+    d = wp.get_device(device)
+    if d.is_cuda:
+        return int(d.free_memory)
+    return 0  # cpu: warp needs psutil to report, and RAM is not the binding budget
+
+
 def _upload_queue(capacity: int, device: str) -> Queue:
     q = Queue()
     q.kind = wp.zeros(capacity, dtype=wp.int32, device=device)
@@ -218,6 +254,16 @@ class WarpEngine:
     device: str = "cpu"
     chunk_size: int = 32_768
     queue_factor: int = 16
+    # Host-table cache: build_tables flattens the source by looping the Python query
+    # API over every grid node — seconds of fixed overhead for a tabulated source —
+    # while its result is frozen after construction, so one build per
+    # (ecut, pcut, e_max) serves every run and every device shard. Only the host
+    # flatten is cached; the device upload stays per call. The lock keeps concurrent
+    # Dij shards (one host thread per device) from building the same key twice.
+    _table_cache: dict = field(default_factory=dict, init=False, repr=False, compare=False)
+    _table_cache_lock: threading.Lock = field(
+        default_factory=threading.Lock, init=False, repr=False, compare=False
+    )
 
     def run(
         self,
@@ -501,7 +547,7 @@ class WarpEngine:
         transport_electrons: bool = True,
         truncation: float = DIJ_TRUNCATION_RELATIVE,
         correlated: bool = True,
-        beamlet_group_size: int = 128,
+        beamlet_group_size: int | None = None,
         scoring_grid: ScoringGrid | None = None,
         scoring_mode: str = "dose_to_medium",
         devices: Sequence[str] | None = None,
@@ -524,6 +570,12 @@ class WarpEngine:
             ``(seed, history)`` and scoring is associative, so the result is
             bit-identical for any value (test-pinned), exactly like ``chunk_size``.
 
+            Default ``None`` auto-sizes it from the *reported free* memory of the
+            (each) device — the largest group whose dense maps fit half of it,
+            clamped to ``[1, min(n_beamlets, 1024)]``, the minimum over a
+            multi-device set, and 128 where free memory is unknown (cpu). An
+            explicit integer is used exactly as given.
+
             This is the *only* dial for the dense device cost, which is
             ``group * n_voxels * 24`` bytes — one int64 quanta map plus the two
             float64 sums — and is **independent of** ``n_batches``: batches are
@@ -531,10 +583,9 @@ class WarpEngine:
             along a device axis. It is also what sets the launch width, since a
             batch's block is ``group * n_histories_per_beamlet / n_batches``
             histories; raise it until that block covers ``chunk_size``, memory
-            permitting. The default sizes the dense buffer at 768 MB on a 64^3
-            grid; **lower it for a CT-resolution scoring grid**, where
-            ``n_voxels`` is an order up and the product will not fit — or coarsen
-            ``scoring_grid``, which shrinks this cubically.
+            permitting. On a CT-resolution scoring grid the auto-size shrinks
+            the group to fit (pass an explicit value to override) — or coarsen
+            ``scoring_grid``, which shrinks the dense cost cubically.
 
         devices
             Devices to shard the beamlet groups over, one host thread each; default
@@ -604,7 +655,7 @@ class WarpEngine:
                 f"n_histories_per_beamlet={n_histories_per_beamlet} not divisible by "
                 f"n_batches={n_batches}; unequal batches would weight batch means inconsistently"
             )
-        if beamlet_group_size < 1:
+        if beamlet_group_size is not None and beamlet_group_size < 1:
             raise ValueError(f"need a positive beamlet group size, got {beamlet_group_size}")
         if concurrent_batches < 1:
             raise ValueError(f"need at least one lane, got concurrent_batches={concurrent_batches}")
@@ -617,6 +668,19 @@ class WarpEngine:
         device_list = [self.device] if devices is None else list(dict.fromkeys(devices))
         if not device_list:
             raise ValueError("devices must name at least one device")
+
+        if beamlet_group_size is None:
+            # One shared size for every device: group_starts partitions the beamlet
+            # axis once, so a multi-device set takes the tightest device's fit.
+            beamlet_group_size = min(
+                _auto_group_size(
+                    _device_free_bytes(d),
+                    scoring.n_voxels,
+                    n_beamlets,
+                    min(concurrent_batches, n_batches) if wp.get_device(d).is_cuda else 1,
+                )
+                for d in device_list
+            )
 
         # Beamlet groups are independent — no cross-group reduction — so sharding them
         # over devices needs no communication at all. Assignment is greedy from a
@@ -2044,11 +2108,28 @@ class WarpEngine:
         gi.n_voxels = int(np.prod(self.grid.shape))
         gi.min_spacing = min(self.grid.spacing)
         density = wp.array(self.grid.density.astype(np.float32), dtype=float, device=device)
-        material = wp.array(self.grid.material.astype(np.int32), dtype=wp.int32, device=device)
+        # Material indices travel as uint8: 4x narrower than int32 on the transport
+        # kernels' random per-step load, and lossless for any registry the tables can
+        # hold. astype would silently *truncate* an index above 255 into a different
+        # valid-looking material, so an out-of-range source is refused here, before
+        # anything is transported.
+        if self.cross_sections.n_materials > 256:
+            raise ValueError(
+                f"the Warp backend addresses at most 256 materials (uint8 voxel map); "
+                f"this source declares {self.cross_sections.n_materials}"
+            )
+        material = wp.array(self.grid.material.astype(np.uint8), dtype=wp.uint8, device=device)
         return gi, density, material
 
     def _upload_tables(self, e_max: float, pcut: float, ecut: float, device: str) -> Tables:
-        host = self.cross_sections.build_tables(ecut=ecut, pcut=pcut, e_max=e_max * _E_MAX_MARGIN)
+        key = (ecut, pcut, e_max)
+        with self._table_cache_lock:
+            host = self._table_cache.get(key)
+            if host is None:
+                host = self.cross_sections.build_tables(
+                    ecut=ecut, pcut=pcut, e_max=e_max * _E_MAX_MARGIN
+                )
+                self._table_cache[key] = host
         tab = Tables()
         for table_name in (
             "mu_compton",

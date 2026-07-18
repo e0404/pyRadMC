@@ -8,9 +8,11 @@ closed pair, and transported into a water phantom two ways:
 
 * the **deterministic wrapper** (:class:`~pyRadMC.geometry.collimation.
   CollimatedSource`) — Beer-Lambert weights, the Dij-baseline configuration;
-* the **head pre-solve** (:func:`~pyRadMC.geometry.head.presolve_head`,
-  ``first_compton``) — an exit-plane phase space carrying collimator scatter and
-  air-generated contaminant electrons.
+* the **head pre-solve** (``first_compton``) — an exit-plane phase space
+  carrying collimator scatter and air-generated contaminant electrons. On a Warp
+  engine it runs on the device and is transported with no copy back
+  (:func:`~pyRadMC.backends.warp.presolve.presolve_head_device`); on the reference
+  engine it runs on the host (:func:`~pyRadMC.geometry.head.presolve_head`).
 
 The figure reads at a glance: the beam's-eye-view transmission map shows the
 staircase aperture, the rounded tips and the closed-pair stripe; the inline
@@ -182,7 +184,7 @@ def transmission_map(stack: BeamLimitingStack, xs, material: int, density: float
 def main() -> None:
     """Collimate, pre-solve, transport, and render the three-panel figure."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--histories", type=int, default=2_000_000)
+    parser.add_argument("--histories", type=int, default=10_000_000)
     parser.add_argument("--batches", type=int, default=8)
     parser.add_argument("--seed", type=int, default=20260715)
     parser.add_argument("--backend", choices=("auto", "warp", "ref"), default="auto")
@@ -205,11 +207,9 @@ def main() -> None:
     )
 
     engine, backend_name = make_engine(args.backend, grid, xs)
+    device = getattr(engine, "device", None)  # a Warp device string, or None for ref
 
-    print(f"pre-solving the head ({args.histories:,} rays) ...")
-    t0 = time.perf_counter()
-    phsp = presolve_head(
-        source,
+    presolve_kwargs = dict(
         stack=stack,
         cross_sections=xs,
         n_histories=args.histories,
@@ -220,6 +220,18 @@ def main() -> None:
         ),
         mode="first_compton",
     )
+    where = f"on device ({device})" if device is not None else "on the host"
+    print(f"pre-solving the head ({args.histories:,} rays) {where} ...")
+    t0 = time.perf_counter()
+    if device is not None:
+        # The Warp device pre-solve, transported with no copy back (DevicePhaseSpace).
+        from pyRadMC.backends.warp.presolve import presolve_head_device
+
+        phsp = presolve_head_device(
+            source, device=device, return_device_source=True, **presolve_kwargs
+        )
+    else:
+        phsp = presolve_head(source, **presolve_kwargs)
     print(f"  {len(phsp):,} exit-plane particles in {time.perf_counter() - t0:.1f} s")
 
     wrapped = CollimatedSource(source, stack, xs)
