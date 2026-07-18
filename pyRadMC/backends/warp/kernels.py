@@ -19,11 +19,15 @@ scoring
     thread interleaving — this is what makes the within-device reproducibility of
     AGENTS.md 2.3 *enforceable* on CUDA, where float atomics are not.
 
-Numerical deviations from the reference loop, both documented where used:
+Numerical deviations from the reference loop, each documented where used:
 
 - Transport arithmetic is float32; statistical equivalence with the float64
   reference is asserted by the chi-squared oracle, never bit equality (AGENTS.md
   2.3).
+- The module compiles with ``fast_math`` (approximate transcendentals and
+  division; see the ``set_module_options`` site). Within-device bit
+  reproducibility is unaffected — one fixed binary — and the water dose-to-water
+  factor returns an exact 1.0 without dividing, preserving that pinned identity.
 - The entry nudge is 1e-4 cm instead of the reference's 1e-9 cm: a nudge below
   float32 resolution at centimetre coordinates would be lost in rounding and
   photons entering exactly on the surface would be dropped. 1 micrometre remains
@@ -96,6 +100,18 @@ _MAJORANT_TOLERANCE = 1.0e-9  # same relative headroom as the reference loop
 _INFINITY_CM = 1.0e30
 """Sentinel threshold for a missed grid: slab_entry_distance returns +inf, and any
 comparison against this finite bound classifies it without needing isinf in-kernel."""
+
+# This engine never differentiates: skip warp's default adjoint (backward) kernel
+# compilation, which costs ~3x on the cold module compile and buys nothing here.
+#
+# fast_math: approximate transcendentals/division on the transport kernels —
+# measured 14-23% wall time on the latency-bound transport (2026-07-18). This is
+# a *documented numerical deviation* in the sense of the module docstring: results
+# stay bit-reproducible within one device (one fixed binary; AGENTS.md 2.3), the
+# cross-target claim was always statistical-only, and the chi-squared and
+# energy-balance suites gate the equivalence. The pre-solve module must NOT take
+# this option: its attenuation mode is test-pinned float32-exact against the host.
+wp.set_module_options({"enable_backward": False, "fast_math": True})
 
 _p = warp_physics()
 
@@ -399,9 +415,14 @@ def _spr_factor(
     restricted collision stopping-power ratio water/medium at the deposit's
     cutoff-clamped energy (the lookup additionally clamps to the table domain).
     Exactly 1.0 under dose-to-medium — and for water deposits, where it is the
-    ratio of two identical lookups.
+    ratio of two identical lookups. The water case returns the exact 1.0
+    *without dividing*: the host mirror gets x/x == 1.0 from IEEE float64, but
+    this module compiles with fast_math, whose approximate division would break
+    the test-pinned water D_w == D_m bit identity.
     """
     if dose_to_water == 0:
+        return 1.0
+    if mat == WATER:
         return 1.0
     e = wp.max(energy, ecut)
     s_water = lookup_2d(
@@ -896,15 +917,17 @@ def photon_kernel(
             phi = 2.0 * math.pi * uniform(state)
             ux, uy, uz = rotate_direction(ux, uy, uz, cos_coherent, phi)
         elif process == PhotonProcess.COMPTON:
-            if primary != 0:
+            if PHOTON_SPLIT_N > 1 and primary != 0:
                 # Compton splitting (Phase 4): the source photon samples
                 # PHOTON_SPLIT_N independent final states, each copy (scattered
                 # photon + recoil electron) weighted w/N and pushed as a
                 # non-primary photon; the primary's thread ends here. Ships at
-                # PHOTON_SPLIT_N=1 (analog: one full-weight copy) — see the
-                # constant's docstring for why it is off. Only the
-                # primary splits, so the population is bounded and every later
-                # scatter continues in-thread below (no per-scatter re-queue).
+                # PHOTON_SPLIT_N=1 (analog), where the constant guard above
+                # dead-codes this block and a primary's first Compton continues
+                # in-thread like every later scatter — no re-queue, no child
+                # stream; the N > 1 machinery compiles in unchanged whenever the
+                # constant says so. Only the primary splits, so the population
+                # is bounded.
                 # Copies get child streams (spawn_stream), the warp counterpart
                 # of the reference's sequential draws; each copy conserves energy
                 # (scattered + recoil = e), so the balance stays exact.

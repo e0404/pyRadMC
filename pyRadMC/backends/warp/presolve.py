@@ -43,6 +43,9 @@ __all__ = [
     "upload_stack",
 ]
 
+# No differentiation here either: skip adjoint kernel compilation (see kernels.py).
+wp.set_module_options({"enable_backward": False})
+
 _p = warp_physics()
 jaw_path_length = _p.jaw_path_length
 mlc_path_length = _p.mlc_path_length
