@@ -99,6 +99,20 @@ class Spectrum:
         return self._p
 
     @property
+    def edges(self) -> npt.NDArray[np.float64]:
+        """Bin edges in MeV (read-only); ``n + 1`` values."""
+        return self._edges
+
+    @property
+    def cdf(self) -> npt.NDArray[np.float64]:
+        """Cumulative bin probabilities (read-only); ``n`` values ending at 1.
+
+        The inversion table a device backend uploads to sample energies in-kernel
+        with the same ``searchsorted`` convention as :meth:`sample_energy`.
+        """
+        return self._cdf
+
+    @property
     def mean_energy(self) -> float:
         """Photon-number-weighted mean energy, MeV, on the bin-midpoint approximation."""
         return float(np.sum(self._p * 0.5 * (self._edges[:-1] + self._edges[1:])))

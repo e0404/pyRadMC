@@ -561,8 +561,12 @@ class SpectralBeamSource(Source):
     :class:`~pyRadMC.geometry.spectrum.Spectrum` by CDF inversion; the geometry is a
     point source at ``focal_point`` emitting toward points sampled uniformly in the
     rectangular aperture at the reference plane (see :class:`_DivergentFan` for the
-    engine-frame convention and axis semantics). Transports on both backends via the
-    default pre-sampling route (no ``warp_sampler``).
+    engine-frame convention and axis semantics). The Warp engine routes this exact
+    type to a built-in in-kernel generator (CDF inversion over the uploaded
+    :attr:`spectrum` tables — no host round trip; the host route was measured
+    wall-dominant on CT-grade runs); the reference backend uses :meth:`emit`, and a
+    *subclass* transports via the pre-sampling route, since an override may change
+    what a history means.
     """
 
     def __init__(
@@ -583,6 +587,41 @@ class SpectralBeamSource(Source):
         """The spectrum's top bin edge, for cross-section table sizing."""
         return self._spectrum.max_energy
 
+    @property
+    def spectrum(self) -> Spectrum:
+        """The histogram spectrum energies are drawn from."""
+        return self._spectrum
+
+    @property
+    def focal_point(self) -> tuple[float, float, float]:
+        """The point source position, engine frame (cm)."""
+        return self._fan.focal_point
+
+    @property
+    def center(self) -> tuple[float, float, float]:
+        """The aperture centre on the reference plane, engine frame (cm)."""
+        return self._fan.centers[0]
+
+    @property
+    def width_u(self) -> float:
+        """Aperture width along :attr:`u_axis` (cm)."""
+        return self._fan.width_u
+
+    @property
+    def width_v(self) -> float:
+        """Aperture width along :attr:`v_axis` (cm)."""
+        return self._fan.width_v
+
+    @property
+    def u_axis(self) -> tuple[float, float, float]:
+        """First aperture axis (unit vector after fan validation)."""
+        return self._fan.u_axis
+
+    @property
+    def v_axis(self) -> tuple[float, float, float]:
+        """Second aperture axis (unit vector after fan validation)."""
+        return self._fan.v_axis
+
     def emit(self, rng_state: RNGState) -> Primary:
         """Emit one primary through the aperture; consumes exactly four uniforms."""
         return self._fan.emit_through(self._spectrum, 0, rng_state)
@@ -600,7 +639,10 @@ class SpectralBeamletSource(BeamletSource):
     beamlet order is the caller's: pyRadPlan hands the centres in its own
     bixel-index order and the Dij columns come back in the same order. All bixels
     share one aperture size, the width at the reference plane the centres lie on.
-    Transports on both backends via the default per-beamlet pre-sampling route.
+    The Warp engine routes this exact type to a built-in in-kernel generator (the
+    host per-beamlet pre-sampling was measured wall-dominant on CT-grade Dij
+    runs); the reference backend uses :meth:`emit`, and a *subclass* transports
+    via the pre-sampling route, since an override may change what a history means.
     """
 
     def __init__(
@@ -625,6 +667,41 @@ class SpectralBeamletSource(BeamletSource):
     def n_beamlets(self) -> int:
         """One beamlet per aperture centre."""
         return len(self._fan.centers)
+
+    @property
+    def spectrum(self) -> Spectrum:
+        """The histogram spectrum energies are drawn from."""
+        return self._spectrum
+
+    @property
+    def focal_point(self) -> tuple[float, float, float]:
+        """The point source position, engine frame (cm)."""
+        return self._fan.focal_point
+
+    @property
+    def centers(self) -> tuple[tuple[float, float, float], ...]:
+        """The beamlet aperture centres, engine frame (cm), in the caller's order."""
+        return self._fan.centers
+
+    @property
+    def width_u(self) -> float:
+        """Aperture width along :attr:`u_axis` (cm), shared by every beamlet."""
+        return self._fan.width_u
+
+    @property
+    def width_v(self) -> float:
+        """Aperture width along :attr:`v_axis` (cm), shared by every beamlet."""
+        return self._fan.width_v
+
+    @property
+    def u_axis(self) -> tuple[float, float, float]:
+        """First aperture axis (unit vector after fan validation)."""
+        return self._fan.u_axis
+
+    @property
+    def v_axis(self) -> tuple[float, float, float]:
+        """Second aperture axis (unit vector after fan validation)."""
+        return self._fan.v_axis
 
     def emit(self, beamlet: int, rng_state: RNGState) -> Primary:
         """Emit one primary for ``beamlet``; consumes exactly four uniforms."""

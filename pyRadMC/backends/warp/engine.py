@@ -54,6 +54,8 @@ from pyRadMC.geometry.source import (
     ParallelBeamSource,
     PencilBeamSource,
     Source,
+    SpectralBeamletSource,
+    SpectralBeamSource,
 )
 from pyRadMC.progress import ProgressCallback, ProgressEmitter
 from pyRadMC.scoring.dij import DijAssembler, DijResult
@@ -288,9 +290,12 @@ class WarpEngine:
         dose-to-water weights each deposit in-kernel by the stopping-power ratio
         from the flattened tables while the books stay physical; ``progress``: one
         tick per completed batch, the identical cadence to the reference engine —
-        see :mod:`pyRadMC.progress`). A source with an in-kernel generator (the
-        built-in mono beams) is generated on-device from analytic parameters, all
-        of one ``primary_kind``. Any other source (a phase space, or a user
+        see :mod:`pyRadMC.progress`). A source with an in-kernel generator is
+        generated on-device: the built-in mono beams from analytic parameters (all
+        of one ``primary_kind``) and the exact
+        :class:`~pyRadMC.geometry.source.SpectralBeamSource` type from its uploaded
+        spectrum tables (photons; ``primary_kind`` ignored). Any other source (a
+        phase space, a spectral *subclass*, or a user
         :class:`~pyRadMC.geometry.source.Source`) is transported by host-sampling
         each chunk via ``sample_batch`` and seeding the photon and electron queues
         by the per-record kind; ``primary_kind`` is then ignored and
@@ -307,6 +312,10 @@ class WarpEngine:
 
         in_kernel = isinstance(source, PencilBeamSource | ParallelBeamSource)
         is_device_ps = isinstance(source, DevicePhaseSpace)
+        # Exact type, not isinstance: a subclass may override emit/sample_batch, and
+        # the built-in generator would silently bypass the override; a subclass keeps
+        # the host pre-sampling route (test-pinned).
+        is_spectral = type(source) is SpectralBeamSource
         if is_device_ps and source.device != self.device:
             raise ValueError(
                 f"the device pre-solve buffer is on {source.device!r} but this engine "
@@ -342,12 +351,25 @@ class WarpEngine:
         # source books per chunk).
         generator = None
         emitted = None
-        if not in_kernel and not is_device_ps and source.warp_sampler is not None:
+        wraps = not in_kernel and not is_device_ps and not is_spectral
+        if wraps and source.warp_sampler is not None:
             generator = kernels.make_generator_kernel(source.warp_sampler)
             emitted = wp.zeros(1, dtype=wp.int64, device=device)
         if is_device_ps:
             # The seeding kernel books emitted weight-energy into this counter,
             # like the wrapped-generator route, read once after the batches.
+            emitted = wp.zeros(1, dtype=wp.int64, device=device)
+        spectral_tables = None
+        if is_spectral:
+            # Built-in in-kernel generation for the exact spectral type: the spectrum
+            # inversion tables upload once per run and each chunk samples on-device
+            # (the host pre-sampling was measured wall-dominant on CT-grade runs).
+            # Emitted energy is booked per primary, like the wrapped-generator route.
+            spectrum = source.spectrum
+            spectral_tables = (
+                wp.array(spectrum.edges.astype(np.float32), dtype=float, device=device),
+                wp.array(spectrum.cdf.astype(np.float32), dtype=float, device=device),
+            )
             emitted = wp.zeros(1, dtype=wp.int64, device=device)
 
         n_voxels = scoring.n_voxels
@@ -403,6 +425,32 @@ class WarpEngine:
                 elif is_device_ps:
                     self._transport_chunk_device_buffer(
                         source,
+                        seed,
+                        history,
+                        n_chunk,
+                        gi,
+                        si,
+                        density,
+                        material,
+                        tab,
+                        queues,
+                        slots,
+                        edep,
+                        escaped,
+                        unscored,
+                        deposited,
+                        violations,
+                        pcut,
+                        ecut,
+                        transport_electrons,
+                        dose_to_water,
+                        emitted,
+                        device,
+                    )
+                elif is_spectral:
+                    self._transport_chunk_spectral(
+                        source,
+                        spectral_tables,
                         seed,
                         history,
                         n_chunk,
@@ -821,16 +869,29 @@ class WarpEngine:
         n_beamlets = source.n_beamlets
         n_voxels = scoring.n_voxels
         # Route by capability: the built-in lattice generates in-kernel from analytic
-        # bounds; a source with a warp_beamlet_sampler is generated in-kernel by a
-        # wrapped kernel; any other source is host pre-sampled per beamlet and uploaded.
-        # Beamlet primaries are photons carrying the source's statistical weight
-        # (the lattice is unit-weight by construction; the other two routes take the
-        # weight from the sampler/emit, matching the reference Dij).
+        # bounds; the exact spectral beamlet type generates in-kernel from its
+        # uploaded spectrum tables (a subclass keeps pre-sampling — exact-type check,
+        # since an emit/sample override must not be bypassed; the host route was
+        # measured wall-dominant on CT-grade Dij runs); a source with a
+        # warp_beamlet_sampler is generated in-kernel by a wrapped kernel; any other
+        # source is host pre-sampled per beamlet and uploaded. Beamlet primaries are
+        # photons carrying the source's statistical weight (the built-in routes are
+        # unit-weight by construction; the other two take the weight from the
+        # sampler/emit, matching the reference Dij).
         use_lattice = isinstance(source, BeamletGridSource)
+        use_spectral = type(source) is SpectralBeamletSource
         beamlet_generator = None
         emitted_counter = None
-        if not use_lattice and source.warp_beamlet_sampler is not None:
+        spectral_tables = None
+        if not use_lattice and not use_spectral and source.warp_beamlet_sampler is not None:
             beamlet_generator = kernels.make_beamlet_generator_kernel(source.warp_beamlet_sampler)
+            emitted_counter = wp.zeros(1, dtype=wp.int64, device=device)
+        if use_spectral:
+            spectrum = source.spectrum
+            spectral_tables = (
+                wp.array(spectrum.edges.astype(np.float32), dtype=float, device=device),
+                wp.array(spectrum.cdf.astype(np.float32), dtype=float, device=device),
+            )
             emitted_counter = wp.zeros(1, dtype=wp.int64, device=device)
 
         voxel_mass = wp.array(scoring.voxel_mass.reshape(n_voxels), dtype=wp.float64, device=device)
@@ -886,6 +947,8 @@ class WarpEngine:
             beamlet_generator=beamlet_generator,
             emitted_counter=emitted_counter,
             use_lattice=use_lattice,
+            use_spectral=use_spectral,
+            spectral_tables=spectral_tables,
             seed=seed,
             n_per=n_histories_per_beamlet,
             per_batch=per_batch,
@@ -919,9 +982,13 @@ class WarpEngine:
             group = min(beamlet_group_size, n_beamlets - group_start)
             block_histories = group * per_batch  # one batch's block
             chunk = min(self.chunk_size, block_histories)
-            lattice_bounds = None
+            # The per-group upload for whichever in-kernel route is active: analytic
+            # bounds for the lattice, aperture centres for the spectral fan.
+            group_arrays = None
             if use_lattice:
-                lattice_bounds = self._upload_lattice_bounds(source, group_start, group, device)
+                group_arrays = self._upload_lattice_bounds(source, group_start, group, device)
+            elif use_spectral:
+                group_arrays = self._upload_spectral_centers(source, group_start, group, device)
             s1.zero_()
             s2.zero_()
             total_q.zero_()
@@ -942,7 +1009,7 @@ class WarpEngine:
                         batch,
                         chunk,
                         block_histories,
-                        lattice_bounds,
+                        group_arrays,
                         **route_args,
                     )
                     self._fold_dij_batch(res.edep, group, None, **fold_args)
@@ -955,7 +1022,7 @@ class WarpEngine:
                     n_batches,
                     chunk,
                     block_histories,
-                    lattice_bounds,
+                    group_arrays,
                     shard,
                     route_args,
                     fold_args,
@@ -1052,12 +1119,14 @@ class WarpEngine:
         batch,
         chunk,
         block_histories,
-        lattice_bounds,
+        group_arrays,
         *,
         source,
         beamlet_generator,
         emitted_counter,
         use_lattice,
+        use_spectral,
+        spectral_tables,
         seed,
         n_per,
         per_batch,
@@ -1079,15 +1148,17 @@ class WarpEngine:
     ) -> float:
         """Generate and drain one batch of one group with a lane's resources.
 
-        The single routing point for the three generation routes; sequential and
+        The single routing point for the four generation routes; sequential and
         lane execution differ only in which :class:`_LaneResources` they pass.
-        Returns the batch's host-summed emitted energy (nonzero only on the
-        pre-sampled route; the other two book emitted energy on the device).
+        ``group_arrays`` carries the active in-kernel route's per-group upload
+        (lattice bounds or spectral aperture centres). Returns the batch's
+        host-summed emitted energy (nonzero only on the pre-sampled route; the
+        in-kernel routes book emitted energy on the device).
         """
         if use_lattice:
             self._generate_group_lattice(
                 source,
-                lattice_bounds,
+                group_arrays,
                 group_start,
                 group,
                 seed,
@@ -1113,6 +1184,42 @@ class WarpEngine:
                 ecut,
                 transport_electrons,
                 dose_to_water,
+                device,
+                res.stream,
+                res.staging,
+            )
+            return 0.0
+        if use_spectral:
+            self._generate_group_spectral(
+                source,
+                spectral_tables,
+                group_arrays,
+                group_start,
+                group,
+                seed,
+                n_per,
+                per_batch,
+                batch,
+                correlated,
+                chunk,
+                block_histories,
+                gi,
+                si,
+                density,
+                material,
+                tab,
+                res.queues,
+                res.slots,
+                res.edep,
+                escaped,
+                unscored,
+                deposited,
+                violations,
+                pcut,
+                ecut,
+                transport_electrons,
+                dose_to_water,
+                emitted_counter,
                 device,
                 res.stream,
                 res.staging,
@@ -1224,7 +1331,7 @@ class WarpEngine:
         n_batches,
         chunk,
         block_histories,
-        lattice_bounds,
+        group_arrays,
         shard,
         route_args,
         fold_args,
@@ -1271,7 +1378,7 @@ class WarpEngine:
                         b,
                         chunk,
                         block_histories,
-                        lattice_bounds,
+                        group_arrays,
                         **route_args,
                     )
                     # Transport is complete on the device here: the drain loop's
@@ -1341,6 +1448,101 @@ class WarpEngine:
 
         self._generate(source, kind, seed, history_offset, n_chunk, target, slots, device)
         _set_count(target, n_chunk, device)
+
+        self._drain_queues(
+            q_photon,
+            q_photon_alt,
+            q_electron,
+            q_electron_alt,
+            gi,
+            si,
+            density,
+            material,
+            tab,
+            slots,
+            edep,
+            escaped,
+            unscored,
+            deposited,
+            violations,
+            pcut,
+            ecut,
+            transport_electrons,
+            dose_to_water,
+            device,
+        )
+
+    def _transport_chunk_spectral(
+        self,
+        source,
+        spectral_tables,
+        seed,
+        history_offset,
+        n_chunk,
+        gi,
+        si,
+        density,
+        material,
+        tab,
+        queues,
+        slots,
+        edep,
+        escaped,
+        unscored,
+        deposited,
+        violations,
+        pcut,
+        ecut,
+        transport_electrons,
+        dose_to_water,
+        emitted,
+        device,
+    ) -> None:
+        """Generate one spectral-beam chunk in-kernel, then drain all queues.
+
+        Photons only, at fixed thread slots into the photon queue (the mono-beam
+        idiom: an explicit count write, no atomics); the kernel books each primary's
+        energy into ``emitted``, since a polyenergetic ledger has no analytic total.
+        """
+        q_photon, q_photon_alt, q_electron, q_electron_alt = queues
+        for q in queues:
+            _reset_count(q, device)
+
+        sp_edges, sp_cdf = spectral_tables
+        focal = source.focal_point
+        center = source.center
+        u_axis = source.u_axis
+        v_axis = source.v_axis
+        wp.launch(
+            kernels.generate_spectral_beam,
+            dim=n_chunk,
+            inputs=[
+                seed,
+                history_offset,
+                sp_edges,
+                sp_cdf,
+                int(sp_cdf.shape[0]),
+                focal[0],
+                focal[1],
+                focal[2],
+                center[0],
+                center[1],
+                center[2],
+                u_axis[0],
+                u_axis[1],
+                u_axis[2],
+                v_axis[0],
+                v_axis[1],
+                v_axis[2],
+                source.width_u,
+                source.width_v,
+                slots,
+                q_photon,
+                emitted,
+            ],
+            device=device,
+        )
+        _set_count(q_photon, n_chunk, device)
 
         self._drain_queues(
             q_photon,
@@ -1869,6 +2071,135 @@ class WarpEngine:
                     y_lo,
                     y_extent,
                     slots,
+                    queues[0],
+                ],
+                device,
+                stream,
+            )
+            _set_count(queues[0], n_chunk, device, stream)
+            self._drain_queues(
+                queues[0],
+                queues[1],
+                queues[2],
+                queues[3],
+                gi,
+                si,
+                density,
+                material,
+                tab,
+                slots,
+                edep,
+                escaped,
+                unscored,
+                deposited,
+                violations,
+                pcut,
+                ecut,
+                transport_electrons,
+                dose_to_water,
+                device,
+                stream,
+                staging,
+            )
+            t += n_chunk
+
+    def _upload_spectral_centers(self, source, group_start, group, device):
+        """Upload one group's aperture centres once, shared by every batch and lane.
+
+        The spectral twin of :meth:`_upload_lattice_bounds`, with the same
+        default-stream ordering rationale.
+        """
+        centers = np.array(
+            [source.centers[group_start + k] for k in range(group)], dtype=np.float64
+        )
+        return (
+            wp.array(centers[:, 0].astype(np.float32), dtype=float, device=device),
+            wp.array(centers[:, 1].astype(np.float32), dtype=float, device=device),
+            wp.array(centers[:, 2].astype(np.float32), dtype=float, device=device),
+        )
+
+    def _generate_group_spectral(
+        self,
+        source,
+        spectral_tables,
+        group_arrays,
+        group_start,
+        group,
+        seed,
+        n_per,
+        per_batch,
+        batch,
+        correlated,
+        chunk,
+        block_histories,
+        gi,
+        si,
+        density,
+        material,
+        tab,
+        queues,
+        slots,
+        edep,
+        escaped,
+        unscored,
+        deposited,
+        violations,
+        pcut,
+        ecut,
+        transport_electrons,
+        dose_to_water,
+        emitted,
+        device,
+        stream=None,
+        staging=None,
+    ) -> None:
+        """Built-in spectral Dij route: generate one batch of the group in-kernel.
+
+        Same per-batch block chunking as the lattice, with the spectrum inversion
+        and divergent-fan geometry inline
+        (:func:`~pyRadMC.backends.warp.kernels.generate_spectral_beamlets`); the
+        kernel books emitted energy into ``emitted`` per primary.
+        """
+        sp_edges, sp_cdf = spectral_tables
+        cx, cy, cz = group_arrays
+        focal = source.focal_point
+        u_axis = source.u_axis
+        v_axis = source.v_axis
+        t = 0
+        while t < block_histories:
+            n_chunk = min(chunk, block_histories - t)
+            for q in queues:
+                _reset_count(q, device, stream)
+            _launch(
+                kernels.generate_spectral_beamlets,
+                n_chunk,
+                [
+                    seed,
+                    group_start,
+                    n_per,
+                    per_batch,
+                    batch,
+                    t,
+                    1 if correlated else 0,
+                    sp_edges,
+                    sp_cdf,
+                    int(sp_cdf.shape[0]),
+                    focal[0],
+                    focal[1],
+                    focal[2],
+                    u_axis[0],
+                    u_axis[1],
+                    u_axis[2],
+                    v_axis[0],
+                    v_axis[1],
+                    v_axis[2],
+                    source.width_u,
+                    source.width_v,
+                    cx,
+                    cy,
+                    cz,
+                    slots,
+                    emitted,
                     queues[0],
                 ],
                 device,

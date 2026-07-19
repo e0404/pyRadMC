@@ -80,6 +80,8 @@ __all__ = [
     "generate_from_upload",
     "generate_parallel_beam",
     "generate_pencil_beam",
+    "generate_spectral_beam",
+    "generate_spectral_beamlets",
     "make_beamlet_generator_kernel",
     "make_generator_kernel",
     "photon_kernel",
@@ -1672,6 +1674,71 @@ def generate_parallel_beam(
 
 
 @wp.kernel
+def generate_spectral_beam(
+    seed: int,
+    history_offset: int,
+    edges: wp.array(dtype=float),
+    cdf: wp.array(dtype=float),
+    n_bins: int,
+    fx: float,
+    fy: float,
+    fz: float,
+    ax: float,
+    ay: float,
+    az: float,
+    uxa: float,
+    uya: float,
+    uza: float,
+    vxa: float,
+    vya: float,
+    vza: float,
+    width_u: float,
+    width_v: float,
+    slots: wp.array(dtype=wp.uint32),
+    q: Queue,
+    emitted: wp.array(dtype=wp.int64),
+):
+    """Divergent polyenergetic fan: the in-kernel twin of ``_DivergentFan.emit_through``.
+
+    Four uniforms per primary in the host order — spectrum bin, within-bin position,
+    then the in-aperture u and v offsets. The energy inversion mirrors
+    ``Spectrum.sample_energy``: ``lower_bound`` is ``searchsorted`` (first cdf entry
+    >= u), clamped to the top bin so a float32-rounded ``cdf[n-1] < 1`` cannot index
+    past the table. Emitted energy is booked per primary into ``emitted`` (unit
+    weight), since a polyenergetic ledger cannot be closed analytically.
+    """
+    tid = wp.tid()
+    slots[tid] = init_slot(seed, history_offset + tid)
+    state = WarpRNGState()
+    state.slots = slots
+    state.idx = tid
+    u_bin = uniform(state)
+    u_within = uniform(state)
+    du = (uniform(state) - 0.5) * width_u
+    dv = (uniform(state) - 0.5) * width_v
+    k = wp.min(wp.lower_bound(cdf, u_bin), n_bins - 1)
+    lo = edges[k]
+    energy = lo + (edges[k + 1] - lo) * u_within
+    dx = ax + du * uxa + dv * vxa - fx
+    dy = ay + du * uya + dv * vya - fy
+    dz = az + du * uza + dv * vza - fz
+    inv_norm = 1.0 / wp.sqrt(dx * dx + dy * dy + dz * dz)
+    q.kind[tid] = PHOTON
+    q.beamlet[tid] = 0
+    q.primary[tid] = 1  # source particle: the only one that may split
+    q.energy[tid] = energy
+    q.weight[tid] = 1.0
+    q.x[tid] = fx
+    q.y[tid] = fy
+    q.z[tid] = fz
+    q.ux[tid] = dx * inv_norm
+    q.uy[tid] = dy * inv_norm
+    q.uz[tid] = dz * inv_norm
+    q.rng[tid] = slots[tid]
+    _escape(emitted, energy)
+
+
+@wp.kernel
 def generate_beamlet_lattice(
     seed: int,
     group_start: int,
@@ -1743,3 +1810,85 @@ def generate_beamlet_lattice(
     q.uy[tid] = 0.0
     q.uz[tid] = 1.0
     q.rng[tid] = slots[tid]
+
+
+@wp.kernel
+def generate_spectral_beamlets(
+    seed: int,
+    group_start: int,
+    n_per: int,
+    per_batch: int,
+    batch: int,
+    t_offset: int,
+    correlated: int,
+    edges: wp.array(dtype=float),
+    cdf: wp.array(dtype=float),
+    n_bins: int,
+    fx: float,
+    fy: float,
+    fz: float,
+    uxa: float,
+    uya: float,
+    uza: float,
+    vxa: float,
+    vya: float,
+    vza: float,
+    width_u: float,
+    width_v: float,
+    cx: wp.array(dtype=float),
+    cy: wp.array(dtype=float),
+    cz: wp.array(dtype=float),
+    slots: wp.array(dtype=wp.uint32),
+    emitted: wp.array(dtype=wp.int64),
+    q: Queue,
+):
+    """Spectral beamlet primaries: the lattice block mapping with the fan inline.
+
+    ``generate_beamlet_lattice``'s thread-to-history mapping combined with the
+    divergent polyenergetic sampling of ``generate_spectral_beam``.
+
+    The centre arrays are per group-local beamlet (uploaded per group, like the
+    lattice bounds); focal point, axes and aperture widths are shared by the whole
+    fan. Four uniforms per primary in the host ``emit_through`` order, drawn from
+    the stream ``(seed, key)`` names — under correlated sampling (``key = r``)
+    corresponding histories of every beamlet therefore replay the same energy and
+    in-aperture offset, exactly the host route's guarantee. Emitted energy is
+    booked per primary (unit weight); a polyenergetic ledger has no analytic total.
+    """
+    tid = wp.tid()
+    t = t_offset + tid
+    local = t // per_batch
+    i = t - local * per_batch
+    r = batch * per_batch + i
+    h = (group_start + local) * n_per + r
+    key = h
+    if correlated != 0:
+        key = r
+    slots[tid] = init_slot(seed, key)
+    state = WarpRNGState()
+    state.slots = slots
+    state.idx = tid
+    u_bin = uniform(state)
+    u_within = uniform(state)
+    du = (uniform(state) - 0.5) * width_u
+    dv = (uniform(state) - 0.5) * width_v
+    k = wp.min(wp.lower_bound(cdf, u_bin), n_bins - 1)
+    lo = edges[k]
+    energy = lo + (edges[k + 1] - lo) * u_within
+    dx = cx[local] + du * uxa + dv * vxa - fx
+    dy = cy[local] + du * uya + dv * vya - fy
+    dz = cz[local] + du * uza + dv * vza - fz
+    inv_norm = 1.0 / wp.sqrt(dx * dx + dy * dy + dz * dz)
+    q.kind[tid] = PHOTON
+    q.beamlet[tid] = local
+    q.primary[tid] = 1  # source photon: the only one that may split
+    q.energy[tid] = energy
+    q.weight[tid] = 1.0
+    q.x[tid] = fx
+    q.y[tid] = fy
+    q.z[tid] = fz
+    q.ux[tid] = dx * inv_norm
+    q.uy[tid] = dy * inv_norm
+    q.uz[tid] = dz * inv_norm
+    q.rng[tid] = slots[tid]
+    _escape(emitted, energy)
