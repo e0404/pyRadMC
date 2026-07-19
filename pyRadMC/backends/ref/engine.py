@@ -26,6 +26,7 @@ from pyRadMC.scoring.dij import BatchedBeamletScorer, DijAssembler, DijResult
 from pyRadMC.scoring.dose import BatchedDoseScorer
 from pyRadMC.scoring.dose_to_water import validate_scoring_mode, water_spr
 from pyRadMC.scoring.grid import ScoringGrid
+from pyRadMC.transport.electron import STEP_ENERGY_FRACTION
 from pyRadMC.transport.history import transport_history
 from pyRadMC.transport.particles import (
     ELECTRON,
@@ -80,6 +81,7 @@ class ReferenceEngine:
         primary_kind: str = "photon",
         scoring_grid: ScoringGrid | None = None,
         scoring_mode: str = "dose_to_medium",
+        step_energy_fraction: float = STEP_ENERGY_FRACTION,
         progress: ProgressCallback | None = None,
     ) -> TransportResult:
         """Transport ``n_histories`` primaries in ``n_batches`` equal batches.
@@ -127,6 +129,12 @@ class ReferenceEngine:
             :mod:`pyRadMC.scoring.dose_to_water`): transport is identical, only
             the per-deposit tally weighting differs, and the energy books stay
             physical in both modes. Requires ``transport_electrons=True``.
+        step_energy_fraction
+            Maximum fraction of CSDA range per electron substep
+            (:data:`~pyRadMC.transport.electron.STEP_ENERGY_FRACTION`, the
+            validated default). A measurement instrument for the substep
+            resolution/bias trade-off; changing the *default* is a maintainer
+            decision gated on the validation tier.
         progress
             Optional callback invoked with a :class:`~pyRadMC.progress.ProgressEvent`
             once per completed batch (``n_batches`` ticks total, each covering
@@ -189,6 +197,7 @@ class ReferenceEngine:
                     transport_electrons,
                     weight=primary.weight,
                     deposit_weight=deposit_weight,
+                    step_energy_fraction=step_energy_fraction,
                 )
             scorer.end_batch(per_batch)
             emitter.tick(per_batch)
@@ -219,6 +228,7 @@ class ReferenceEngine:
         correlated: bool = True,
         scoring_grid: ScoringGrid | None = None,
         scoring_mode: str = "dose_to_medium",
+        step_energy_fraction: float = STEP_ENERGY_FRACTION,
         progress: ProgressCallback | None = None,
     ) -> DijResult:
         """Compute the beamlet-resolved dose influence matrix over the lattice.
@@ -339,6 +349,7 @@ class ReferenceEngine:
                         transport_electrons,
                         weight=primary.weight,
                         deposit_weight=deposit_weight,
+                        step_energy_fraction=step_energy_fraction,
                     )
             scorer.end_batch(per_batch)
             emitter.tick(n_beamlets * per_batch)

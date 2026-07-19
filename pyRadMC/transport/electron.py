@@ -126,6 +126,7 @@ def electron_steps(
     pcut: float,
     ecut: float,
     deposit_weight: DepositWeightFn = unit_weight,
+    step_energy_fraction: float = STEP_ENERGY_FRACTION,
 ) -> float:
     """Transport one electron or positron; secondaries go to ``spawn``.
 
@@ -142,6 +143,11 @@ def electron_steps(
     same (E, material) the restricted stopping power charged the continuous loss
     with, so the conversion undoes exactly the weighting the medium applied —
     and at the cutoff-clamped energy for local sub-threshold deposits.
+
+    ``step_energy_fraction`` overrides :data:`STEP_ENERGY_FRACTION` for this
+    transport — a measurement instrument for the substep-resolution bias study.
+    The default is the validated setting; changing *the default* is a maintainer
+    decision gated on the validation tier, not a knob turn.
     """
     escaped = 0.0
     e = energy
@@ -201,7 +207,7 @@ def electron_steps(
         # --- substep length --------------------------------------------------------
         range_cm = cross_sections.csda_range(e, material) / rho
         s_theta = STEP_HINGE_THETA2_MAX / (cross_sections.scattering_power(e, material) * rho)
-        s_max = min(STEP_ENERGY_FRACTION * range_cm, s_theta)
+        s_max = min(step_energy_fraction * range_cm, s_theta)
         # Cap at the next voxel face (plus the nudge across it) so the substep's
         # density and material stay those of the voxel it starts in.
         s_boundary = (

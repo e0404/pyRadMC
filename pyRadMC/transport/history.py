@@ -14,7 +14,7 @@ from __future__ import annotations
 from pyRadMC.data.interface import CrossSectionSource
 from pyRadMC.geometry.grid import VoxelGrid
 from pyRadMC.rng import RNGState
-from pyRadMC.transport.electron import electron_steps
+from pyRadMC.transport.electron import STEP_ENERGY_FRACTION, electron_steps
 from pyRadMC.transport.particles import (
     PHOTON,
     POSITRON,
@@ -46,6 +46,7 @@ def transport_history(
     transport_electrons: bool = True,
     weight: float = 1.0,
     deposit_weight: DepositWeightFn = unit_weight,
+    step_energy_fraction: float = STEP_ENERGY_FRACTION,
 ) -> float:
     """Transport one primary and all its descendants; returns the escaped energy.
 
@@ -76,6 +77,10 @@ def transport_history(
         Scoring-output weight per deposit (dose-to-water SPR; the default books
         dose-to-medium). Applied by the step loops; see
         :mod:`pyRadMC.scoring.dose_to_water`.
+    step_energy_fraction
+        Maximum fraction of CSDA range per electron substep; the default is the
+        validated :data:`~pyRadMC.transport.electron.STEP_ENERGY_FRACTION`. See
+        :func:`~pyRadMC.transport.electron.electron_steps`.
     """
     stack: list[StackEntry] = [(kind, energy, weight, x, y, z, ux, uy, uz)]
     escaped = 0.0
@@ -130,5 +135,6 @@ def transport_history(
                 pcut,
                 ecut,
                 deposit_weight=deposit_weight,
+                step_energy_fraction=step_energy_fraction,
             )
     return escaped

@@ -57,7 +57,6 @@ from pyRadMC.data.materials import WATER
 from pyRadMC.rng.warp_shim import WarpRNGState, init_slot, spawn_stream, uniform
 from pyRadMC.transport.electron import (
     BOUNDARY_NUDGE_CM,
-    STEP_ENERGY_FRACTION,
     STEP_HINGE_THETA2_MAX,
 )
 from pyRadMC.transport.particles import ELECTRON, PHOTON, POSITRON
@@ -1195,6 +1194,7 @@ def electron_kernel(
     deposited: wp.array(dtype=wp.int64),
     pcut: float,
     ecut: float,
+    step_energy_fraction: float,
     dose_to_water: int,
 ):
     """One thread transports one electron or positron; Class II condensed history.
@@ -1290,7 +1290,7 @@ def electron_kernel(
             lookup_2d(tab.scattering_power, mat, tab.e_log_e_min, tab.e_inv_dlog, tab.n_points, e)
             * rho
         )
-        s_max = min(STEP_ENERGY_FRACTION * range_cm, s_theta)
+        s_max = min(step_energy_fraction * range_cm, s_theta)
         # Cap at the next voxel face (plus the nudge across it) so the substep's
         # density and material stay those of the voxel it starts in.
         s_boundary = (
