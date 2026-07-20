@@ -193,6 +193,33 @@ class CrossSectionSource(ABC):
         Drives the multiple-elastic-scattering hinge deflection.
         """
 
+    def elastic_screening(self, energy: float, material: int) -> float:
+        r"""Moliere screening parameter of the elastic scattering law, dimensionless.
+
+        Where :meth:`scattering_power` fixes the *strength* of multiple
+        scattering, this fixes the *shape*: it is the parameter of the
+        screened-Rutherford single-scattering law whose Legendre moments drive
+        the Goudsmit-Saunderson angular distribution
+        (:mod:`pyRadMC.data.goudsmit_saunderson`). The two are consistent by
+        construction — the elastic cross-section is back-derived from
+        ``T = 2 (N_A/M) sigma_el G_1(eta)`` — so the GS mean-square deflection
+        over a short step reproduces the Fermi-Eyges ``T rho s`` exactly. That
+        anchoring is a contract test
+        (``tests/unit/test_elastic_screening.py``): it is what makes GS a
+        refinement of the shipped hinge rather than a rescaling of it.
+
+        Concrete on the interface, computed from the material's elemental
+        composition, so no implementation can silently omit it and the analytic
+        and tabulated backends cannot drift apart on the angular shape. A source
+        carrying real elastic differential data may override it.
+        """
+        from pyRadMC.data.goudsmit_saunderson import moliere_screening
+        from pyRadMC.data.materials import MATERIALS
+
+        if not 0 <= material < self.n_materials:
+            raise ValueError(f"material index {material} beyond this source")
+        return moliere_screening(MATERIALS[material].composition, energy)
+
     # -- restricted-collision range (concrete: derived from the queries above) --
 
     def restricted_range(self, energy: float, material: int, delta_cut: float) -> float:
