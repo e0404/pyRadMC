@@ -82,6 +82,7 @@ class ReferenceEngine:
         scoring_grid: ScoringGrid | None = None,
         scoring_mode: str = "dose_to_medium",
         step_energy_fraction: float = STEP_ENERGY_FRACTION,
+        msc_model: str = "gaussian",
         progress: ProgressCallback | None = None,
     ) -> TransportResult:
         """Transport ``n_histories`` primaries in ``n_batches`` equal batches.
@@ -198,6 +199,7 @@ class ReferenceEngine:
                     weight=primary.weight,
                     deposit_weight=deposit_weight,
                     step_energy_fraction=step_energy_fraction,
+                    msc_model=msc_model,
                 )
             scorer.end_batch(per_batch)
             emitter.tick(per_batch)
@@ -229,6 +231,7 @@ class ReferenceEngine:
         scoring_grid: ScoringGrid | None = None,
         scoring_mode: str = "dose_to_medium",
         step_energy_fraction: float = STEP_ENERGY_FRACTION,
+        msc_model: str = "gaussian",
         progress: ProgressCallback | None = None,
     ) -> DijResult:
         """Compute the beamlet-resolved dose influence matrix over the lattice.
@@ -350,6 +353,7 @@ class ReferenceEngine:
                         weight=primary.weight,
                         deposit_weight=deposit_weight,
                         step_energy_fraction=step_energy_fraction,
+                        msc_model=msc_model,
                     )
             scorer.end_batch(per_batch)
             emitter.tick(n_beamlets * per_batch)

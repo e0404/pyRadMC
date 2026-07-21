@@ -78,7 +78,7 @@ sub-percent approximation. Conservative on purpose: this is the oracle.
 """
 
 STEP_HINGE_THETA2_MAX: float = 0.10
-"""Maximum mean-square hinge deflection per substep, in rad^2.
+"""Maximum mean-square hinge deflection per substep, in rad^2. Gaussian model only.
 
 The Gaussian random-hinge model's validity is *angular*, so the limiter is
 angular: the substep is capped at ``theta2_max / (T(E) rho)`` with the mass
@@ -87,10 +87,23 @@ directly. Because ``T ~ 1/E^2`` outruns the shrinking range, a
 fraction-of-range cap alone lets hinge angles *grow* as the electron slows —
 the low-energy under-ranging the R50 validation gate caught when the historic
 half-voxel-edge cap (whose protection was an accident of voxel size; see the
-a6b6c07 revert) was removed without a replacement. This cap binds below a few
-MeV in water and leaves high-energy steps to the energy cap; heterogeneity is
-handled exactly by the voxel-face truncation below. The value is validated by
-the R50/R_CSDA detour-factor gates; do not change it without rerunning them.
+a6b6c07 revert) was removed without a replacement.
+
+**Where it binds — measured 2026-07-20, correcting an earlier claim here.** At
+the shipped ``STEP_ENERGY_FRACTION`` of 0.05 this cap is *inert* in every soft
+tissue: ``s_theta / s_E >= 1.02`` pointwise over 0.2-20 MeV in water, air, lung
+and adipose (the ratio is density-independent — it is a property of the
+medium), so the energy cap binds first everywhere except cortical bone below
+~2.5 MeV. The cap's protection matters for *fractions above* ~0.057, where it
+re-binds and clamps the effective step — the reason raising the fraction alone
+was measured to buy almost nothing under the Gaussian model.
+
+**Not applied under ``msc_model="gs"``**: Goudsmit-Saunderson samples the exact
+multiple-scattering angle for an arbitrary step length, so the Gaussian-validity
+limit does not apply and the energy-limited step stands (validated with the cap
+lifted: R50/detour and PDD-gamma gates, and the tabulated 6 MV spectral thorax
+at fraction 0.20). The value is validated by the R50/R_CSDA detour-factor
+gates; do not change it without rerunning them.
 """
 
 _ENTRY_NUDGE_CM = 1.0e-9  # same convention as the photon loop
@@ -127,6 +140,7 @@ def electron_steps(
     ecut: float,
     deposit_weight: DepositWeightFn = unit_weight,
     step_energy_fraction: float = STEP_ENERGY_FRACTION,
+    msc_model: str = "gaussian",
 ) -> float:
     """Transport one electron or positron; secondaries go to ``spawn``.
 
@@ -148,7 +162,26 @@ def electron_steps(
     transport — a measurement instrument for the substep-resolution bias study.
     The default is the validated setting; changing *the default* is a maintainer
     decision gated on the validation tier, not a knob turn.
+
+    ``msc_model`` selects the multiple-scattering angular law: ``"gaussian"``
+    (default, the validated small-angle random hinge) or ``"gs"``
+    (Goudsmit-Saunderson, the exact law for an arbitrary step length). This is a
+    **test instrument** in the sense of AGENTS.md 2.10 — it exists so a
+    comparison can isolate the angular model while every other aspect of the
+    step schedule is held fixed, which is the only way to attribute a dose
+    difference to the scattering law rather than to a changed step length.
+    Both consume exactly one uniform, so the random stream does not shift
+    between them. Under ``"gs"`` the angular cap
+    (:data:`STEP_HINGE_THETA2_MAX`) is **not applied** — it is a
+    Gaussian-validity limit, and removing it is what lets a larger
+    ``step_energy_fraction`` actually grow the step (in media where the cap
+    binds, notably bone, the two models therefore differ in *schedule*, not
+    only in deflection law). It is *not* a production mode: when GS is adopted
+    it replaces the Gaussian hinge as the default rather than sitting beside
+    it.
     """
+    if msc_model not in ("gaussian", "gs"):
+        raise ValueError(f"unknown msc_model {msc_model!r}; expected 'gaussian' or 'gs'")
     escaped = 0.0
     e = energy
     w = weight
@@ -206,8 +239,17 @@ def electron_steps(
 
         # --- substep length --------------------------------------------------------
         range_cm = cross_sections.csda_range(e, material) / rho
-        s_theta = STEP_HINGE_THETA2_MAX / (cross_sections.scattering_power(e, material) * rho)
-        s_max = min(step_energy_fraction * range_cm, s_theta)
+        s_max = step_energy_fraction * range_cm
+        if msc_model != "gs":
+            # The angular cap is a *Gaussian-validity* limit (see
+            # STEP_HINGE_THETA2_MAX): it exists because the small-angle hinge is
+            # wrong at large per-step angles. Goudsmit-Saunderson is exact at
+            # arbitrary angle, so under it the energy-limited step stands
+            # (maintainer decision 2026-07-21; validated with the cap lifted on
+            # the R50/detour and PDD-gamma gates and the tabulated spectral
+            # thorax). The Gaussian branch is unchanged to the bit.
+            s_theta = STEP_HINGE_THETA2_MAX / (cross_sections.scattering_power(e, material) * rho)
+            s_max = min(s_max, s_theta)
         # Cap at the next voxel face (plus the nudge across it) so the substep's
         # density and material stay those of the voxel it starts in.
         s_boundary = (
@@ -264,7 +306,11 @@ def electron_steps(
             return escaped + w * (e + latent)
 
         mean_square = cross_sections.scattering_power(e, material) * rho * s
-        cos_hinge = sample_hinge_cos_theta(mean_square, rng_state)
+        # Both laws take the same <theta^2> and one uniform; see ``msc_model``.
+        if msc_model == "gs":
+            cos_hinge = cross_sections.sample_gs_cos_theta(mean_square, e, material, rng_state)
+        else:
+            cos_hinge = sample_hinge_cos_theta(mean_square, rng_state)
         phi = 2.0 * math.pi * uniform(rng_state)
         ux, uy, uz = rotate_direction(ux, uy, uz, cos_hinge, phi)
 

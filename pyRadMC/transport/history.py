@@ -47,6 +47,7 @@ def transport_history(
     weight: float = 1.0,
     deposit_weight: DepositWeightFn = unit_weight,
     step_energy_fraction: float = STEP_ENERGY_FRACTION,
+    msc_model: str = "gaussian",
 ) -> float:
     """Transport one primary and all its descendants; returns the escaped energy.
 
@@ -136,5 +137,6 @@ def transport_history(
                 ecut,
                 deposit_weight=deposit_weight,
                 step_energy_fraction=step_energy_fraction,
+                msc_model=msc_model,
             )
     return escaped

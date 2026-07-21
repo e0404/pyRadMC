@@ -50,9 +50,10 @@ import math
 import numpy as np
 
 __all__ = [
+    "cached_moments",
     "first_transport_moment",
     "gs_cumulative",
-    "gs_inverse_cdf",
+    "gs_scaled_deflection_table",
     "mean_square_angle",
     "moliere_screening",
     "screened_rutherford_cos_theta",
@@ -274,6 +275,20 @@ def gs_cumulative(lam: float, moments: np.ndarray, mu: np.ndarray) -> np.ndarray
 
     The ``l = 0`` term is the isotropic ``(1 + x)/2`` and is kept in closed form.
 
+    **The unscattered delta is removed before the series is summed.** A fraction
+    ``e^{-Lambda}`` of electrons cross the step without a single elastic
+    collision, so the distribution carries a delta at ``mu = 1`` of exactly that
+    weight. A Legendre series cannot represent a delta: truncating one that
+    contains it does not converge, it rings, and the reconstructed density is
+    wrong by an amount that grows as the step shortens — measured at 11 times the
+    intended second moment at ``Lambda`` of order one, which real
+    boundary-truncated substeps reach. Since ``delta(mu - 1)`` has coefficients
+    ``(2l+1)/2``, subtracting it leaves smooth coefficients
+    ``e^{-Lambda G_l} - e^{-Lambda}`` that genuinely decay (``G_l -> 1``, so the
+    difference vanishes). The delta is added back as the jump to 1 at ``mu = 1``,
+    where inversion turns it into the flat forward region of the sampling table —
+    so it costs no branch and no extra variate at sampling time.
+
     Returns a CDF clamped to ``[0, 1]`` and forced non-decreasing: a truncated
     Legendre series rings slightly at the forward peak, and an inverter handed a
     non-monotone CDF produces a silently wrong angular distribution rather than
@@ -281,12 +296,14 @@ def gs_cumulative(lam: float, moments: np.ndarray, mu: np.ndarray) -> np.ndarray
     physics approximation — the residual it removes is at the truncation level
     (:data:`_SERIES_CUTOFF`), which the monotonicity test pins.
     """
-    damping = np.exp(-lam * np.asarray(moments, dtype=np.float64))
-    significant = np.flatnonzero(damping > _SERIES_CUTOFF)
+    unscattered = math.exp(-lam)
+    # Truncate on the *smooth* coefficient, which is the one being summed.
+    coefficients = np.exp(-lam * np.asarray(moments, dtype=np.float64)) - unscattered
+    significant = np.flatnonzero(np.abs(coefficients) > _SERIES_CUTOFF)
     l_max = int(significant[-1]) if significant.size else 0
 
     mu = np.asarray(mu, dtype=np.float64)
-    cdf = 0.5 * (1.0 + mu)
+    cdf = (1.0 - unscattered) * 0.5 * (1.0 + mu)
     if l_max >= 1:
         # P_{l-1} and P_{l+1} by upward recurrence: eval_legendre per order would
         # re-derive the whole ladder each time.
@@ -294,7 +311,7 @@ def gs_cumulative(lam: float, moments: np.ndarray, mu: np.ndarray) -> np.ndarray
         p_curr = mu.copy()  # P_1
         p_next = 1.5 * mu * p_curr - 0.5 * p_prev  # P_2
         for ell in range(1, l_max + 1):
-            cdf += 0.5 * damping[ell] * (p_next - p_prev)
+            cdf += 0.5 * coefficients[ell] * (p_next - p_prev)
             p_prev, p_curr = p_curr, p_next
             n = ell + 1
             p_next = ((2 * n + 1) * mu * p_curr - n * p_prev) / (n + 1)
@@ -306,31 +323,220 @@ def gs_cumulative(lam: float, moments: np.ndarray, mu: np.ndarray) -> np.ndarray
     return cdf
 
 
-def gs_inverse_cdf(lam: float, moments: np.ndarray, n_nodes: int = 4096) -> np.ndarray:
-    r"""Tabulate ``mu(u)`` on ``n_nodes`` uniform nodes of ``u`` in ``[0, 1]``.
+_SERIES_MIN_LAMBDA: float = 300.0
+"""Elastic path count below which the table is built by composition, not the series.
 
-    The sampling face of :func:`gs_cumulative`: one uniform variate indexes this
-    table and interpolates. The forward CDF is built on a grid **logarithmic in
-    ``1 - mu``**, because the distribution spans many decades of angle and a
-    uniform ``mu`` grid would put essentially every node in the isotropic tail
-    while leaving the peak — where nearly all the probability sits — unresolved.
+The Goudsmit-Saunderson *moments* are exact at every ``Lambda``, but reconstructing
+the *density* from them is a Legendre expansion, and that expansion cannot resolve
+the near-forward structure of a lightly-scattered distribution. Measured departure
+of the reconstructed ``2(1 - <cos>)`` from its exact value ``2(1 - e^{-Lambda G_1})``:
+1.005 at ``Lambda = 300``, **1.80 at 20, and 14.6 at 1.4** — and raising the
+Legendre order from 1024 to 4096 does not move it, so this is a representation
+limit, not truncation. Real substeps reach that regime routinely: measured over
+100842 substeps of a slab transport, 20 percent had ``Lambda < 50`` and 5 percent
+``Lambda < 20``, because a substep truncated at a voxel face is far shorter than
+the energy-limited one.
+"""
+
+_MC_TABLE_SAMPLES: int = 1 << 18
+"""Composed deflections per Monte-Carlo-built table."""
+
+_MC_TABLE_SEED: int = 20260720
+"""Fixed seed for Monte-Carlo table construction.
+
+The tables are *data*, not samples: a given (eta, Lambda) bin must yield the same
+table on every run, or the transport stops being reproducible for a given seed
+(AGENTS.md 2.3). Build-time statistical noise is therefore a fixed, testable
+property of the table rather than a source of run-to-run variation."""
+
+
+def _compose(cos_a: np.ndarray, cos_b: np.ndarray, rng: np.random.Generator) -> np.ndarray:
+    r"""Compose two independent deflections into a net polar cosine.
+
+    Only the *polar* angle is tracked. By azimuthal symmetry the second
+    deflection's azimuth relative to the first is uniform, so the net angle
+    follows the spherical law of cosines
+
+    .. math::
+
+        \cos\theta = \cos\theta_a \cos\theta_b
+                   + \sin\theta_a \sin\theta_b \cos\varphi ,
+
+    which is exact and needs no direction vector.
+    """
+    sin_a = np.sqrt(np.maximum(0.0, 1.0 - cos_a * cos_a))
+    sin_b = np.sqrt(np.maximum(0.0, 1.0 - cos_b * cos_b))
+    phi = rng.uniform(0.0, 2.0 * np.pi, size=cos_a.size)
+    composed: np.ndarray = np.clip(cos_a * cos_b + sin_a * sin_b * np.cos(phi), -1.0, 1.0)
+    return composed
+
+
+def _mc_gs_cosines(eta: float, lam: float, n: int, rng: np.random.Generator) -> np.ndarray:
+    r"""Sample net deflection cosines by explicit composition of single scatters.
+
+    This is the *definition* of the Goudsmit-Saunderson distribution — a Poisson
+    number of elastic collisions, composed — so it is exact wherever the
+    Legendre reconstruction is not, and needs no series to converge.
+
+    Composition is done by **repeated self-convolution** rather than one scatter
+    at a time. A Poisson process splits, ``Poisson(2 Lambda) = Poisson(Lambda) +
+    Poisson(Lambda)``, so a sample for ``Lambda`` composed with an independent
+    sample for ``Lambda`` is a sample for ``2 Lambda``. Starting from
+    ``Lambda_0 <= 1`` and doubling costs ``log2(Lambda)`` passes instead of
+    ``Lambda`` — about ten rather than eight hundred at the step lengths this
+    engine takes. The independent partner is a random permutation of the same
+    sample: a random matching, exact in the marginals, and the residual pairing
+    correlation is checked by validating this construction against the series in
+    the regime where the series is trustworthy.
+    """
+    doublings = max(0, math.ceil(math.log2(lam)) if lam > 1.0 else 0)
+    lam_0 = lam / (2.0**doublings)
+
+    # Base: a genuinely Poisson number of scatters, mean <= 1.
+    counts = rng.poisson(lam_0, size=n)
+    cos_acc = np.ones(n)
+    for step in range(int(counts.max()) if counts.size else 0):
+        active = counts > step
+        k = int(active.sum())
+        if k == 0:
+            break
+        # Vectorized over the active lanes; the scalar form is the same algebra.
+        xi = rng.random(k)
+        inverse = xi / (2.0 * eta * (1.0 + eta)) + 1.0 / (2.0 + 2.0 * eta)
+        single = 1.0 + 2.0 * eta - 1.0 / inverse
+        cos_acc[active] = _compose(cos_acc[active], single, rng)
+
+    for _ in range(doublings):
+        cos_acc = _compose(cos_acc, rng.permutation(cos_acc), rng)
+    return cos_acc
+
+
+_MOMENT_L_MAX: int = 1024
+"""Legendre orders computed per screening parameter.
+
+Generous rather than adaptive because the moments are cached per ``eta`` while
+the series truncation is chosen per *step* from the damping: the shortest steps
+the engine takes need ~200 orders (measured), and the margin costs one cached
+array per screening bin.
+"""
+
+_moment_cache: dict[float, np.ndarray] = {}
+
+
+def cached_moments(eta: float) -> np.ndarray:
+    """Legendre moments for ``eta``, memoized across table builds.
+
+    The moments depend only on the screening parameter, while the tables that
+    consume them are keyed on screening *and* step length; caching here keeps
+    the expensive quadrature from being repeated across every step-length bin of
+    the same material and energy.
+    """
+    moments = _moment_cache.get(eta)
+    if moments is None:
+        moments = screened_rutherford_moments(eta, l_max=_MOMENT_L_MAX)
+        _moment_cache[eta] = moments
+    return moments
+
+
+def gs_scaled_deflection_table(
+    eta: float, theta2: float, n_u: int = 512, n_mu: int = 4096
+) -> np.ndarray:
+    r"""Tabulate the scaled deflection ``w = (1 - mu) / <1 - mu>`` in ``n_u`` bins.
+
+    The sampling face of the Goudsmit-Saunderson distribution, consumed by
+    :func:`pyRadMC.physics.gs.sample_gs_cos_theta_bilinear`. The step length enters
+    through the anchoring ``Lambda G_1 = <theta^2>/2``, so the caller specifies
+    the step by the same Fermi-Eyges mean-square angle the Gaussian hinge takes.
+
+    **Nodes are bin averages, not quantiles.** Entry ``i`` is the conditional mean
+    of ``1 - mu`` over the ``i``-th equal-probability bin of the distribution, and
+    the sampler draws it piecewise-constant. This is what makes the table's
+    moments exact rather than approximate. Storing *quantiles* and interpolating
+    between them cannot represent a heavy tail: the outermost node is then an
+    extreme order statistic — around the ``1/N``-th quantile of the build sample —
+    while carrying ``1/n_u`` of the sampling weight, which over-weighted wide
+    angles by a factor of roughly 500 and inflated ``<1 - cos>`` by up to 35x at
+    small ``Lambda``. Bin averaging gives every bin its correct probability *and*
+    its correct mean contribution, at the cost of the angular spread within a
+    bin — negligible where bins are narrow, and in the outermost bin a
+    moment-preserving stand-in for a spread of rare wide angles.
+
+    **Normalized to ``<w> = 1``**, so the caller rescales by its own exact
+    ``<1 - cos theta> = 1 - e^{-<theta^2>/2}``. The first moment is then exact
+    however coarsely ``eta`` and ``<theta^2>`` were binned, and only the shape
+    carries interpolation error. ``<1 - cos>`` is the anchor rather than
+    ``<theta^2>`` because it is the moment Goudsmit-Saunderson theory pins
+    exactly (``<cos> = e^{-Lambda G_1}``) and the one
+    :meth:`~pyRadMC.data.interface.CrossSectionSource.scattering_power` encodes;
+    ``<theta^2>`` is tail-dominated for a heavy-tailed law, so anchoring on it
+    amplifies precisely the least well represented part of the distribution.
 
     Returns
     -------
     ndarray
-        Shape ``(n_nodes,)``, ascending, ``mu(0) = -1`` to ``mu(1) = 1``.
+        Shape ``(n_u,)``, non-negative, mean exactly 1, ascending ``u`` ordered
+        from the widest deflection to the most forward.
     """
-    # Log grid in 1 - mu, densest at the forward peak, plus the exact endpoints.
-    one_minus_mu = np.geomspace(1.0e-12, 2.0, 1 << 15)
+    raw = _gs_raw_cosines(eta, theta2, n_mu)
+    # Equal-probability bins; entry i is the conditional mean of 1 - mu over bin i.
+    one_minus_mu = (1.0 - raw).reshape(n_u, raw.size // n_u).mean(axis=1)
+    mean = float(one_minus_mu.mean())
+    if mean <= 0.0:
+        # Degenerate bin: Lambda so small that no build sample scattered at all
+        # (near the floored key, Lambda ~ 1e-9, the all-zero Poisson outcome is
+        # a near certainty). The correct limit is "no deflection": w = 0 makes
+        # the sampler return mu = 1 - 0 * anchor = 1 exactly. Dividing by the
+        # zero mean instead yields a NaN row, and max(-1, nan) is -1 under both
+        # Python and CUDA fmaxf semantics — silent certain backscatter, not a
+        # crash. The bias of the forward table against the true distribution is
+        # the anchor itself, 1 - e^{-theta2/2} <= ~1e-12 for any theta2 that
+        # can key this bin. Test-pinned in tests/unit/test_gs_sampler.py.
+        return np.zeros(n_u)
+    normalized: np.ndarray = one_minus_mu / mean
+    return normalized
+
+
+_RAW_SAMPLES: int = 1 << 19
+"""Equally weighted deflection cosines a table is condensed from.
+
+A multiple of any ``n_u`` the sampler uses, so the bin averages in
+:func:`gs_scaled_deflection_table` are over exactly equal-probability groups.
+"""
+
+
+def _gs_raw_cosines(eta: float, theta2: float, n_mu: int) -> np.ndarray:
+    """Equally weighted deflection cosines for one ``(eta, <theta^2>)`` pair.
+
+    Ascending, one per equal-probability slot, so the caller can condense them
+    into bin averages by a plain reshape. Two constructions feed it, split at
+    :data:`_SERIES_MIN_LAMBDA`: explicit composition where the Legendre density
+    reconstruction cannot represent a lightly scattered distribution, and the
+    series elsewhere, where it is accurate and far cheaper.
+    """
+    g1 = first_transport_moment(eta)
+    lam = 0.5 * theta2 / g1
+
+    if lam < _SERIES_MIN_LAMBDA:
+        rng = np.random.default_rng(_MC_TABLE_SEED)
+        return np.sort(_mc_gs_cosines(eta, lam, _RAW_SAMPLES, rng))
+
+    # Log grid in 1 - mu: the deflection spans decades and a uniform mu grid
+    # would leave the peak — where the probability is — unresolved.
+    one_minus_mu = np.geomspace(1.0e-12, 2.0, n_mu)
     mu_grid = np.clip(1.0 - one_minus_mu, -1.0, 1.0)[::-1]
     mu_grid[0], mu_grid[-1] = -1.0, 1.0
-
-    cdf = gs_cumulative(lam, moments, mu_grid)
-    # Strictly increasing abscissae are required by np.interp; ties at the
-    # saturated ends carry no probability, so dropping them is exact.
-    keep = np.concatenate(([True], np.diff(cdf) > 0.0))
-    u = np.linspace(0.0, 1.0, n_nodes)
-    return np.interp(u, cdf[keep], mu_grid[keep])
+    cdf = gs_cumulative(lam, cached_moments(eta), mu_grid)
+    # Midpoint sampling of the inverse CDF gives equally weighted representatives
+    # without an extreme order statistic at either end.
+    u = (np.arange(_RAW_SAMPLES) + 0.5) / _RAW_SAMPLES
+    keep_lo = int(np.flatnonzero(cdf <= 0.0)[-1]) if np.any(cdf <= 0.0) else 0
+    keep_hi = int(np.flatnonzero(cdf >= 1.0)[0]) if np.any(cdf >= 1.0) else cdf.size - 1
+    if keep_hi <= keep_lo:
+        keep_lo, keep_hi = 0, cdf.size - 1
+    sub_cdf, sub_mu = cdf[keep_lo : keep_hi + 1], mu_grid[keep_lo : keep_hi + 1]
+    keep = np.concatenate(([True], np.diff(sub_cdf) > 0.0))
+    representatives: np.ndarray = np.interp(u, sub_cdf[keep], sub_mu[keep])
+    return representatives
 
 
 def mean_square_angle(lam: float, g1: float) -> float:

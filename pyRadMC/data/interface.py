@@ -22,6 +22,7 @@ cm^2/g and MeV cm^2/g respectively.
 
 from __future__ import annotations
 
+import math
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 
@@ -37,6 +38,26 @@ __all__ = ["CrossSectionSource", "PhotonProcess"]
 _RANGE_GRID_E_MAX: float = 64.0
 """Upper edge (MeV) of the cached restricted-range grid: comfortably above the
 1-20 MeV engine scope; queries clamp to it."""
+
+_GS_BINS_PER_LOG: float = 4.0
+"""Goudsmit-Saunderson grid nodes per natural log of ``eta`` and ``<theta^2>``.
+
+Coarse on purpose, and affordable because the lookup **interpolates bilinearly**
+between the four bracketing nodes rather than snapping to the nearest. The
+tables are normalized in a scaled deflection, so binning cannot move
+``<1 - cos theta>`` — only the shape around it — and refining this
+two-dimensional grid instead costs quadratically (measured: 16 per log ran to
+~10k tables and ~20 MB, against ~1.1 MB for the full grid at 4). The residual
+shape error is pinned by a validation-tier test against exactly-built tables,
+not chosen by eye.
+"""
+
+_GS_TABLE_NODES: int = 512
+"""Equal-probability bins per Goudsmit-Saunderson deflection table."""
+
+_GS_THETA2_MIN: float = 1.0e-12
+"""Floor on the binned ``<theta^2>``; below this a substep deflects immeasurably
+and the table would be built for a distribution indistinguishable from forward."""
 
 _RANGE_GRID_POINTS: int = 4096
 """Nodes of the cached range grid; trapezoid error at this log spacing sits far
@@ -219,6 +240,75 @@ class CrossSectionSource(ABC):
         if not 0 <= material < self.n_materials:
             raise ValueError(f"material index {material} beyond this source")
         return moliere_screening(MATERIALS[material].composition, energy)
+
+    def sample_gs_cos_theta(
+        self, mean_square_angle: float, energy: float, material: int, rng_state: object
+    ) -> float:
+        """Sample the Goudsmit-Saunderson multiple-scattering deflection cosine.
+
+        The exact multiple-scattering angle for the substep, in place of the
+        small-angle Gaussian of :func:`pyRadMC.physics.msc.sample_hinge_cos_theta`.
+        Takes the *same* ``mean_square_angle = T rho s`` the Gaussian hinge takes
+        and consumes the same single uniform, so the two are drop-in
+        alternatives that do not shift the random stream relative to each other —
+        which is what lets a transport comparison isolate the angular model.
+
+        Kept on the source rather than as a free function for the reason the
+        coherent sampler is (see :meth:`sample_coherent_cos_theta`): the angular
+        shape *is* cross-section data. The sampling math lives in
+        :mod:`pyRadMC.physics.gs`; the table that selects it lives here.
+
+        Tables are memoized on a log-spaced ``(eta, <theta^2>)`` grid. Binning is
+        safe because the table is normalized in a scaled deflection: the
+        rescaling by this call's exact ``<1 - cos theta>`` restores the first
+        moment exactly, so the grid resolution perturbs only the shape.
+        """
+        from pyRadMC.data.goudsmit_saunderson import gs_scaled_deflection_table
+        from pyRadMC.physics.gs import sample_gs_cos_theta_bilinear
+
+        if mean_square_angle <= 0.0:
+            return 1.0
+        eta = self.elastic_screening(energy, material)
+
+        cache: dict[tuple[int, int], npt.NDArray[np.float64]] | None = getattr(
+            self, "_gs_table_cache", None
+        )
+        if cache is None:
+            cache = {}
+            self._gs_table_cache = cache
+
+        # Grid in log space: both parameters span decades over the transported
+        # range (eta ~ 3, <theta^2> ~ 2), and the distribution varies smoothly
+        # in their logarithms. The lookup interpolates between the four
+        # bracketing nodes rather than snapping to the nearest, because the
+        # shape is irreducibly two-dimensional and refining a nearest-bin grid
+        # to the same fidelity costs quadratically more table.
+        fx = math.log(eta) * _GS_BINS_PER_LOG
+        fy = math.log(max(mean_square_angle, _GS_THETA2_MIN)) * _GS_BINS_PER_LOG
+        ix, iy = math.floor(fx), math.floor(fy)
+
+        def row(i: int, j: int) -> npt.NDArray[np.float64]:
+            table = cache.get((i, j))
+            if table is None:
+                table = gs_scaled_deflection_table(
+                    math.exp(i / _GS_BINS_PER_LOG),
+                    math.exp(j / _GS_BINS_PER_LOG),
+                    n_u=_GS_TABLE_NODES,
+                )
+                cache[(i, j)] = table
+            return table
+
+        return sample_gs_cos_theta_bilinear(
+            row(ix, iy),
+            row(ix + 1, iy),
+            row(ix, iy + 1),
+            row(ix + 1, iy + 1),
+            fx - ix,
+            fy - iy,
+            _GS_TABLE_NODES,
+            mean_square_angle,
+            rng_state,
+        )
 
     # -- restricted-collision range (concrete: derived from the queries above) --
 

@@ -189,31 +189,58 @@ class TestGoudsmitSaundersonSampling:
     def test_sampled_distribution_matches_brute_force_single_scattering(
         self, lam: float, n: int
     ) -> None:
-        """Chi-squared: the series sampler reproduces explicit scatter composition.
+        """Chi-squared: the production table reproduces explicit scatter composition.
 
         The full-distribution counterpart to the moment test — moments agreeing
         does not imply the shape does, and it is the *shape* (specifically the
         large-angle tail the Gaussian hinge omits) that GS exists to get right.
-        Binned in ``1 - cos theta`` on a log grid, which is where the structure
-        lives; chi-squared is the AGENTS section 4 detection oracle.
+        The sampled arm is exactly the production path: the bin-averaged table
+        of :func:`gs_scaled_deflection_table`, drawn piecewise-constant and
+        rescaled by the first-moment anchor, against the assumption-free oracle
+        of composing individual scatters. Chi-squared on equal-probability bins
+        of the reference is the AGENTS section 4 detection oracle.
+
+        Scope caveat, recorded rather than hidden: below the series/composition
+        changeover (``Lambda < 300``, the fast-tier case) the table itself is
+        built by Monte-Carlo composition, so that case validates the
+        self-convolution doubling and the bin-averaging — not an independent
+        construction. The ``Lambda = 500`` validation case exercises the
+        Legendre-series build, which is genuinely independent of the oracle.
         """
         from scipy import stats
 
-        from pyRadMC.data.goudsmit_saunderson import gs_inverse_cdf, screened_rutherford_moments
+        from pyRadMC.data.goudsmit_saunderson import (
+            first_transport_moment,
+            gs_scaled_deflection_table,
+        )
 
         eta = 1.0e-4
         rng = np.random.default_rng(SEED)
 
-        moments = screened_rutherford_moments(eta, l_max=512)
-        table = gs_inverse_cdf(lam, moments, n_nodes=4096)
-        sampled = np.interp(rng.random(n), np.linspace(0.0, 1.0, table.size), table)
+        g1 = first_transport_moment(eta)
+        # Built by the production constructor, but at finer atom granularity
+        # than the production 512: a histogram oracle over a 512-atom discrete
+        # distribution sees edge-straddling atoms as shape error (measured:
+        # chi2 48.6 at 512 atoms falling to 17.2 at 4096 and flat beyond, on a
+        # 19-dof test — a discretization artifact, not a distribution defect).
+        # This test validates the CONSTRUCTION; the production granularity is
+        # covered by the exact first-moment anchoring test and by
+        # TestBinningFidelity in tests/unit/test_gs_sampler.py.
+        n_u = 4096
+        table = gs_scaled_deflection_table(eta, 2.0 * lam * g1, n_u=n_u)
+        # Draw exactly as the production sampler does: one uniform indexes an
+        # equal-probability bin, and the bin-average deflection is rescaled by
+        # the exact anchor <1 - cos> = 1 - e^{-Lambda G_1}.
+        index = np.minimum((rng.random(n) * n_u).astype(int), n_u - 1)
+        sampled = np.maximum(-1.0, 1.0 - table[index] * -np.expm1(-lam * g1))
 
         reference = _brute_force_cosines(lam, eta, n, rng)
 
-        # Log bins in 1 - mu, spanning the sampled range; equal counts expected
-        # under the null since both samples have the same size.
-        lo = max(1.0e-6, min(float((1.0 - sampled).min()), float((1.0 - reference).min())))
-        edges = np.geomspace(lo, 2.0, 25)
+        # Equal-probability edges from the reference: the sampled arm is a
+        # 512-atom discrete distribution, so bins must stay wide relative to
+        # the atom spacing or edge-straddling atoms masquerade as shape error.
+        edges = np.quantile(1.0 - reference, np.linspace(0.0, 1.0, 21))
+        edges[0], edges[-1] = 0.0, 2.0
         obs, _ = np.histogram(1.0 - sampled, bins=edges)
         exp, _ = np.histogram(1.0 - reference, bins=edges)
 
@@ -222,7 +249,7 @@ class TestGoudsmitSaundersonSampling:
         dof = int(keep.sum()) - 1
         p = float(stats.chi2.sf(chi2, dof))
         assert p > 0.001, (
-            f"series sampler vs brute-force composition at Lambda={lam}: "
+            f"production table vs brute-force composition at Lambda={lam}: "
             f"chi2={chi2:.1f} dof={dof} p={p:.2e}"
         )
 
