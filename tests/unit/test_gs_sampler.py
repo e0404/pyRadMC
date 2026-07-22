@@ -162,6 +162,176 @@ class TestBinningFidelity:
         assert p > 0.001, f"binned vs exact GS table: chi2={chi2:.1f} p={p:.2e}"
 
 
+class TestGridSampler:
+    """The windowed flat-grid sampler: the device backends' lookup path.
+
+    ``sample_gs_cos_theta_grid`` is the flat-rectangle face of
+    ``sample_gs_cos_theta_bilinear``: it selects the four bracketing rows from
+    an eagerly built grid (:func:`pyRadMC.data.goudsmit_saunderson.build_gs_grid`)
+    and delegates the blend to the very same function. Pinned host-side with
+    paired RNG streams and bit-equality — the two are one code path, so any
+    difference is an indexing defect — and the device port inherits the
+    equivalence through the single-source physics loader.
+    """
+
+    N_U = 64
+    N_ETA = 4
+    N_THETA2 = 5
+    IX0 = -13
+    IY0 = -47
+
+    def _grid(self) -> np.ndarray:
+        """Synthetic unit-mean rows, ``1 + a_ij (u - 1/2)`` with a distinct tilt
+        per node, so a transposed or off-by-one lookup draws from a visibly
+        different row while the anchor stays exact for every blend."""
+        u = (np.arange(self.N_U) + 0.5) / self.N_U
+        tilt = (
+            0.1
+            + 0.4
+            * (np.arange(self.N_ETA)[:, None] + 2.0 * np.arange(self.N_THETA2)[None, :])
+            / 10.0
+        )
+        return 1.0 + tilt[..., None] * (u - 0.5)
+
+    def test_grid_lookup_equals_the_bilinear_blend_of_bracketing_rows(self) -> None:
+        from pyRadMC.physics.gs import sample_gs_cos_theta_bilinear, sample_gs_cos_theta_grid
+
+        values = self._grid()
+        theta2 = 0.02
+        fx, fy = -11.3, -44.2  # strictly inside the window, off-node in both axes
+        ix = int(np.floor(fx)) - self.IX0
+        iy = int(np.floor(fy)) - self.IY0
+        rng_grid = np.random.default_rng(SEED)
+        rng_rows = np.random.default_rng(SEED)
+        for _ in range(256):
+            got = sample_gs_cos_theta_grid(
+                values,
+                self.IX0,
+                self.IY0,
+                self.N_ETA,
+                self.N_THETA2,
+                self.N_U,
+                fx,
+                fy,
+                theta2,
+                rng_grid,
+            )
+            want = sample_gs_cos_theta_bilinear(
+                values[ix, iy],
+                values[ix + 1, iy],
+                values[ix, iy + 1],
+                values[ix + 1, iy + 1],
+                fx - np.floor(fx),
+                fy - np.floor(fy),
+                self.N_U,
+                theta2,
+                rng_rows,
+            )
+            assert got == want
+
+    def test_out_of_window_keys_clamp_to_the_edge_nodes(self) -> None:
+        """A key past the window edge lands on the edge pair with saturated weight.
+
+        A correctly derived window never produces one (test_gs_grid pins the
+        coverage), so the clamp only guards float dust at the edges — but it
+        must degrade to the nearest edge node, never index out of bounds, and
+        the anchor survives because clamping moves only the *shape*.
+        """
+        from pyRadMC.physics.gs import sample_gs_cos_theta_bilinear, sample_gs_cos_theta_grid
+
+        values = self._grid()
+        theta2 = 0.05
+        fx = self.IX0 - 3.7  # far below the first eta column
+        fy = self.IY0 + self.N_THETA2 + 2.9  # far above the last theta2 row
+        ey = self.N_THETA2 - 2
+        rng_grid = np.random.default_rng(SEED)
+        rng_rows = np.random.default_rng(SEED)
+        for _ in range(256):
+            got = sample_gs_cos_theta_grid(
+                values,
+                self.IX0,
+                self.IY0,
+                self.N_ETA,
+                self.N_THETA2,
+                self.N_U,
+                fx,
+                fy,
+                theta2,
+                rng_grid,
+            )
+            want = sample_gs_cos_theta_bilinear(
+                values[0, ey],
+                values[1, ey],
+                values[0, ey + 1],
+                values[1, ey + 1],
+                0.0,
+                1.0,
+                self.N_U,
+                theta2,
+                rng_rows,
+            )
+            assert got == want
+
+
+class _CountingState:
+    """Host RNG state that counts its draws; ``uniform(state)`` calls ``random()``."""
+
+    def __init__(self, seed: int) -> None:
+        self._rng = np.random.default_rng(seed)
+        self.draws = 0
+
+    def random(self) -> float:
+        self.draws += 1
+        return float(self._rng.random())
+
+
+class TestStreamParity:
+    """Both angular models consume exactly one uniform per hinge.
+
+    This is the contract every paired GS-vs-Gaussian comparison leans on: with
+    identical consumption the random streams never shift between the models, so
+    a transport difference is the angular law and nothing else. It holds for
+    every ``mean_square_angle > 0``, which every real substep satisfies
+    (``T rho s`` with ``s`` at least the boundary nudge); the zero-step early
+    return is reachable only through the public sampler API, never transport.
+    """
+
+    def test_gaussian_hinge_consumes_exactly_one_uniform(self) -> None:
+        from pyRadMC.physics.msc import sample_hinge_cos_theta
+
+        state = _CountingState(SEED)
+        sample_hinge_cos_theta(0.02, state)
+        assert state.draws == 1
+
+    def test_gs_source_sampler_consumes_exactly_one_uniform(self) -> None:
+        from pyRadMC.data.analytic import AnalyticCrossSections
+        from pyRadMC.data.materials import WATER
+
+        source = AnalyticCrossSections()
+        state = _CountingState(SEED)
+        source.sample_gs_cos_theta(0.02, 1.0, WATER, state)
+        assert state.draws == 1
+
+    def test_gs_grid_sampler_consumes_exactly_one_uniform(self) -> None:
+        from pyRadMC.physics.gs import sample_gs_cos_theta_grid
+
+        values = TestGridSampler()._grid()
+        state = _CountingState(SEED)
+        sample_gs_cos_theta_grid(
+            values,
+            TestGridSampler.IX0,
+            TestGridSampler.IY0,
+            TestGridSampler.N_ETA,
+            TestGridSampler.N_THETA2,
+            TestGridSampler.N_U,
+            -11.3,
+            -44.2,
+            0.02,
+            state,
+        )
+        assert state.draws == 1
+
+
 class TestDepartureFromTheGaussianHinge:
     """What L1 is expected to measure, quantified before transport runs."""
 

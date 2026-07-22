@@ -52,7 +52,7 @@ from pyRadMC import (
     PHOTON_SPLIT_N,
 )
 from pyRadMC.backends.warp.physics import warp_physics
-from pyRadMC.data.interface import PhotonProcess
+from pyRadMC.data.interface import _GS_BINS_PER_LOG, _GS_THETA2_MIN, PhotonProcess
 from pyRadMC.data.materials import WATER
 from pyRadMC.rng.warp_shim import WarpRNGState, init_slot, spawn_stream, uniform
 from pyRadMC.transport.electron import (
@@ -129,6 +129,7 @@ sample_isotropic_direction = _p.sample_isotropic_direction
 sample_moller_delta_energy = _p.sample_moller_delta_energy
 moller_direction_cosines = _p.moller_direction_cosines
 sample_hinge_cos_theta = _p.sample_hinge_cos_theta
+sample_gs_cos_theta_grid = _p.sample_gs_cos_theta_grid
 bremsstrahlung_step_parameters = _p.bremsstrahlung_step_parameters
 sample_bremsstrahlung_energy = _p.sample_bremsstrahlung_energy
 roulette_weight = _p.roulette_weight
@@ -162,7 +163,14 @@ class GridInfo:
 
 @wp.struct
 class Tables:
-    """Device copies of :class:`pyRadMC.data.tables.CrossSectionTables` (float32)."""
+    """Device copies of :class:`pyRadMC.data.tables.CrossSectionTables` (float32).
+
+    The Goudsmit-Saunderson fields (``gs_*``) carry the eagerly built deflection
+    grid (:func:`pyRadMC.data.goudsmit_saunderson.build_gs_grid`) when the run
+    asked for ``msc_model="gs"``; a Gaussian run uploads a 1-element placeholder
+    the kernel never reads (the branch is on the launch parameter, not the
+    data). ``log_eta`` is always present — it is part of the flattened source.
+    """
 
     mu_compton: wp.array2d(dtype=float)
     mu_photo: wp.array2d(dtype=float)
@@ -174,10 +182,12 @@ class Tables:
     moller: wp.array2d(dtype=float)
     csda_range: wp.array2d(dtype=float)
     scattering_power: wp.array2d(dtype=float)
+    log_eta: wp.array2d(dtype=float)
     restricted_range: wp.array2d(dtype=float)
     energy_of_restricted_range: wp.array2d(dtype=float)
     coherent_x: wp.array(dtype=float)
     coherent_cumulative: wp.array2d(dtype=float)
+    gs_values: wp.array3d(dtype=float)
     p_log_e_min: float
     p_inv_dlog: float
     e_log_e_min: float
@@ -186,6 +196,11 @@ class Tables:
     r_inv_dlog: float
     n_points: int
     n_coherent: int
+    gs_ix0: int
+    gs_iy0: int
+    gs_n_eta: int
+    gs_n_theta2: int
+    gs_n_u: int
 
 
 @wp.struct
@@ -1195,6 +1210,7 @@ def electron_kernel(
     pcut: float,
     ecut: float,
     step_energy_fraction: float,
+    msc_model_gs: int,
     dose_to_water: int,
 ):
     """One thread transports one electron or positron; Class II condensed history.
@@ -1284,13 +1300,21 @@ def electron_kernel(
         range_cm = (
             lookup_2d(tab.csda_range, mat, tab.e_log_e_min, tab.e_inv_dlog, tab.n_points, e) / rho
         )
-        # Angular cap: bound each hinge's mean-square deflection (see
-        # STEP_HINGE_THETA2_MAX); mirrors the reference loop's s_theta.
-        s_theta = STEP_HINGE_THETA2_MAX / (
-            lookup_2d(tab.scattering_power, mat, tab.e_log_e_min, tab.e_inv_dlog, tab.n_points, e)
-            * rho
-        )
-        s_max = min(step_energy_fraction * range_cm, s_theta)
+        s_max = step_energy_fraction * range_cm
+        if msc_model_gs == 0:
+            # Angular cap: bound each hinge's mean-square deflection (see
+            # STEP_HINGE_THETA2_MAX); mirrors the reference loop's s_theta. A
+            # *Gaussian-validity* limit: under Goudsmit-Saunderson the exact
+            # deflection is sampled at arbitrary step length, so the
+            # energy-limited step stands (same conditional as the reference
+            # loop; the Gaussian branch's arithmetic is unchanged).
+            s_theta = STEP_HINGE_THETA2_MAX / (
+                lookup_2d(
+                    tab.scattering_power, mat, tab.e_log_e_min, tab.e_inv_dlog, tab.n_points, e
+                )
+                * rho
+            )
+            s_max = min(s_max, s_theta)
         # Cap at the next voxel face (plus the nudge across it) so the substep's
         # density and material stay those of the voxel it starts in.
         s_boundary = (
@@ -1396,7 +1420,30 @@ def electron_kernel(
             * rho
             * s
         )
-        cos_hinge = sample_hinge_cos_theta(mean_square, state)
+        # Both laws take the same <theta^2> and one uniform (stream parity is
+        # test-pinned through the device RNG), mirroring the reference loop's
+        # msc_model branch. GS keys its table grid on (log eta, log <theta^2>)
+        # at the same post-deposit energy the scattering power was read at.
+        if msc_model_gs == 1:
+            fx = (
+                lookup_2d(tab.log_eta, mat, tab.e_log_e_min, tab.e_inv_dlog, tab.n_points, e)
+                * _GS_BINS_PER_LOG
+            )
+            fy = math.log(max(mean_square, _GS_THETA2_MIN)) * _GS_BINS_PER_LOG
+            cos_hinge = sample_gs_cos_theta_grid(
+                tab.gs_values,
+                tab.gs_ix0,
+                tab.gs_iy0,
+                tab.gs_n_eta,
+                tab.gs_n_theta2,
+                tab.gs_n_u,
+                fx,
+                fy,
+                mean_square,
+                state,
+            )
+        else:
+            cos_hinge = sample_hinge_cos_theta(mean_square, state)
         phi = 2.0 * math.pi * uniform(state)
         ux, uy, uz = rotate_direction(ux, uy, uz, cos_hinge, phi)
 

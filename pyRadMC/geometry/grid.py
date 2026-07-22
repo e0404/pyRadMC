@@ -182,6 +182,23 @@ def distance_to_voxel_boundary(
     same axis measures zero. The loop biases each boundary-limited step just past the
     face (:data:`pyRadMC.transport.electron.BOUNDARY_NUDGE_CM`) so that degenerate
     zero cannot recur into a stall.
+
+    **The result is clamped non-negative.** A distance to the exit face of the
+    voxel a point is assigned to is non-negative by definition; a negative value
+    can only be float rounding, and it is not a harmless nit. In the sub-ulp
+    band around a face, ``point_axis_index`` can round *up* to the voxel whose
+    recomputed lower face lies half an ulp above the position, making
+    ``(face - coord) / u`` negative — and a grazing direction amplifies the
+    face error by ``1/|u|`` past any fixed nudge (measured -6e-5 in float32 at
+    ``|u| = 0.0088`` on the 3 mm thorax grid). An electron substep capped by
+    that value has *negative* length: no energy loss, a position frozen below
+    one ulp, and under the Goudsmit-Saunderson model — whose zero-step guard
+    returns exactly forward — a frozen direction too, a self-sustaining fixed
+    point that held single GPU lanes for over 1e6 iterations (one launch
+    measured at 126.9 s against a 10.8 ms median). Clamping restores the
+    definition: the point is treated as *on* the face, and the caller's nudge
+    carries it across. Test-pinned in float32 with the measured trap state
+    (``tests/physics/test_warp_boundary_distance.py``).
     """
     result = math.inf
 
@@ -203,7 +220,7 @@ def distance_to_voxel_boundary(
     elif uz < 0.0:
         result = min(result, (z_lo + float(iz) * sz - z) / uz)
 
-    return result
+    return max(result, 0.0)
 
 
 @dataclass(frozen=True)

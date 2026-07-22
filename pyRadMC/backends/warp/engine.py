@@ -95,6 +95,19 @@ def _scoring_info(scoring: ScoringGrid) -> GridInfo:
     return si
 
 
+def _validate_msc_model(msc_model: str) -> int:
+    """Map the ``msc_model`` name to the kernel's launch flag; refuse unknowns.
+
+    Same names and refusal wording as the reference loop
+    (:func:`pyRadMC.transport.electron.electron_steps`), but checked *before*
+    any launch — a kernel cannot raise. The int is what the kernels branch on:
+    0 = Gaussian hinge (shipped default), 1 = Goudsmit-Saunderson.
+    """
+    if msc_model not in ("gaussian", "gs"):
+        raise ValueError(f"unknown msc_model {msc_model!r}; expected 'gaussian' or 'gs'")
+    return 1 if msc_model == "gs" else 0
+
+
 _GROUP_SIZE_FALLBACK = 128
 """Beamlet group size when free device memory is unknown (cpu, or no query)."""
 
@@ -281,6 +294,7 @@ class WarpEngine:
         scoring_grid: ScoringGrid | None = None,
         scoring_mode: str = "dose_to_medium",
         step_energy_fraction: float = STEP_ENERGY_FRACTION,
+        msc_model: str = "gaussian",
         progress: ProgressCallback | None = None,
     ) -> TransportResult:
         """Transport ``n_histories`` primaries; same contract as the reference engine.
@@ -302,6 +316,15 @@ class WarpEngine:
         each chunk via ``sample_batch`` and seeding the photon and electron queues
         by the per-record kind; ``primary_kind`` is then ignored and
         ``energy_emitted`` is booked from the sampled records.
+
+        ``msc_model`` selects the multiple-scattering law exactly as in the
+        reference loop (see
+        :func:`pyRadMC.transport.electron.electron_steps`): ``"gs"`` samples
+        Goudsmit-Saunderson deflections from an eagerly precomputed table grid
+        — built host-side on the first GS run for this ``(ecut, e_max)``,
+        cached on the engine, uploaded per run — and does not apply the
+        Gaussian-validity angular cap. The default is the shipped Gaussian
+        hinge, untouched to the bit.
         """
         if n_histories < 1:
             raise ValueError(f"need at least one history, got {n_histories}")
@@ -329,13 +352,14 @@ class WarpEngine:
             kind = PHOTON if primary_kind == "photon" else ELECTRON
 
         dose_to_water = 1 if validate_scoring_mode(scoring_mode, transport_electrons) else 0
+        msc_model_gs = _validate_msc_model(msc_model)
 
         device = self.device
         gi, density, material = self._upload_grid(device)
         scoring = scoring_grid if scoring_grid is not None else ScoringGrid.for_grid(self.grid)
         si = _scoring_info(scoring)
         table_energy = source.max_energy
-        tab = self._upload_tables(table_energy, pcut, ecut, device)
+        tab = self._upload_tables(table_energy, pcut, ecut, device, with_gs=msc_model_gs == 1)
 
         chunk = min(self.chunk_size, n_histories)
         capacity = chunk * self.queue_factor
@@ -421,6 +445,7 @@ class WarpEngine:
                         pcut,
                         ecut,
                         step_energy_fraction,
+                        msc_model_gs,
                         transport_electrons,
                         dose_to_water,
                         device,
@@ -446,6 +471,7 @@ class WarpEngine:
                         pcut,
                         ecut,
                         step_energy_fraction,
+                        msc_model_gs,
                         transport_electrons,
                         dose_to_water,
                         emitted,
@@ -473,6 +499,7 @@ class WarpEngine:
                         pcut,
                         ecut,
                         step_energy_fraction,
+                        msc_model_gs,
                         transport_electrons,
                         dose_to_water,
                         emitted,
@@ -499,6 +526,7 @@ class WarpEngine:
                         pcut,
                         ecut,
                         step_energy_fraction,
+                        msc_model_gs,
                         transport_electrons,
                         dose_to_water,
                         emitted,
@@ -525,6 +553,7 @@ class WarpEngine:
                         pcut,
                         ecut,
                         step_energy_fraction,
+                        msc_model_gs,
                         transport_electrons,
                         dose_to_water,
                         device,
@@ -606,6 +635,7 @@ class WarpEngine:
         scoring_grid: ScoringGrid | None = None,
         scoring_mode: str = "dose_to_medium",
         step_energy_fraction: float = STEP_ENERGY_FRACTION,
+        msc_model: str = "gaussian",
         devices: Sequence[str] | None = None,
         concurrent_batches: int = 1,
         progress: ProgressCallback | None = None,
@@ -686,6 +716,8 @@ class WarpEngine:
         shrinks the per-group device buffer and the sparse Dij cubically while
         transport keeps the full CT resolution. ``scoring_mode`` weights the
         column tallies as in :meth:`run`; the energy books stay physical.
+        ``msc_model`` as in :meth:`run`: the GS grid is built once, before any
+        launch, under the same lock every device shard takes.
         progress
             Optional callback, as in :meth:`run` (see :mod:`pyRadMC.progress`).
             Ticks once per **beamlet group** drained (``ceil(n_beamlets /
@@ -716,6 +748,7 @@ class WarpEngine:
         if concurrent_batches < 1:
             raise ValueError(f"need at least one lane, got concurrent_batches={concurrent_batches}")
         dose_to_water = 1 if validate_scoring_mode(scoring_mode, transport_electrons) else 0
+        msc_model_gs = _validate_msc_model(msc_model)
 
         scoring = scoring_grid if scoring_grid is not None else ScoringGrid.for_grid(self.grid)
         n_beamlets = source.n_beamlets
@@ -779,6 +812,7 @@ class WarpEngine:
             pcut=pcut,
             ecut=ecut,
             step_energy_fraction=step_energy_fraction,
+            msc_model_gs=msc_model_gs,
             transport_electrons=transport_electrons,
             truncation=truncation,
             correlated=correlated,
@@ -851,6 +885,7 @@ class WarpEngine:
         pcut: float,
         ecut: float,
         step_energy_fraction: float,
+        msc_model_gs: int,
         transport_electrons: bool,
         truncation: float,
         correlated: bool,
@@ -875,7 +910,7 @@ class WarpEngine:
         """
         gi, density, material = self._upload_grid(device)
         si = _scoring_info(scoring)
-        tab = self._upload_tables(source.max_energy, pcut, ecut, device)
+        tab = self._upload_tables(source.max_energy, pcut, ecut, device, with_gs=msc_model_gs == 1)
         n_beamlets = source.n_beamlets
         n_voxels = scoring.n_voxels
         # Route by capability: the built-in lattice generates in-kernel from analytic
@@ -975,6 +1010,7 @@ class WarpEngine:
             pcut=pcut,
             ecut=ecut,
             step_energy_fraction=step_energy_fraction,
+            msc_model_gs=msc_model_gs,
             transport_electrons=transport_electrons,
             dose_to_water=dose_to_water,
             device=device,
@@ -1154,6 +1190,7 @@ class WarpEngine:
         pcut,
         ecut,
         step_energy_fraction,
+        msc_model_gs,
         transport_electrons,
         dose_to_water,
         device,
@@ -1195,6 +1232,7 @@ class WarpEngine:
                 pcut,
                 ecut,
                 step_energy_fraction,
+                msc_model_gs,
                 transport_electrons,
                 dose_to_water,
                 device,
@@ -1231,6 +1269,7 @@ class WarpEngine:
                 pcut,
                 ecut,
                 step_energy_fraction,
+                msc_model_gs,
                 transport_electrons,
                 dose_to_water,
                 emitted_counter,
@@ -1266,6 +1305,7 @@ class WarpEngine:
                 pcut,
                 ecut,
                 step_energy_fraction,
+                msc_model_gs,
                 transport_electrons,
                 dose_to_water,
                 emitted_counter,
@@ -1299,6 +1339,7 @@ class WarpEngine:
             pcut,
             ecut,
             step_energy_fraction,
+            msc_model_gs,
             transport_electrons,
             dose_to_water,
             device,
@@ -1445,6 +1486,7 @@ class WarpEngine:
         pcut,
         ecut,
         step_energy_fraction,
+        msc_model_gs,
         transport_electrons,
         dose_to_water,
         device,
@@ -1485,6 +1527,7 @@ class WarpEngine:
             pcut,
             ecut,
             step_energy_fraction,
+            msc_model_gs,
             transport_electrons,
             dose_to_water,
             device,
@@ -1512,6 +1555,7 @@ class WarpEngine:
         pcut,
         ecut,
         step_energy_fraction,
+        msc_model_gs,
         transport_electrons,
         dose_to_water,
         emitted,
@@ -1582,6 +1626,7 @@ class WarpEngine:
             pcut,
             ecut,
             step_energy_fraction,
+            msc_model_gs,
             transport_electrons,
             dose_to_water,
             device,
@@ -1608,6 +1653,7 @@ class WarpEngine:
         pcut,
         ecut,
         step_energy_fraction,
+        msc_model_gs,
         transport_electrons,
         dose_to_water,
         emitted,
@@ -1651,6 +1697,7 @@ class WarpEngine:
             pcut,
             ecut,
             step_energy_fraction,
+            msc_model_gs,
             transport_electrons,
             dose_to_water,
             device,
@@ -1677,6 +1724,7 @@ class WarpEngine:
         pcut,
         ecut,
         step_energy_fraction,
+        msc_model_gs,
         transport_electrons,
         dose_to_water,
         device,
@@ -1743,6 +1791,7 @@ class WarpEngine:
             pcut,
             ecut,
             step_energy_fraction,
+            msc_model_gs,
             transport_electrons,
             dose_to_water,
             device,
@@ -1776,6 +1825,7 @@ class WarpEngine:
         pcut,
         ecut,
         step_energy_fraction,
+        msc_model_gs,
         transport_electrons,
         dose_to_water,
         emitted,
@@ -1836,6 +1886,7 @@ class WarpEngine:
             pcut,
             ecut,
             step_energy_fraction,
+            msc_model_gs,
             transport_electrons,
             dose_to_water,
             device,
@@ -1904,6 +1955,7 @@ class WarpEngine:
         pcut,
         ecut,
         step_energy_fraction,
+        msc_model_gs,
         transport_electrons,
         dose_to_water,
         device,
@@ -1970,6 +2022,7 @@ class WarpEngine:
                         pcut,
                         ecut,
                         step_energy_fraction,
+                        msc_model_gs,
                         dose_to_water,
                     ],
                     device,
@@ -2069,6 +2122,7 @@ class WarpEngine:
         pcut,
         ecut,
         step_energy_fraction,
+        msc_model_gs,
         transport_electrons,
         dose_to_water,
         device,
@@ -2125,6 +2179,7 @@ class WarpEngine:
                 pcut,
                 ecut,
                 step_energy_fraction,
+                msc_model_gs,
                 transport_electrons,
                 dose_to_water,
                 device,
@@ -2177,6 +2232,7 @@ class WarpEngine:
         pcut,
         ecut,
         step_energy_fraction,
+        msc_model_gs,
         transport_electrons,
         dose_to_water,
         emitted,
@@ -2256,6 +2312,7 @@ class WarpEngine:
                 pcut,
                 ecut,
                 step_energy_fraction,
+                msc_model_gs,
                 transport_electrons,
                 dose_to_water,
                 device,
@@ -2291,6 +2348,7 @@ class WarpEngine:
         pcut,
         ecut,
         step_energy_fraction,
+        msc_model_gs,
         transport_electrons,
         dose_to_water,
         emitted,
@@ -2348,6 +2406,7 @@ class WarpEngine:
                 pcut,
                 ecut,
                 step_energy_fraction,
+                msc_model_gs,
                 transport_electrons,
                 dose_to_water,
                 device,
@@ -2382,6 +2441,7 @@ class WarpEngine:
         pcut,
         ecut,
         step_energy_fraction,
+        msc_model_gs,
         transport_electrons,
         dose_to_water,
         device,
@@ -2455,6 +2515,7 @@ class WarpEngine:
                     pcut,
                     ecut,
                     step_energy_fraction,
+                    msc_model_gs,
                     transport_electrons,
                     dose_to_water,
                     device,
@@ -2488,7 +2549,9 @@ class WarpEngine:
         material = wp.array(self.grid.material.astype(np.uint8), dtype=wp.uint8, device=device)
         return gi, density, material
 
-    def _upload_tables(self, e_max: float, pcut: float, ecut: float, device: str) -> Tables:
+    def _upload_tables(
+        self, e_max: float, pcut: float, ecut: float, device: str, with_gs: bool = False
+    ) -> Tables:
         key = (ecut, pcut, e_max)
         with self._table_cache_lock:
             host = self._table_cache.get(key)
@@ -2509,6 +2572,7 @@ class WarpEngine:
             "moller",
             "csda_range",
             "scattering_power",
+            "log_eta",
             "restricted_range",
             "energy_of_restricted_range",
         ):
@@ -2529,4 +2593,43 @@ class WarpEngine:
         tab.r_inv_dlog = host.range_inv_dlog
         tab.n_points = host.n_points
         tab.n_coherent = host.n_coherent
+        if with_gs:
+            gs_host = self._gs_grid_host(host, ecut, e_max)
+            tab.gs_values = wp.array(gs_host.values.astype(np.float32), dtype=float, device=device)
+            tab.gs_ix0 = gs_host.ix0
+            tab.gs_iy0 = gs_host.iy0
+            tab.gs_n_eta = gs_host.values.shape[0]
+            tab.gs_n_theta2 = gs_host.values.shape[1]
+            tab.gs_n_u = gs_host.n_u
+        else:
+            # Placeholder the kernel never reads: the branch is on the launch
+            # flag, but a wp.struct must carry a valid array on every field.
+            tab.gs_values = wp.zeros((1, 1, 1), dtype=float, device=device)
+            tab.gs_ix0 = 0
+            tab.gs_iy0 = 0
+            tab.gs_n_eta = 1
+            tab.gs_n_theta2 = 1
+            tab.gs_n_u = 1
         return tab
+
+    def _gs_grid_host(self, host, ecut: float, e_max: float):
+        """Return the eager Goudsmit-Saunderson grid for these tables, built once.
+
+        Built host-side **before any launch** — never lazily mid-transport (an
+        86 s stall, measured) — and cached under the engine's table lock, so
+        concurrent ``devices=[...]`` shard threads share one immutable build
+        (the thread-safety hazard a lazily growing per-source dict had). The
+        window covers exactly the keys the kernel's lookups can produce for
+        the materials present in this engine's voxel map; the fixed build seed
+        makes every node bit-identical to the reference backend's lazy cache.
+        """
+        from pyRadMC.data.goudsmit_saunderson import build_gs_grid, gs_window_from_tables
+
+        key = ("gs", ecut, e_max)
+        with self._table_cache_lock:
+            gs_host = self._table_cache.get(key)
+            if gs_host is None:
+                present = np.unique(self.grid.material).astype(int).tolist()
+                gs_host = build_gs_grid(*gs_window_from_tables(host, present))
+                self._table_cache[key] = gs_host
+        return gs_host

@@ -51,6 +51,7 @@ _KERNEL_MODULES: dict[str, tuple[str, ...] | None] = {
     "pyRadMC.physics.compton": None,
     "pyRadMC.physics.moller": None,
     "pyRadMC.physics.msc": None,
+    "pyRadMC.physics.gs": None,
     "pyRadMC.physics.brems": None,
     "pyRadMC.physics.rayleigh": None,
     "pyRadMC.physics.roulette": None,
@@ -79,13 +80,29 @@ def _log1p(x: float) -> float:
     return wp.log(1.0 + x)
 
 
+@wp.func
+def _expm1(x: float) -> float:
+    """exp(x) - 1; Warp has no expm1 intrinsic.
+
+    The plain subtraction cancels to zero for |x| below float32 epsilon, which
+    is exactly where the GS sampler's anchor ``1 - e^(-theta2/2)`` lives on the
+    shortest substeps; the second-order Taylor branch keeps those anchors exact
+    to float32 (its truncation error, |x|^3/6 at the switch point, is ~1e-13 —
+    far below one ulp of the result).
+    """
+    if wp.abs(x) < 1.0e-4:
+        return x * (1.0 + 0.5 * x)
+    return wp.exp(x) - 1.0
+
+
 def _make_math_shim() -> types.ModuleType:
-    """Build the real math module with ``log1p`` swapped for the Warp form."""
+    """Build the real math module with ``log1p``/``expm1`` swapped for Warp forms."""
     shim = types.ModuleType("math")
     for name in dir(_host_math):
         if not name.startswith("_"):
             setattr(shim, name, getattr(_host_math, name))
     shim.log1p = _log1p
+    shim.expm1 = _expm1
     return shim
 
 
@@ -102,6 +119,7 @@ def _make_handles_shim() -> types.ModuleType:
     shim = types.ModuleType("pyRadMC.data.handles")
     shim.Table1D = wp.array(dtype=float)
     shim.Table2D = wp.array2d(dtype=float)
+    shim.Table3D = wp.array3d(dtype=float)
     return shim
 
 

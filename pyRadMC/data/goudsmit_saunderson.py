@@ -45,20 +45,39 @@ measured shape. Moliere, Z. Naturforsch. 3a, 78 (1948).
 
 from __future__ import annotations
 
+import logging
 import math
+import os
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import numpy as np
 
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    import numpy.typing as npt
+
+    from pyRadMC.data.tables import CrossSectionTables
+
 __all__ = [
+    "GSGridTables",
+    "build_gs_grid",
     "cached_moments",
     "first_transport_moment",
     "gs_cumulative",
     "gs_scaled_deflection_table",
+    "gs_window_from_tables",
     "mean_square_angle",
     "moliere_screening",
     "screened_rutherford_cos_theta",
     "screened_rutherford_moments",
 ]
+
+_log = logging.getLogger(__name__)
 
 _ELECTRON_MASS_MEV: float = 0.51099895
 _HBAR_C_MEV_FM: float = 197.3269804
@@ -561,3 +580,195 @@ def mean_square_angle(lam: float, g1: float) -> float:
     takes.
     """
     return float(-2.0 * np.expm1(-lam * g1))
+
+
+# -- the eager node grid (device backends) ----------------------------------------
+
+
+@dataclass(frozen=True)
+class GSGridTables:
+    """The full rectangle of scaled-deflection tables, precomputed for upload.
+
+    The reference backend memoizes tables lazily per ``(eta, <theta^2>)`` node
+    key; a device backend precomputes the whole reachable window before the
+    first launch instead — a mid-transport host build was measured at 86 s, and
+    a lazily-growing dict is not shareable across ``devices=[...]`` shard
+    threads. Every entry is built by :func:`gs_scaled_deflection_table` at the
+    identical node parameters and fixed build seed the lazy cache uses, so the
+    two backends sample bit-identical tables (float64, before any device cast).
+
+    Attributes
+    ----------
+    values
+        ``(n_eta, n_theta2, n_u)`` float64; ``values[i, j]`` is the table at
+        integer node indices ``(ix0 + i, iy0 + j)``, i.e. at
+        ``eta = exp((ix0 + i) / bins_per_log)`` and
+        ``<theta^2> = exp((iy0 + j) / bins_per_log)``. The u-bin axis is
+        fastest so one table is contiguous.
+    ix0, iy0
+        Integer node index of the first eta column and first theta2 row — the
+        offsets a sampler subtracts from ``floor(log(key) * bins_per_log)``.
+    n_u
+        Equal-probability bins per table.
+    bins_per_log
+        Grid nodes per natural log in both axes.
+    """
+
+    values: npt.NDArray[np.float64]
+    ix0: int
+    iy0: int
+    n_u: int
+    bins_per_log: float
+
+
+_grid_cache: dict[tuple[int, int, int, int, int, float, int], GSGridTables] = {}
+_grid_cache_lock = threading.Lock()
+
+
+_PARALLEL_BUILD_THRESHOLD: int = 256
+"""Window size (tables) below which the build stays serial: thread-pool spin-up
+is pure overhead on the small windows tests construct."""
+
+_BUILD_WORKER_CAP: int = 16
+"""Upper bound on build threads. The table construction releases the GIL in its
+large-array NumPy phases (measured ~3x at 4 workers) but not everywhere, so
+unbounded oversubscription past the physical cores buys nothing."""
+
+
+def build_gs_grid(
+    log_eta_min: float,
+    log_eta_max: float,
+    theta2_max: float,
+    *,
+    theta2_min: float | None = None,
+    n_u: int | None = None,
+    bins_per_log: float | None = None,
+    max_workers: int | None = None,
+) -> GSGridTables:
+    """Precompute every deflection table inside a reachable-key window.
+
+    The window brackets: any query with ``log_eta`` in
+    ``[log_eta_min, log_eta_max]`` and ``<theta^2>`` in
+    ``[theta2_min, theta2_max]`` has all four bilinear bracketing nodes in the
+    grid, because both axes extend one node past the floor of their upper edge.
+    Keys outside (which a correctly derived window never produces — see
+    :func:`gs_window_from_tables`) are the caller's to clamp; clamping is
+    anchor-safe since table resolution never moves the first moment.
+
+    The defaults for ``theta2_min``, ``n_u`` and ``bins_per_log`` are the
+    reference sampler's grid constants
+    (:mod:`pyRadMC.data.interface`), so the eager grid and the lazy cache key
+    the same nodes by construction; they are overridable only so tests can
+    build small windows cheaply.
+
+    **Memoized process-wide** on the integer node window (plus the build
+    statistics), because every node value is a pure function of its node
+    parameters and the fixed build seed — two engines asking for the same
+    window get one immutable build, whatever thread asks first. The frozen
+    result must never be mutated by callers.
+
+    **Built column-parallel** (one eta per task) above a small-window
+    threshold: the per-node work is dominated by large-array NumPy phases that
+    release the GIL, and the fixed per-node seed makes the result independent
+    of scheduling — worker count is a wall-clock knob, never a value change
+    (test-pinned bit-equal against the serial build). ``max_workers`` exists
+    for that pin and for constrained environments; ``None`` auto-sizes.
+    """
+    from pyRadMC.data.interface import _GS_BINS_PER_LOG, _GS_TABLE_NODES, _GS_THETA2_MIN
+
+    bins = _GS_BINS_PER_LOG if bins_per_log is None else bins_per_log
+    nodes = _GS_TABLE_NODES if n_u is None else n_u
+    floor = _GS_THETA2_MIN if theta2_min is None else theta2_min
+    if log_eta_max < log_eta_min:
+        raise ValueError(f"empty eta window: [{log_eta_min}, {log_eta_max}]")
+    if not 0.0 < floor <= theta2_max:
+        raise ValueError(f"invalid theta2 window: [{floor}, {theta2_max}]")
+
+    ix0 = math.floor(log_eta_min * bins)
+    ix_top = math.floor(log_eta_max * bins) + 1
+    iy0 = math.floor(math.log(floor) * bins)
+    iy_top = math.floor(math.log(theta2_max) * bins) + 1
+
+    key = (ix0, ix_top, iy0, iy_top, nodes, bins, _RAW_SAMPLES)
+    with _grid_cache_lock:
+        cached = _grid_cache.get(key)
+        if cached is not None:
+            return cached
+
+        n_columns = ix_top - ix0 + 1
+        n_rows = iy_top - iy0 + 1
+
+        def build_column(column: int) -> npt.NDArray[np.float64]:
+            eta = math.exp((ix0 + column) / bins)
+            return np.stack(
+                [
+                    gs_scaled_deflection_table(eta, math.exp((iy0 + row) / bins), n_u=nodes)
+                    for row in range(n_rows)
+                ]
+            )
+
+        workers = max_workers
+        if workers is None:
+            small = n_columns * n_rows < _PARALLEL_BUILD_THRESHOLD
+            workers = 1 if small else min(n_columns, os.cpu_count() or 1, _BUILD_WORKER_CAP)
+
+        started = time.perf_counter()
+        if workers > 1:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                columns = list(pool.map(build_column, range(n_columns)))
+        else:
+            columns = [build_column(column) for column in range(n_columns)]
+        values = np.stack(columns)
+        _log.info(
+            "built the Goudsmit-Saunderson grid: %d x %d tables of %d bins in %.1f s (%d workers)",
+            n_columns,
+            n_rows,
+            nodes,
+            time.perf_counter() - started,
+            workers,
+        )
+        grid = GSGridTables(values=values, ix0=ix0, iy0=iy0, n_u=nodes, bins_per_log=bins)
+        _grid_cache[key] = grid
+        return grid
+
+
+def gs_window_from_tables(
+    tables: CrossSectionTables, materials: Sequence[int]
+) -> tuple[float, float, float]:
+    r"""Return the ``(log_eta_min, log_eta_max, theta2_max)`` window transport can reach.
+
+    Derived from the flattened tables themselves, so the bounds are exact for
+    the kernel that consumes them rather than estimated:
+
+    - **eta**: the kernel reads ``eta`` through the log-linear lookup of
+      ``tables.log_eta``, which returns a convex combination of row nodes and
+      clamps flat outside the grid — so the row minimum and maximum over the
+      transported materials *are* the reachable extremes, exactly.
+    - **theta2**: the hinge deflection is ``T(E_hinge) rho s``. The range-out
+      clamp bounds every substep by ``s <= restricted_range(E_start) / rho``
+      independently of ``step_energy_fraction``, and the scattering power is a
+      lookup bounded by its row maximum, so the product of per-material row
+      maxima is a hard ceiling. Generous by construction (the two maxima sit at
+      opposite ends of the energy grid); the excess buys a few extra rows in
+      the long-step regime, where the series construction is cheapest.
+
+    Parameters
+    ----------
+    tables
+        Flattened tables carrying ``log_eta``, ``scattering_power`` and
+        ``restricted_range``.
+    materials
+        Material rows actually present in the transport grid's voxel map —
+        electrons only ever step inside grid voxels, so absent registry
+        materials cannot key a lookup.
+    """
+    rows = np.asarray(sorted(set(int(m) for m in materials)), dtype=int)
+    if rows.size == 0:
+        raise ValueError("no materials given; the window would be empty")
+    log_eta = tables.log_eta[rows]
+    ceiling = float(
+        np.max(
+            tables.scattering_power[rows].max(axis=1) * tables.restricted_range[rows].max(axis=1)
+        )
+    )
+    return float(log_eta.min()), float(log_eta.max()), ceiling

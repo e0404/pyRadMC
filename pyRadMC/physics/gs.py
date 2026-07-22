@@ -30,10 +30,10 @@ from __future__ import annotations
 
 import math
 
-from pyRadMC.data.handles import Table1D
+from pyRadMC.data.handles import Table1D, Table3D
 from pyRadMC.rng import RNGState, uniform
 
-__all__ = ["sample_gs_cos_theta_bilinear"]
+__all__ = ["sample_gs_cos_theta_bilinear", "sample_gs_cos_theta_grid"]
 
 
 def sample_gs_cos_theta_bilinear(
@@ -97,3 +97,70 @@ def sample_gs_cos_theta_bilinear(
 
     one_minus_cos = -math.expm1(-0.5 * mean_square_angle)
     return max(-1.0, 1.0 - w * one_minus_cos)
+
+
+def sample_gs_cos_theta_grid(
+    grid: Table3D,
+    ix0: int,
+    iy0: int,
+    n_eta: int,
+    n_theta2: int,
+    n_u: int,
+    fx: float,
+    fy: float,
+    mean_square_angle: float,
+    rng_state: RNGState,
+) -> float:
+    r"""Sample a deflection cosine from an eagerly built rectangle of tables.
+
+    The flat-grid face of :func:`sample_gs_cos_theta_bilinear`, for backends
+    that upload the whole node window at once
+    (:func:`pyRadMC.data.goudsmit_saunderson.build_gs_grid`) instead of
+    memoizing rows lazily: it selects the four bracketing rows by the same
+    integer-node keying the reference sampler uses —
+    ``floor(log(key) * bins_per_log)``, offset into the window — and delegates
+    the blend, so the two lookups are one code path, not two implementations.
+
+    Keys outside the window clamp to the edge node pair. A correctly derived
+    window is never exceeded (the coverage is test-pinned from the flattened
+    transport tables), so the clamp only guards float dust at the edges; and
+    because every row is unit-mean, clamping perturbs only the deflection's
+    shape — the strength stays the caller's exact ``<1 - cos theta>``.
+
+    Parameters
+    ----------
+    grid
+        The table rectangle, ``(n_eta, n_theta2, n_u)``; ``grid[i, j]`` is the
+        scaled-deflection table at integer node ``(ix0 + i, iy0 + j)``.
+    ix0, iy0
+        Integer node indices of the window origin.
+    n_eta, n_theta2
+        Window extent in nodes along each axis.
+    n_u
+        Equal-probability bins per row.
+    fx, fy
+        Fractional grid coordinates of the query,
+        ``log(eta) * bins_per_log`` and ``log(<theta^2>) * bins_per_log``
+        (the caller applies the theta2 floor before taking the log).
+    mean_square_angle
+        The substep's ``<theta^2> = T rho s`` in rad^2.
+    rng_state
+        Per-history RNG state; one uniform, as the Gaussian hinge takes.
+    """
+    ix = int(math.floor(fx)) - ix0  # noqa: RUF046  (floor returns float under Warp)
+    iy = int(math.floor(fy)) - iy0  # noqa: RUF046  (floor returns float under Warp)
+    ix = min(max(ix, 0), n_eta - 2)
+    iy = min(max(iy, 0), n_theta2 - 2)
+    tx = min(max(fx - float(ix0 + ix), 0.0), 1.0)
+    ty = min(max(fy - float(iy0 + iy), 0.0), 1.0)
+    return sample_gs_cos_theta_bilinear(
+        grid[ix, iy],
+        grid[ix + 1, iy],
+        grid[ix, iy + 1],
+        grid[ix + 1, iy + 1],
+        tx,
+        ty,
+        n_u,
+        mean_square_angle,
+        rng_state,
+    )

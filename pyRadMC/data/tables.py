@@ -166,6 +166,16 @@ class CrossSectionTables:
     stopping_restricted, stopping_radiative, moller, csda_range, scattering_power
         Electron-grid quantities, ``(n_materials, n_points)``; the restricted
         stopping power and Moller cross-section are evaluated at ``ecut``.
+    log_eta
+        ``ln`` of the Moliere elastic screening parameter
+        (:meth:`~pyRadMC.data.interface.CrossSectionSource.elastic_screening`)
+        on the electron grid, ``(n_materials, n_points)`` — the kernel-side key
+        of the Goudsmit-Saunderson deflection grid. Stored as the logarithm
+        because that is the variable the GS grid is binned in (interpolation
+        happens in the nearly-linear quantity, and the kernel skips a ``log``
+        per hinge), and because the log-linear lookup then makes the row
+        extremes an *exact* bound on every reachable key (see
+        :func:`~pyRadMC.data.goudsmit_saunderson.gs_window_from_tables`).
     restricted_range
         Restricted-collision range to ``ecut`` in g/cm^2 on the electron grid,
         ``(n_materials, n_points)`` — the exact-energy-loss substep's forward map
@@ -195,6 +205,7 @@ class CrossSectionTables:
     moller: npt.NDArray[np.float64]
     csda_range: npt.NDArray[np.float64]
     scattering_power: npt.NDArray[np.float64]
+    log_eta: npt.NDArray[np.float64]
     restricted_range: npt.NDArray[np.float64]
     energy_of_restricted_range: npt.NDArray[np.float64]
     range_log_r_min: float
@@ -270,6 +281,7 @@ def build_cross_section_tables(
             "scattering_power",
         )
     }
+    log_eta = np.empty((n_materials, n_points))
     for material in range(n_materials):
         for j, energy in enumerate(electron_energies):
             e = float(energy)
@@ -282,6 +294,7 @@ def build_cross_section_tables(
             electron_tables["moller"][material, j] = source.moller_cross_section(e, material, ecut)
             electron_tables["csda_range"][material, j] = source.csda_range(e, material)
             electron_tables["scattering_power"][material, j] = source.scattering_power(e, material)
+            log_eta[material, j] = math.log(source.elastic_screening(e, material))
 
     # Restricted-range forward map on the electron grid, plus its inverse on one
     # shared log-range grid (a common axis keeps the kernel lookup's scalar
@@ -335,6 +348,7 @@ def build_cross_section_tables(
         mu_pair=channels[PhotonProcess.PAIR],
         mu_rayleigh=channels[PhotonProcess.RAYLEIGH],
         majorant=majorant,
+        log_eta=log_eta,
         restricted_range=restricted_range,
         energy_of_restricted_range=energy_of_restricted_range,
         range_log_r_min=range_log_r_min,
