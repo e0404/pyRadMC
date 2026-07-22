@@ -22,6 +22,7 @@ reference construction rather than a second implementation:
 from __future__ import annotations
 
 import math
+import typing
 
 import numpy as np
 import pytest
@@ -108,14 +109,16 @@ class TestGridConstruction:
         degenerate = np.all(small_grid.values == 0.0, axis=2)
         np.testing.assert_allclose(means[~degenerate], 1.0, rtol=1e-12)
 
-    def test_floor_rows_build_zero_and_finite(self) -> None:
+    def test_floor_rows_build_zero_and_finite(self, tmp_path) -> None:
         """At the production theta2 floor the rows are the degenerate forward table.
 
         Mirrors the reference sampler's NaN-guard pin (test_gs_sampler): near the
         floored key no build sample scatters, and the correct limit is w = 0,
         never NaN — ``max(-1, nan)`` is silent certain backscatter on device.
+        (``cache_dir`` keeps a default-constants unit build out of the user's
+        real grid cache.)
         """
-        grid = build_gs_grid(LOG_ETA, LOG_ETA, 2.0e-12)
+        grid = build_gs_grid(LOG_ETA, LOG_ETA, 2.0e-12, cache_dir=tmp_path)
         assert np.isfinite(grid.values).all()
         assert np.all(grid.values[:, 0, :] == 0.0)
 
@@ -136,7 +139,7 @@ class TestGridConstruction:
         np.testing.assert_array_equal(serial.values, parallel.values)
         assert (serial.ix0, serial.iy0) == (parallel.ix0, parallel.iy0)
 
-    def test_grid_defaults_match_the_reference_sampler_contract(self, small_grid) -> None:
+    def test_grid_defaults_match_the_reference_sampler_contract(self, small_grid, tmp_path) -> None:
         """One grid geometry, shared with ``CrossSectionSource.sample_gs_cos_theta``.
 
         The literals are pinned (not imported) so that a drift in *either* the
@@ -147,9 +150,131 @@ class TestGridConstruction:
 
         assert small_grid.bins_per_log == _GS_BINS_PER_LOG == 4.0
         assert small_grid.n_u == _GS_TABLE_NODES == 512
-        default_floor_grid = build_gs_grid(LOG_ETA, LOG_ETA, 2.0e-12)
+        default_floor_grid = build_gs_grid(LOG_ETA, LOG_ETA, 2.0e-12, cache_dir=tmp_path)
         assert default_floor_grid.iy0 == math.floor(math.log(_GS_THETA2_MIN) * 4.0)
         assert _GS_THETA2_MIN == 1.0e-12
+
+
+class TestDiskCache:
+    """The persistent grid cache: load in milliseconds, never rebuild needlessly.
+
+    Node values are pure functions of the node coordinates and the construction
+    algorithm — materials, geometry, cuts and sources only choose the *window* —
+    so the disk entry is keyed on the construction (an explicit version plus its
+    constants and numpy's feature version) and is *extended*, never rebuilt,
+    when a request needs a wider window. The tiny windows here sit at the
+    production theta2 floor with a microscopic ceiling, so every node is the
+    degenerate forward table and builds in milliseconds.
+    """
+
+    WINDOW: typing.ClassVar[dict[str, float]] = dict(
+        log_eta_min=LOG_ETA, log_eta_max=LOG_ETA, theta2_max=2.0e-12
+    )
+
+    @staticmethod
+    def _fresh(monkeypatch, tmp_path, **kwargs):
+        import pyRadMC.data.goudsmit_saunderson as gs
+
+        gs._grid_cache.clear()
+        return build_gs_grid(cache_dir=tmp_path, **kwargs)
+
+    def test_a_second_process_loads_without_building(self, tmp_path, monkeypatch) -> None:
+        import pyRadMC.data.goudsmit_saunderson as gs
+
+        first = self._fresh(monkeypatch, tmp_path, **self.WINDOW)
+
+        def refuse(*args, **kwargs):
+            raise AssertionError("a cached window must load from disk, not rebuild")
+
+        gs._grid_cache.clear()
+        monkeypatch.setattr(gs, "gs_scaled_deflection_table", refuse)
+        second = build_gs_grid(cache_dir=tmp_path, **self.WINDOW)
+        np.testing.assert_array_equal(first.values, second.values)
+        assert (first.ix0, first.iy0) == (second.ix0, second.iy0)
+
+    def test_a_wider_window_extends_incrementally(self, tmp_path, monkeypatch) -> None:
+        """Old nodes are reused bit-for-bit; only genuinely new cells build."""
+        import pyRadMC.data.goudsmit_saunderson as gs
+
+        first = self._fresh(monkeypatch, tmp_path, **self.WINDOW)
+
+        built = {"n": 0}
+        original = gs.gs_scaled_deflection_table
+
+        def counting(*args, **kwargs):
+            built["n"] += 1
+            return original(*args, **kwargs)
+
+        gs._grid_cache.clear()
+        monkeypatch.setattr(gs, "gs_scaled_deflection_table", counting)
+        wider = build_gs_grid(
+            log_eta_min=LOG_ETA - 0.3, log_eta_max=LOG_ETA, theta2_max=4.0e-12, cache_dir=tmp_path
+        )
+        n_old = first.values.shape[0] * first.values.shape[1]
+        n_new = wider.values.shape[0] * wider.values.shape[1]
+        assert built["n"] == n_new - n_old, "extension must build exactly the new cells"
+        # The old block, at its offsets inside the union, is the stored data.
+        dx = first.ix0 - wider.ix0
+        dy = first.iy0 - wider.iy0
+        np.testing.assert_array_equal(
+            wider.values[dx : dx + first.values.shape[0], dy : dy + first.values.shape[1]],
+            first.values,
+        )
+
+    def test_a_contained_request_returns_the_stored_superset(self, tmp_path, monkeypatch) -> None:
+        """A narrower later request must not shrink or rebuild: the superset works
+        transparently through the window offsets the samplers carry."""
+        import pyRadMC.data.goudsmit_saunderson as gs
+
+        wide = self._fresh(
+            monkeypatch,
+            tmp_path,
+            log_eta_min=LOG_ETA - 0.3,
+            log_eta_max=LOG_ETA,
+            theta2_max=4.0e-12,
+        )
+        gs._grid_cache.clear()
+        monkeypatch.setattr(
+            gs,
+            "gs_scaled_deflection_table",
+            lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not rebuild")),
+        )
+        narrow = build_gs_grid(cache_dir=tmp_path, **self.WINDOW)
+        np.testing.assert_array_equal(narrow.values, wide.values)
+
+    def test_a_construction_version_bump_invalidates(self, tmp_path, monkeypatch) -> None:
+        """The one legitimate rebuild trigger: the construction algorithm moved."""
+        import pyRadMC.data.goudsmit_saunderson as gs
+
+        self._fresh(monkeypatch, tmp_path, **self.WINDOW)
+        monkeypatch.setattr(gs, "_GS_GRID_CACHE_VERSION", 999_999)
+        gs._grid_cache.clear()
+        rebuilt = build_gs_grid(cache_dir=tmp_path, **self.WINDOW)  # must not crash or load
+        assert np.isfinite(rebuilt.values).all()
+        assert len(list(tmp_path.glob("*.npz"))) == 2, "old and new versions are distinct files"
+
+    def test_a_corrupt_cache_file_rebuilds(self, tmp_path, monkeypatch) -> None:
+        import pyRadMC.data.goudsmit_saunderson as gs
+
+        self._fresh(monkeypatch, tmp_path, **self.WINDOW)
+        (cache_file,) = tmp_path.glob("*.npz")
+        cache_file.write_bytes(b"not an npz")
+        gs._grid_cache.clear()
+        rebuilt = build_gs_grid(cache_dir=tmp_path, **self.WINDOW)
+        assert np.isfinite(rebuilt.values).all()
+
+    def test_overridden_constants_stay_off_disk(self, tmp_path, monkeypatch) -> None:
+        """Test-instrument builds (non-default floor/bins/n_u) never pollute the
+        production cache file."""
+        self._fresh(
+            monkeypatch,
+            tmp_path,
+            log_eta_min=LOG_ETA,
+            log_eta_max=LOG_ETA,
+            theta2_max=THETA2_MAX,
+            theta2_min=THETA2_MIN,
+        )
+        assert list(tmp_path.glob("*.npz")) == []
 
 
 class TestWindowFromTables:
