@@ -34,13 +34,21 @@ GS is a refinement of the present model rather than a different one: it adds the
 large-angle single-scattering tail and the saturation at long steps, and changes
 nothing else. Test-pinned in ``tests/unit/test_gs_moments.py``.
 
-**Stated approximation (the screened-Rutherford default).** With no elastic
-differential cross section on hand, the single-scattering shape is taken as
-screened Rutherford with a single Moliere screening parameter ``eta``, the model
-underlying Moliere and PRESTA-II theory. It is exact in the Coulomb tail and
-approximate near the screening angle; a source carrying real differential data
-(the EEDL-compiled backend, MF=26/MT=525) overrides the moments with the
-measured shape. Moliere, Z. Naturforsch. 3a, 78 (1948).
+**Stated approximation (the screened-Rutherford default).** The
+single-scattering shape is taken as screened Rutherford with a single Moliere
+screening parameter ``eta``, the model underlying Moliere and PRESTA-II theory.
+**Validated against the EEDL MF=26/MT=525 tabulated shape** on the quantity the
+anchoring actually consumes — the normalized transport-moment ladder
+``G_l/G_1`` (absolute moments cancel when ``sigma_el`` is back-derived from the
+scattering power): the Moliere ladder tracks EEDL within ~3-7 percent through
+``l = 32`` for H, O and Ca at 0.26 and 10 MeV, and the large-angle tail per
+unit strength within 1-13 percent, the worst cases sitting where EEDL's own
+``mu = 0.999999`` forward truncation makes the reference ambiguous at a
+similar level. Re-fitting ``eta`` to the EEDL ladder was measured *not* to
+improve on Moliere (the residual is the screened-Rutherford family, not the
+parameter), and the residual bounds the eta-related dose effect at
+~0.03 percent of dose. Pinned in ``tests/validation/test_gs_eta_ladder.py``.
+Moliere, Z. Naturforsch. 3a, 78 (1948).
 """
 
 from __future__ import annotations
