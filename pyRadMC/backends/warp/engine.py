@@ -61,7 +61,7 @@ from pyRadMC.progress import ProgressCallback, ProgressEmitter
 from pyRadMC.scoring.dij import DijAssembler, DijResult
 from pyRadMC.scoring.dose_to_water import validate_scoring_mode
 from pyRadMC.scoring.grid import ScoringGrid
-from pyRadMC.transport.electron import STEP_ENERGY_FRACTION
+from pyRadMC.transport.electron import default_step_energy_fraction
 from pyRadMC.transport.particles import ELECTRON, PHOTON, POSITRON
 
 __all__ = ["WarpEngine"]
@@ -101,7 +101,8 @@ def _validate_msc_model(msc_model: str) -> int:
     Same names and refusal wording as the reference loop
     (:func:`pyRadMC.transport.electron.electron_steps`), but checked *before*
     any launch — a kernel cannot raise. The int is what the kernels branch on:
-    0 = Gaussian hinge (shipped default), 1 = Goudsmit-Saunderson.
+    0 = Gaussian hinge (the retained test instrument),
+    1 = Goudsmit-Saunderson (the shipped default).
     """
     if msc_model not in ("gaussian", "gs"):
         raise ValueError(f"unknown msc_model {msc_model!r}; expected 'gaussian' or 'gs'")
@@ -293,8 +294,8 @@ class WarpEngine:
         primary_kind: str = "photon",
         scoring_grid: ScoringGrid | None = None,
         scoring_mode: str = "dose_to_medium",
-        step_energy_fraction: float = STEP_ENERGY_FRACTION,
-        msc_model: str = "gaussian",
+        step_energy_fraction: float | None = None,
+        msc_model: str = "gs",
         progress: ProgressCallback | None = None,
     ) -> TransportResult:
         """Transport ``n_histories`` primaries; same contract as the reference engine.
@@ -319,12 +320,14 @@ class WarpEngine:
 
         ``msc_model`` selects the multiple-scattering law exactly as in the
         reference loop (see
-        :func:`pyRadMC.transport.electron.electron_steps`): ``"gs"`` samples
-        Goudsmit-Saunderson deflections from an eagerly precomputed table grid
-        — built host-side on the first GS run for this ``(ecut, e_max)``,
-        cached on the engine, uploaded per run — and does not apply the
-        Gaussian-validity angular cap. The default is the shipped Gaussian
-        hinge, untouched to the bit.
+        :func:`pyRadMC.transport.electron.electron_steps`): ``"gs"`` — the
+        shipped default — samples Goudsmit-Saunderson deflections from an
+        eagerly precomputed table grid (built host-side on the first GS run
+        for this ``(ecut, e_max)``, persisted to the user cache, uploaded per
+        run) and does not apply the Gaussian-validity angular cap; the
+        ``"gaussian"`` hinge survives as the paired-comparison test
+        instrument. ``step_energy_fraction=None`` resolves to the selected
+        model's validated fraction.
         """
         if n_histories < 1:
             raise ValueError(f"need at least one history, got {n_histories}")
@@ -353,6 +356,8 @@ class WarpEngine:
 
         dose_to_water = 1 if validate_scoring_mode(scoring_mode, transport_electrons) else 0
         msc_model_gs = _validate_msc_model(msc_model)
+        if step_energy_fraction is None:
+            step_energy_fraction = default_step_energy_fraction(msc_model)
 
         device = self.device
         gi, density, material = self._upload_grid(device)
@@ -634,8 +639,8 @@ class WarpEngine:
         beamlet_group_size: int | None = None,
         scoring_grid: ScoringGrid | None = None,
         scoring_mode: str = "dose_to_medium",
-        step_energy_fraction: float = STEP_ENERGY_FRACTION,
-        msc_model: str = "gaussian",
+        step_energy_fraction: float | None = None,
+        msc_model: str = "gs",
         devices: Sequence[str] | None = None,
         concurrent_batches: int = 1,
         progress: ProgressCallback | None = None,
@@ -749,6 +754,8 @@ class WarpEngine:
             raise ValueError(f"need at least one lane, got concurrent_batches={concurrent_batches}")
         dose_to_water = 1 if validate_scoring_mode(scoring_mode, transport_electrons) else 0
         msc_model_gs = _validate_msc_model(msc_model)
+        if step_energy_fraction is None:
+            step_energy_fraction = default_step_energy_fraction(msc_model)
 
         scoring = scoring_grid if scoring_grid is not None else ScoringGrid.for_grid(self.grid)
         n_beamlets = source.n_beamlets

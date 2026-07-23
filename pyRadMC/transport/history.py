@@ -14,7 +14,7 @@ from __future__ import annotations
 from pyRadMC.data.interface import CrossSectionSource
 from pyRadMC.geometry.grid import VoxelGrid
 from pyRadMC.rng import RNGState
-from pyRadMC.transport.electron import STEP_ENERGY_FRACTION, electron_steps
+from pyRadMC.transport.electron import electron_steps
 from pyRadMC.transport.particles import (
     PHOTON,
     POSITRON,
@@ -46,8 +46,8 @@ def transport_history(
     transport_electrons: bool = True,
     weight: float = 1.0,
     deposit_weight: DepositWeightFn = unit_weight,
-    step_energy_fraction: float = STEP_ENERGY_FRACTION,
-    msc_model: str = "gaussian",
+    step_energy_fraction: float | None = None,
+    msc_model: str = "gs",
 ) -> float:
     """Transport one primary and all its descendants; returns the escaped energy.
 
@@ -79,9 +79,11 @@ def transport_history(
         dose-to-medium). Applied by the step loops; see
         :mod:`pyRadMC.scoring.dose_to_water`.
     step_energy_fraction
-        Maximum fraction of CSDA range per electron substep; the default is the
-        validated :data:`~pyRadMC.transport.electron.STEP_ENERGY_FRACTION`. See
-        :func:`~pyRadMC.transport.electron.electron_steps`.
+        Maximum fraction of CSDA range per electron substep; ``None`` resolves
+        to the selected ``msc_model``'s validated fraction
+        (:func:`~pyRadMC.transport.electron.default_step_energy_fraction`).
+        See :func:`~pyRadMC.transport.electron.electron_steps`, also for
+        ``msc_model`` (default ``"gs"``, the shipped configuration).
     """
     stack: list[StackEntry] = [(kind, energy, weight, x, y, z, ux, uy, uz)]
     escaped = 0.0

@@ -9,8 +9,12 @@ One particle at a time, for the reference backend. The scheme, per AGENTS.md 7.2
   cross-section; the delta ray is stacked, both outgoing directions from exact
   kinematics with back-to-back azimuths.
 - **Random hinge** multiple scattering (PENELOPE-style; Salvat et al.,
-  PENELOPE-2018, sec. 4.3, doi:10.1787/32da5043-en): the Gaussian Fermi-Eyges
-  deflection for the whole substep is applied at a uniformly random point within it.
+  PENELOPE-2018, sec. 4.3, doi:10.1787/32da5043-en): the deflection for the whole
+  substep is applied at a uniformly random point within it. The angular law is
+  **Goudsmit-Saunderson** by default (exact for arbitrary step length, sampled
+  from precomputed tables anchored to the scattering power; the shipped
+  configuration since 2026-07-23); the Gaussian Fermi-Eyges hinge it replaced
+  survives as the ``msc_model="gaussian"`` test instrument.
 - **Discrete thin-target bremsstrahlung** (see :mod:`pyRadMC.physics.brems`): at most
   one photon per substep, emitted forward from the hinge point, Bernoulli probability
   matched to the radiative stopping power; the sub-PCUT remainder joins the
@@ -64,18 +68,46 @@ from pyRadMC.transport.particles import (
 
 __all__ = [
     "BOUNDARY_NUDGE_CM",
+    "GS_STEP_ENERGY_FRACTION",
     "STEP_ENERGY_FRACTION",
     "STEP_HINGE_THETA2_MAX",
+    "default_step_energy_fraction",
     "electron_steps",
 ]
 
 STEP_ENERGY_FRACTION: float = 0.05
-"""Maximum fraction of the CSDA range per substep.
+"""Maximum fraction of the CSDA range per substep under the Gaussian instrument.
 
 Bounds the relative energy change per substep so that evaluating the stopping power,
 Moller cross-section and scattering power at the substep's *initial* energy stays a
-sub-percent approximation. Conservative on purpose: this is the oracle.
+sub-percent approximation. Conservative on purpose, and frozen at the value the
+Gaussian hinge was validated at: the retained instrument must keep meaning what it
+meant when every paired GS-vs-Gaussian comparison was made against it.
 """
+
+GS_STEP_ENERGY_FRACTION: float = 0.20
+"""Maximum fraction of the CSDA range per substep under Goudsmit-Saunderson.
+
+The shipped configuration. With the exact angular law the Gaussian-validity cap
+does not apply, and 0.20 was validated as a package (2026-07-21/22): 3.07x fewer
+substeps on the realistic 3 mm schedule with zero significant depth-drift bins,
+R50/detour and PDD-gamma gates passing, +0.23 percent end-to-end on the tabulated
+6 MV spectral thorax, and cross-backend chi-squared on both backends. Larger
+fractions were measured to need path-length corrections that 0.20 does not.
+"""
+
+
+def default_step_energy_fraction(msc_model: str) -> float:
+    """Resolve the per-model substep-fraction default.
+
+    The two knobs are coupled: each angular model is validated *at* its
+    fraction, so an unspecified ``step_energy_fraction`` follows the model —
+    :data:`GS_STEP_ENERGY_FRACTION` for the shipped ``"gs"`` configuration,
+    :data:`STEP_ENERGY_FRACTION` for the ``"gaussian"`` instrument. A shared
+    default would silently run one model at the other's schedule.
+    """
+    return GS_STEP_ENERGY_FRACTION if msc_model == "gs" else STEP_ENERGY_FRACTION
+
 
 STEP_HINGE_THETA2_MAX: float = 0.10
 """Maximum mean-square hinge deflection per substep, in rad^2. Gaussian model only.
@@ -98,12 +130,14 @@ medium), so the energy cap binds first everywhere except cortical bone below
 re-binds and clamps the effective step — the reason raising the fraction alone
 was measured to buy almost nothing under the Gaussian model.
 
-**Not applied under ``msc_model="gs"``**: Goudsmit-Saunderson samples the exact
-multiple-scattering angle for an arbitrary step length, so the Gaussian-validity
-limit does not apply and the energy-limited step stands (validated with the cap
-lifted: R50/detour and PDD-gamma gates, and the tabulated 6 MV spectral thorax
-at fraction 0.20). The value is validated by the R50/R_CSDA detour-factor
-gates; do not change it without rerunning them.
+**Not applied under ``msc_model="gs"`` — the shipped default**:
+Goudsmit-Saunderson samples the exact multiple-scattering angle for an
+arbitrary step length, so the Gaussian-validity limit does not apply and the
+energy-limited step stands (validated with the cap lifted: R50/detour and
+PDD-gamma gates, and the tabulated 6 MV spectral thorax at fraction 0.20).
+The cap therefore protects only the ``"gaussian"`` instrument path. The value
+is validated by the R50/R_CSDA detour-factor gates; do not change it without
+rerunning them.
 """
 
 _ENTRY_NUDGE_CM = 1.0e-9  # same convention as the photon loop
@@ -139,8 +173,8 @@ def electron_steps(
     pcut: float,
     ecut: float,
     deposit_weight: DepositWeightFn = unit_weight,
-    step_energy_fraction: float = STEP_ENERGY_FRACTION,
-    msc_model: str = "gaussian",
+    step_energy_fraction: float | None = None,
+    msc_model: str = "gs",
 ) -> float:
     """Transport one electron or positron; secondaries go to ``spawn``.
 
@@ -158,30 +192,29 @@ def electron_steps(
     with, so the conversion undoes exactly the weighting the medium applied —
     and at the cutoff-clamped energy for local sub-threshold deposits.
 
-    ``step_energy_fraction`` overrides :data:`STEP_ENERGY_FRACTION` for this
-    transport — a measurement instrument for the substep-resolution bias study.
-    The default is the validated setting; changing *the default* is a maintainer
-    decision gated on the validation tier, not a knob turn.
+    ``msc_model`` selects the multiple-scattering angular law: ``"gs"``
+    (default — Goudsmit-Saunderson, the exact law for an arbitrary step
+    length, adopted as the shipped configuration 2026-07-23 after the
+    validation record in the R50/detour, PDD-gamma and tabulated-thorax
+    gates) or ``"gaussian"`` (the small-angle random hinge it replaced,
+    retained as the AGENTS.md 2.10 **test instrument**: a paired comparison
+    against it isolates the angular model while the rest of the physics is
+    held fixed, which is how the GS adoption itself was measured). Both
+    consume exactly one uniform, so the random stream does not shift between
+    them. Under ``"gs"`` the angular cap (:data:`STEP_HINGE_THETA2_MAX`) is
+    **not applied** — it is a Gaussian-validity limit, and removing it is
+    what lets the larger GS substep fraction actually grow the step.
 
-    ``msc_model`` selects the multiple-scattering angular law: ``"gaussian"``
-    (default, the validated small-angle random hinge) or ``"gs"``
-    (Goudsmit-Saunderson, the exact law for an arbitrary step length). This is a
-    **test instrument** in the sense of AGENTS.md 2.10 — it exists so a
-    comparison can isolate the angular model while every other aspect of the
-    step schedule is held fixed, which is the only way to attribute a dose
-    difference to the scattering law rather than to a changed step length.
-    Both consume exactly one uniform, so the random stream does not shift
-    between them. Under ``"gs"`` the angular cap
-    (:data:`STEP_HINGE_THETA2_MAX`) is **not applied** — it is a
-    Gaussian-validity limit, and removing it is what lets a larger
-    ``step_energy_fraction`` actually grow the step (in media where the cap
-    binds, notably bone, the two models therefore differ in *schedule*, not
-    only in deflection law). It is *not* a production mode: when GS is adopted
-    it replaces the Gaussian hinge as the default rather than sitting beside
-    it.
+    ``step_energy_fraction`` overrides the per-model default
+    (:func:`default_step_energy_fraction`; ``None`` resolves to the selected
+    model's validated fraction) — a measurement instrument for substep
+    resolution studies. Changing a *default* is a maintainer decision gated
+    on the validation tier, not a knob turn.
     """
     if msc_model not in ("gaussian", "gs"):
         raise ValueError(f"unknown msc_model {msc_model!r}; expected 'gaussian' or 'gs'")
+    if step_energy_fraction is None:
+        step_energy_fraction = default_step_energy_fraction(msc_model)
     escaped = 0.0
     e = energy
     w = weight

@@ -154,12 +154,13 @@ def test_gs_is_bit_reproducible_within_device() -> None:
     np.testing.assert_array_equal(runs[0].dose, runs[1].dose)
 
 
-def test_gaussian_default_is_the_explicit_gaussian(  # the shipped path must not move
-) -> None:
-    """Omitting msc_model equals passing "gaussian", to the bit.
+def test_the_default_is_gs_at_its_validated_fraction() -> None:
+    """Omitting both knobs equals msc_model="gs", step_energy_fraction=0.20, to the bit.
 
-    Guards the default routing: the new parameter must be inert unless asked
-    for, so every existing Warp result is unchanged by this change.
+    The shipped configuration (AGENTS.md 2.10: one configuration ships) is the
+    validated Goudsmit-Saunderson one; this pins the default routing so an
+    accidental fallback to the instrument, or a drifted fraction resolution,
+    cannot ship silently.
     """
     grid = _slab_grid()
     implicit = _warp_engine(grid).run(
@@ -171,7 +172,37 @@ def test_gaussian_default_is_the_explicit_gaussian(  # the shipped path must not
         n_batches=4,
         seed=SEED,
         primary_kind="electron",
+        msc_model="gs",
+        step_energy_fraction=GS_FRACTION,
+    )
+    np.testing.assert_array_equal(implicit.dose, explicit.dose)
+
+
+def test_the_gaussian_instrument_resolves_its_own_fraction() -> None:
+    """msc_model="gaussian" without a fraction resolves to the instrument's 0.05.
+
+    The retained test instrument (AGENTS.md 2.10) must keep the configuration
+    it was validated at: a shared 0.20 default would silently put the Gaussian
+    hinge into the cap-clamped regime nobody validated, and every paired
+    GS-vs-Gaussian comparison would quietly change meaning.
+    """
+    grid = _slab_grid()
+    implicit = _warp_engine(grid).run(
+        _beam(),
+        n_histories=2_000,
+        n_batches=4,
+        seed=SEED,
+        primary_kind="electron",
         msc_model="gaussian",
+    )
+    explicit = _warp_engine(grid).run(
+        _beam(),
+        n_histories=2_000,
+        n_batches=4,
+        seed=SEED,
+        primary_kind="electron",
+        msc_model="gaussian",
+        step_energy_fraction=0.05,
     )
     np.testing.assert_array_equal(implicit.dose, explicit.dose)
 

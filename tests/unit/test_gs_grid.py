@@ -139,6 +139,19 @@ class TestGridConstruction:
         np.testing.assert_array_equal(serial.values, parallel.values)
         assert (serial.ix0, serial.iy0) == (parallel.ix0, parallel.iy0)
 
+    def test_node_tables_are_memoized_and_frozen(self) -> None:
+        """One build per node per process, and the shared array is read-only.
+
+        Once Goudsmit-Saunderson became the default, every test source's lazy
+        cache rebuilt identical node tables (~0.1 s each, measured 75 minutes
+        across one fast-tier run); the process-wide memo makes sharing exact
+        (fixed build seed) and freezing the array is what makes sharing safe.
+        """
+        a = gs_scaled_deflection_table(1.0e-5, 2.0e-3)
+        b = gs_scaled_deflection_table(1.0e-5, 2.0e-3)
+        assert a is b, "the second call must return the memoized table"
+        assert not a.flags.writeable, "a shared table must be frozen"
+
     def test_grid_defaults_match_the_reference_sampler_contract(self, small_grid, tmp_path) -> None:
         """One grid geometry, shared with ``CrossSectionSource.sample_gs_cos_theta``.
 

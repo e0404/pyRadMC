@@ -467,6 +467,18 @@ def cached_moments(eta: float) -> np.ndarray:
     return moments
 
 
+_node_cache: dict[tuple[float, float, int, int, int], np.ndarray] = {}
+"""Process-wide memo of built node tables, keyed on the node parameters and the
+build sample count. A node's value is a pure function of that key (fixed build
+seed), so sharing across sources is exact — without this, every
+``CrossSectionSource`` instance in a test session rebuilt identical tables into
+its own lazy cache, multiplying the ~0.1 s per node across dozens of sources
+once Goudsmit-Saunderson became the default. Deliberately unlocked: the
+reference loop is single-threaded, and a concurrent duplicate build writes the
+identical deterministic array. Cached arrays are frozen read-only, since one
+array is now shared by every consumer."""
+
+
 def gs_scaled_deflection_table(
     eta: float, theta2: float, n_u: int = 512, n_mu: int = 4096
 ) -> np.ndarray:
@@ -504,8 +516,14 @@ def gs_scaled_deflection_table(
     -------
     ndarray
         Shape ``(n_u,)``, non-negative, mean exactly 1, ascending ``u`` ordered
-        from the widest deflection to the most forward.
+        from the widest deflection to the most forward. **Read-only and shared**
+        (see :data:`_node_cache`); a consumer that needs to mutate must copy.
     """
+    key = (eta, theta2, n_u, n_mu, _RAW_SAMPLES)
+    cached = _node_cache.get(key)
+    if cached is not None:
+        return cached
+
     raw = _gs_raw_cosines(eta, theta2, n_mu)
     # Equal-probability bins; entry i is the conditional mean of 1 - mu over bin i.
     one_minus_mu = (1.0 - raw).reshape(n_u, raw.size // n_u).mean(axis=1)
@@ -520,8 +538,11 @@ def gs_scaled_deflection_table(
         # crash. The bias of the forward table against the true distribution is
         # the anchor itself, 1 - e^{-theta2/2} <= ~1e-12 for any theta2 that
         # can key this bin. Test-pinned in tests/unit/test_gs_sampler.py.
-        return np.zeros(n_u)
-    normalized: np.ndarray = one_minus_mu / mean
+        normalized: np.ndarray = np.zeros(n_u)
+    else:
+        normalized = one_minus_mu / mean
+    normalized.flags.writeable = False
+    _node_cache[key] = normalized
     return normalized
 
 

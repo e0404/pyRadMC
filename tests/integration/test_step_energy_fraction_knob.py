@@ -1,19 +1,17 @@
 """``step_energy_fraction`` is a run-time knob on both engines (perf item 2).
 
-The maximum fraction of CSDA range per electron substep was a module constant
-(:data:`pyRadMC.transport.electron.STEP_ENERGY_FRACTION`, 0.05 — the validated
-oracle setting and still the default). The STEP_ENERGY_FRACTION decision
-(measured: 0.10 = -22 percent wall for -0.083 percent mean bias) needs it
-adjustable to isolate the bias mechanism, and on the Warp backend a *parameter*
-compiles once while a constant would recompile per value.
+The maximum fraction of CSDA range per electron substep is adjustable per run
+(the STEP_ENERGY_FRACTION bias study needed it, and on the Warp backend a
+*parameter* compiles once while a constant would recompile per value). Since
+the Goudsmit-Saunderson adoption the default is **per model**: ``None``
+resolves to the shipped GS configuration's 0.20, and to the Gaussian
+instrument's validated 0.05 — the resolution is pinned bit-for-bit below.
 
-Pinned here: the default reproduces the constant's behaviour bit-for-bit on the
-reference backend; a non-default value actually reaches the substep loop on
-every backend (the dose moves); the energy ledger closes regardless of the
-value; and the knob means the same physics on both backends (cross-backend
-chi-squared at 0.10). The default's validation gates (R50 et al.) are exactly
-why 0.05 stays the default: changing *that* is a maintainer decision with a
-validation rerun, not a knob turn.
+Also pinned: a non-default value actually reaches the substep loop on every
+backend (the dose moves); the energy ledger closes regardless of the value;
+and the knob means the same physics on both backends (cross-backend
+chi-squared at 0.10). Changing a *default* remains a maintainer decision with
+a validation rerun, not a knob turn.
 """
 
 from __future__ import annotations
@@ -47,12 +45,23 @@ def _ref(grid: VoxelGrid) -> ReferenceEngine:
     return ReferenceEngine(grid=grid, cross_sections=_xs(grid), rng=HostRNG())
 
 
-def test_default_is_bit_identical_to_the_unparameterized_call() -> None:
-    """Adding the knob must not move the reference oracle at the default."""
-    from pyRadMC.transport.electron import STEP_ENERGY_FRACTION
+def test_default_resolves_to_the_shipped_gs_fraction() -> None:
+    """``None`` equals the GS configuration's constant on the reference oracle."""
+    from pyRadMC.transport.electron import GS_STEP_ENERGY_FRACTION
 
     grid = _grid()
     kwargs = dict(n_histories=2_000, n_batches=4, seed=SEED)
+    baseline = _ref(grid).run(_source(), **kwargs)
+    explicit = _ref(grid).run(_source(), step_energy_fraction=GS_STEP_ENERGY_FRACTION, **kwargs)
+    np.testing.assert_array_equal(baseline.dose, explicit.dose)
+
+
+def test_default_resolves_to_the_instrument_fraction_under_gaussian() -> None:
+    """``None`` equals 0.05 when the Gaussian instrument is selected."""
+    from pyRadMC.transport.electron import STEP_ENERGY_FRACTION
+
+    grid = _grid()
+    kwargs = dict(n_histories=2_000, n_batches=4, seed=SEED, msc_model="gaussian")
     baseline = _ref(grid).run(_source(), **kwargs)
     explicit = _ref(grid).run(_source(), step_energy_fraction=STEP_ENERGY_FRACTION, **kwargs)
     np.testing.assert_array_equal(baseline.dose, explicit.dose)

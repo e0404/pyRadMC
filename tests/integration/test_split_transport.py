@@ -103,7 +103,11 @@ class TestVarianceReduction:
         unsplit = engine.run(_source(), n_histories=2_400, n_batches=8, seed=SEED)
         _enable_splitting(monkeypatch)
         split = engine.run(_source(), n_histories=2_400, n_batches=8, seed=SEED)
-        high = unsplit.dose > 0.3 * unsplit.dose.max()
+        # Region scale from a robust peak, not the single-voxel max: at these
+        # statistics the raw max is a noise outlier, and thresholding on it
+        # made the region size flap with the transport default's stream.
+        peak = float(np.quantile(unsplit.dose[unsplit.dose > 0.0], 0.999))
+        high = unsplit.dose > 0.3 * peak
         assert np.count_nonzero(high) > 200
         var_ratio = (split.dose_sigma[high] ** 2).mean() / (unsplit.dose_sigma[high] ** 2).mean()
         # Measured ~0.69 at N=2 over this region; the bound leaves margin for the

@@ -132,17 +132,19 @@ def test_schedules_agree_at_the_shipped_default_fraction(
 def test_gaussian_schedule_is_untouched_by_the_conditional(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The Gaussian path must be bit-identical to before the conditional.
+    """The Gaussian instrument path must stay bit-stable under the conditional.
 
-    Cheap proxy at transport level: dose from a Gaussian run is exactly
-    reproducible against itself with the conditional in place (same seed, same
-    stream). Guards against an accidental reorder of the min() that would change
-    float evaluation on the shipped default path.
+    Cheap proxy at transport level: dose from a Gaussian-instrument run is
+    exactly reproducible against itself with the conditional in place (same
+    seed, same stream). Guards against an accidental reorder of the min() that
+    would change float evaluation on the instrument path every paired
+    comparison replays. Explicit ``msc_model`` since the shipped default is GS.
     """
     grid = VoxelGrid.uniform_water(shape=(12, 12, 16), spacing=(1.0, 1.0, 1.0))
     xs = AnalyticCrossSections(geometry_densities=grid.max_density_by_material())
     source = ParallelBeamSource(energy=ENERGY_MEV, z=-0.5, x_range=(0.0, 12.0), y_range=(0.0, 12.0))
     engine = ReferenceEngine(grid=grid, cross_sections=xs, rng=HostRNG())
-    a = engine.run(source, n_histories=200, n_batches=2, seed=SEED, primary_kind="electron")
-    b = engine.run(source, n_histories=200, n_batches=2, seed=SEED, primary_kind="electron")
+    kwargs = dict(n_histories=200, n_batches=2, seed=SEED, primary_kind="electron")
+    a = engine.run(source, msc_model="gaussian", **kwargs)
+    b = engine.run(source, msc_model="gaussian", **kwargs)
     np.testing.assert_array_equal(a.dose, b.dose)

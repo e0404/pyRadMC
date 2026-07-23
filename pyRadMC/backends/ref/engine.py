@@ -26,7 +26,6 @@ from pyRadMC.scoring.dij import BatchedBeamletScorer, DijAssembler, DijResult
 from pyRadMC.scoring.dose import BatchedDoseScorer
 from pyRadMC.scoring.dose_to_water import validate_scoring_mode, water_spr
 from pyRadMC.scoring.grid import ScoringGrid
-from pyRadMC.transport.electron import STEP_ENERGY_FRACTION
 from pyRadMC.transport.history import transport_history
 from pyRadMC.transport.particles import (
     ELECTRON,
@@ -81,8 +80,8 @@ class ReferenceEngine:
         primary_kind: str = "photon",
         scoring_grid: ScoringGrid | None = None,
         scoring_mode: str = "dose_to_medium",
-        step_energy_fraction: float = STEP_ENERGY_FRACTION,
-        msc_model: str = "gaussian",
+        step_energy_fraction: float | None = None,
+        msc_model: str = "gs",
         progress: ProgressCallback | None = None,
     ) -> TransportResult:
         """Transport ``n_histories`` primaries in ``n_batches`` equal batches.
@@ -131,11 +130,14 @@ class ReferenceEngine:
             the per-deposit tally weighting differs, and the energy books stay
             physical in both modes. Requires ``transport_electrons=True``.
         step_energy_fraction
-            Maximum fraction of CSDA range per electron substep
-            (:data:`~pyRadMC.transport.electron.STEP_ENERGY_FRACTION`, the
-            validated default). A measurement instrument for the substep
-            resolution/bias trade-off; changing the *default* is a maintainer
-            decision gated on the validation tier.
+            Maximum fraction of CSDA range per electron substep; ``None``
+            (default) resolves to the selected ``msc_model``'s validated
+            fraction (:func:`~pyRadMC.transport.electron.default_step_energy_fraction`
+            — 0.20 for the shipped ``"gs"`` configuration, 0.05 for the
+            ``"gaussian"`` instrument). A measurement instrument for substep
+            resolution studies; changing a *default* is a maintainer decision
+            gated on the validation tier. ``msc_model`` semantics live on
+            :func:`~pyRadMC.transport.electron.electron_steps`.
         progress
             Optional callback invoked with a :class:`~pyRadMC.progress.ProgressEvent`
             once per completed batch (``n_batches`` ticks total, each covering
@@ -230,8 +232,8 @@ class ReferenceEngine:
         correlated: bool = True,
         scoring_grid: ScoringGrid | None = None,
         scoring_mode: str = "dose_to_medium",
-        step_energy_fraction: float = STEP_ENERGY_FRACTION,
-        msc_model: str = "gaussian",
+        step_energy_fraction: float | None = None,
+        msc_model: str = "gs",
         progress: ProgressCallback | None = None,
     ) -> DijResult:
         """Compute the beamlet-resolved dose influence matrix over the lattice.
