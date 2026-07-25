@@ -63,14 +63,19 @@ from pyRadMC.transport.particles import ELECTRON, PHOTON, POSITRON
 
 __all__ = [
     "ENERGY_QUANTUM_MEV",
+    "TRUNCATION_CHUNKS_PER_COLUMN",
     "GridInfo",
     "Queue",
     "Tables",
     "accumulate_dij_batch",
     "accumulate_run_batch",
+    "column_max",
     "compact_column",
+    "compact_column_chunked",
+    "count_kept_per_chunk",
     "count_kept_per_column",
     "electron_kernel",
+    "fill_float64",
     "fill_int32",
     "fill_int64",
     "finalize_run",
@@ -84,6 +89,7 @@ __all__ = [
     "make_beamlet_generator_kernel",
     "make_generator_kernel",
     "photon_kernel",
+    "truncation_chunk_layout",
 ]
 
 ENERGY_QUANTUM_MEV: float = 1.0e-9
@@ -691,11 +697,27 @@ def accumulate_dij_batch(
     ``total_quanta`` accumulates the group's fixed-point quanta (the dose-to-medium
     deposited-energy book; dose-to-water uses its physical counter). Integer
     addition is associative, so its atomic accumulation is order-independent.
+
+    Empty entries return immediately. A group's dense map is almost all empty — a
+    TG-119-shaped 3 mm Dij measured **99.66 percent zero per batch** (0.345 percent
+    occupancy) — and folding them cost a float64 divide each, on a consumer part
+    where FP64 runs at 1/64 rate. The skip is an exact equivalence, not an
+    approximation: ``_batch_dose`` returns 0.0 for zero quanta, and ``s += 0.0`` and
+    ``atomic_add(..., 0)`` leave their accumulators bit-unchanged. Pinned against an
+    unconditional reference kernel in ``tests/integration/test_warp_device_reduction``.
+
+    The fold also **consumes** the map: each entry it folds is reset to zero, so the
+    engine clears ``edep`` once per group instead of once per batch. Erasing a map
+    that is already 99.66 percent zero cost a full dense int64 write per batch; the
+    reset rides along on the entries actually visited.
     """
     tid = wp.tid()
+    q = edep[tid]
+    if q == wp.int64(0):
+        return
+    edep[tid] = wp.int64(0)
     local = tid // n_voxels
     vox = tid - local * n_voxels
-    q = edep[tid]
     d = _batch_dose(q, voxel_mass[vox], nhist, quantum)
     s1[tid] = s1[tid] + d
     s2[tid] = s2[tid] + d * d
@@ -736,9 +758,25 @@ def finalize_run(
     mean_out: wp.array(dtype=wp.float64),
     sigma_out: wp.array(dtype=wp.float64),
 ):
-    """Turn the accumulated open-field sums into per-voxel dose mean and sigma."""
+    """Turn the accumulated open-field sums into per-voxel dose mean and sigma.
+
+    An empty voxel's mean and standard error are both exactly zero, so the zeros are
+    written directly rather than computed: ``_mean_sigma`` costs a float64 divide and
+    a sqrt, and a Dij group's sums stay overwhelmingly empty (the per-batch quanta map
+    measured 0.345 percent occupancy; the folded sums are a few percent). The zeros
+    are still *stored* — ``run_dij`` aliases the outputs onto the sums, where they are
+    already zero, but ``run`` passes separate arrays, so skipping the store would
+    leave whatever those held. Pinned against an unconditional reference kernel in
+    ``tests/integration/test_warp_device_reduction``.
+    """
     vox = wp.tid()
-    mean, sigma = _mean_sigma(s1[vox], s2[vox], n_batches)
+    a = s1[vox]
+    b = s2[vox]
+    if a == wp.float64(0.0) and b == wp.float64(0.0):
+        mean_out[vox] = wp.float64(0.0)
+        sigma_out[vox] = wp.float64(0.0)
+        return
+    mean, sigma = _mean_sigma(a, b, n_batches)
     mean_out[vox] = mean
     sigma_out[vox] = sigma
 
@@ -769,6 +807,20 @@ def fill_int32(a: wp.array(dtype=wp.int32), value: int):
 @wp.kernel
 def fill_int64(a: wp.array(dtype=wp.int64), value: wp.int64):
     """Stream-aware int64 fill; the lane-stream counterpart of ``edep.zero_()``."""
+    a[wp.tid()] = value
+
+
+@wp.kernel
+def fill_float64(a: wp.array(dtype=wp.float64), value: wp.float64):
+    """Stream-aware float64 fill.
+
+    Also the way a *prefix* of a reused buffer is cleared: the Dij's dense maps are
+    allocated once at the largest group's size, so a trailing short group would
+    otherwise pay ``array.zero_()`` over the whole allocation — up to the full group's
+    cost to clear a fraction of it. A launch dimensioned from the live group clears
+    exactly what the group uses; nothing reads past that (every dense launch is
+    dimensioned from ``group`` too), which is why group size stays bit-inert.
+    """
     a[wp.tid()] = value
 
 
@@ -823,6 +875,123 @@ def compact_column(
     thr = truncation * col_max
     cursor = offsets[local]
     for v in range(n_voxels):
+        m = mean[base + v]
+        if m > wp.float64(0.0) and m >= thr:
+            out_indices[cursor] = wp.int64(v)
+            out_dose[cursor] = m
+            out_sigma[cursor] = sigma[base + v]
+            cursor += 1
+
+
+# --- the same truncation, with each column's sweep split across many threads -------
+#
+# ``count_kept_per_column``/``compact_column`` above run one thread per column, so the
+# whole ``n_voxels`` sweep is serial inside a thread and consecutive threads read
+# addresses ``n_voxels`` apart (fully uncoalesced). At a CT-resolution scoring grid
+# that measured 48 percent of Dij wall time — and it does not shrink with a shorter
+# group, since a trailing group runs the same per-thread work on fewer threads.
+#
+# The kernels below tile each column into ``truncation_chunk_layout`` chunks and give
+# every chunk its own thread. Output is byte-identical, by construction rather than by
+# tolerance: ``col_max`` is a maximum (associative, commutative, exact, so the atomic
+# is order-independent), the keep test is the same float64 threshold product, and each
+# chunk writes from the exclusive prefix of the chunks before it *within its column* —
+# so splitting the sweep cannot reorder the ascending row indices CSC requires. Pinned
+# against both the host assembler and the serial kernels in
+# ``tests/integration/test_warp_device_reduction.py``; the serial pair is retained as
+# that oracle.
+
+TRUNCATION_CHUNKS_PER_COLUMN = 256
+"""Target threads per column for the truncation sweep; scheduling only, never a result.
+
+At the CT-resolution scoring grids this exists for (order 1e6 voxels) it turns a
+1-thread, 1e6-iteration scan into 256 threads of ~4000 iterations each. Output is
+independent of the value (test-pinned across layouts), like ``chunk_size`` and
+``beamlet_group_size``.
+"""
+
+
+def truncation_chunk_layout(n_voxels: int) -> tuple[int, int]:
+    """Tile ``[0, n_voxels)`` into ``(n_chunks, chunk_size)`` for the truncation sweep.
+
+    The tiling covers every voxel exactly once with no wholly-empty trailing chunk:
+    the chunk size is the ceiling division, then the chunk count is recomputed from
+    it. Fewer voxels than the target chunk count degrades to one voxel per chunk.
+    """
+    n_chunks = min(TRUNCATION_CHUNKS_PER_COLUMN, max(1, n_voxels))
+    chunk = -(-n_voxels // n_chunks)  # ceil
+    return -(-n_voxels // chunk), chunk
+
+
+@wp.kernel
+def column_max(
+    mean: wp.array(dtype=wp.float64), n_voxels: int, col_max: wp.array(dtype=wp.float64)
+):
+    """Per-column maximum of a dense group map; one thread per (column, voxel).
+
+    ``col_max`` must be zeroed by the caller, which reproduces the serial kernels'
+    ``col_max = 0.0`` initialiser exactly — dose is non-negative, so a column with no
+    deposit keeps a maximum of zero and its keep test rejects every voxel.
+    """
+    tid = wp.tid()
+    local = tid // n_voxels
+    wp.atomic_max(col_max, local, mean[tid])
+
+
+@wp.kernel
+def count_kept_per_chunk(
+    mean: wp.array(dtype=wp.float64),
+    n_voxels: int,
+    n_chunks: int,
+    chunk: int,
+    truncation: wp.float64,
+    col_max: wp.array(dtype=wp.float64),
+    chunk_counts: wp.array(dtype=wp.int32),
+):
+    """Count the voxels surviving truncation in one chunk of one column."""
+    tid = wp.tid()
+    local = tid // n_chunks
+    start = (tid - local * n_chunks) * chunk
+    stop = min(start + chunk, n_voxels)
+    base = local * n_voxels
+    thr = truncation * col_max[local]
+    c = int(0)  # noqa: UP018, RUF046 - Warp needs a dynamic int var for the loop counter
+    for v in range(start, stop):
+        m = mean[base + v]
+        if m > wp.float64(0.0) and m >= thr:
+            c += 1
+    chunk_counts[tid] = c
+
+
+@wp.kernel
+def compact_column_chunked(
+    mean: wp.array(dtype=wp.float64),
+    sigma: wp.array(dtype=wp.float64),
+    n_voxels: int,
+    n_chunks: int,
+    chunk: int,
+    truncation: wp.float64,
+    col_max: wp.array(dtype=wp.float64),
+    chunk_base: wp.array(dtype=wp.int32),
+    out_indices: wp.array(dtype=wp.int64),
+    out_dose: wp.array(dtype=wp.float64),
+    out_sigma: wp.array(dtype=wp.float64),
+):
+    """Scatter one chunk's surviving entries into the compact CSC arrays.
+
+    ``chunk_base`` is each chunk's write cursor: its column's block offset plus the
+    exclusive prefix of the chunk counts before it in that column. Scanning voxels
+    ascending within a chunk, and laying chunks out ascending within a column, gives
+    exactly the order ``np.flatnonzero`` produces on the host.
+    """
+    tid = wp.tid()
+    local = tid // n_chunks
+    start = (tid - local * n_chunks) * chunk
+    stop = min(start + chunk, n_voxels)
+    base = local * n_voxels
+    thr = truncation * col_max[local]
+    cursor = chunk_base[tid]
+    for v in range(start, stop):
         m = mean[base + v]
         if m > wp.float64(0.0) and m >= thr:
             out_indices[cursor] = wp.int64(v)

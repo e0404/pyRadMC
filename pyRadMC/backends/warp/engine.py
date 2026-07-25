@@ -725,10 +725,13 @@ class WarpEngine:
         launch, under the same lock every device shard takes.
         progress
             Optional callback, as in :meth:`run` (see :mod:`pyRadMC.progress`).
-            Ticks once per **beamlet group** drained (``ceil(n_beamlets /
+            Ticks once per **beamlet group** *completed* (``ceil(n_beamlets /
             beamlet_group_size)`` ticks total), each covering that group's full
             ``group_size * n_histories_per_beamlet`` histories across all of its
-            batches — a different axis from the reference engine's per-batch
+            batches. A tick marks the group finished — transported, reduced,
+            truncated and read back — not merely transported, so ``rate_hz``
+            describes the group it names and the last tick coincides with the
+            method returning — a different axis from the reference engine's per-batch
             ticks, since this engine schedules groups off a shared queue rather
             than iterating batches outermost. Both reach the same total; treat
             ``histories_done / histories_total`` as the portable signal, not tick
@@ -991,8 +994,12 @@ class WarpEngine:
         fold_stream = wp.Stream(device) if lanes > 1 else None
         s1 = wp.zeros(max_group * n_voxels, dtype=wp.float64, device=device)
         s2 = wp.zeros(max_group * n_voxels, dtype=wp.float64, device=device)
-        counts_dev = wp.zeros(max_group, dtype=wp.int32, device=device)
         total_q = wp.zeros(1, dtype=wp.int64, device=device)
+        # Truncation runs one thread per (column, chunk) rather than one per column;
+        # the layout is scheduling only and the output is independent of it.
+        n_chunks, voxel_chunk = kernels.truncation_chunk_layout(n_voxels)
+        col_max_dev = wp.zeros(max_group, dtype=wp.float64, device=device)
+        chunk_counts_dev = wp.zeros(max_group * n_chunks, dtype=wp.int32, device=device)
 
         route_args = dict(
             source=source,
@@ -1043,8 +1050,20 @@ class WarpEngine:
                 group_arrays = self._upload_lattice_bounds(source, group_start, group, device)
             elif use_spectral:
                 group_arrays = self._upload_spectral_centers(source, group_start, group, device)
-            s1.zero_()
-            s2.zero_()
+            # Clear only what this group uses: the dense maps are allocated at
+            # max_group, so zero_() would charge a trailing short group the full
+            # group's clear. Every dense launch below is dimensioned from ``group``,
+            # so the tail beyond it is never read.
+            span = group * n_voxels
+            wp.launch(kernels.fill_float64, dim=span, inputs=[s1, 0.0], device=device)
+            wp.launch(kernels.fill_float64, dim=span, inputs=[s2, 0.0], device=device)
+            # The fold resets every entry it consumes, so a quanta map only needs
+            # clearing once per group rather than once per batch. It is still cleared
+            # here rather than relying on the reset alone: a shorter group resets only
+            # its own prefix, and the buffer should not depend on a short group always
+            # being the last one. Each lane keeps its own map, so clear them all.
+            for res in lane_resources:
+                wp.launch(kernels.fill_int64, dim=span, inputs=[res.edep, 0], device=device)
             total_q.zero_()
             escaped.zero_()
             unscored.zero_()
@@ -1055,7 +1074,6 @@ class WarpEngine:
                 # reuses edep. Batch order is the fold order (accumulate_dij_batch).
                 res = lane_resources[0]
                 for batch in range(n_batches):
-                    res.edep.zero_()
                     shard.emitted_energy += self._run_dij_batch(
                         res,
                         group_start,
@@ -1089,7 +1107,6 @@ class WarpEngine:
                     "The geometry contains material or density the majorant "
                     "declaration did not cover."
                 )
-            emitter.tick(group * n_histories_per_beamlet)
             # Turn the group's accumulated sums into per-column dose mean and sigma,
             # in place: each thread reads s1[tid]/s2[tid] and writes only its own
             # element, so aliasing the outputs onto the inputs is safe and saves two
@@ -1115,31 +1132,56 @@ class WarpEngine:
             # CSC entries read back, never the dense per-column dose maps. col_max is
             # a maximum and the keep test uses the same float64 threshold product as
             # DijAssembler.add_block, so this is byte-identical to host truncation on
-            # these maps — and deterministic (one thread per column, ascending scan).
+            # these maps. Each column's sweep is split over ``n_chunks`` threads (a
+            # single thread per column left the GPU essentially idle through the
+            # dominant phase of the Dij); determinism survives because the maximum is
+            # order-independent and each chunk writes from the exclusive prefix of the
+            # chunks before it *in its own column*, so rows stay ascending.
+            col_max_dev.zero_()
             wp.launch(
-                kernels.count_kept_per_column,
-                dim=group,
-                inputs=[mean_dev, n_voxels, float(truncation), counts_dev],
+                kernels.column_max,
+                dim=group * n_voxels,
+                inputs=[mean_dev, n_voxels, col_max_dev],
+                device=device,
+            )
+            wp.launch(
+                kernels.count_kept_per_chunk,
+                dim=group * n_chunks,
+                inputs=[
+                    mean_dev,
+                    n_voxels,
+                    n_chunks,
+                    voxel_chunk,
+                    float(truncation),
+                    col_max_dev,
+                    chunk_counts_dev,
+                ],
                 device=device,
             )
             wp.synchronize_device(device)
-            counts = counts_dev.numpy()[:group]
-            offsets = np.zeros(group, dtype=np.int32)
-            np.cumsum(counts[:-1], out=offsets[1:])  # exclusive prefix sum
+            per_chunk = chunk_counts_dev.numpy()[: group * n_chunks].reshape(group, n_chunks)
+            counts = per_chunk.sum(axis=1).astype(np.int32)
+            column_base = np.zeros(group, dtype=np.int64)
+            np.cumsum(counts[:-1], out=column_base[1:])  # exclusive prefix over columns
+            within_column = np.zeros((group, n_chunks), dtype=np.int64)
+            np.cumsum(per_chunk[:, :-1], axis=1, out=within_column[:, 1:])  # ... and within one
+            chunk_base = (column_base[:, None] + within_column).reshape(-1).astype(np.int32)
             nnz = int(counts.sum())
-            offsets_dev = wp.array(offsets, dtype=wp.int32, device=device)
             out_indices = wp.zeros(nnz, dtype=wp.int64, device=device)
             out_dose = wp.zeros(nnz, dtype=wp.float64, device=device)
             out_sigma = wp.zeros(nnz, dtype=wp.float64, device=device)
             wp.launch(
-                kernels.compact_column,
-                dim=group,
+                kernels.compact_column_chunked,
+                dim=group * n_chunks,
                 inputs=[
                     mean_dev,
                     sigma_dev,
                     n_voxels,
+                    n_chunks,
+                    voxel_chunk,
                     float(truncation),
-                    offsets_dev,
+                    col_max_dev,
+                    wp.array(chunk_base, dtype=wp.int32, device=device),
                     out_indices,
                     out_dose,
                     out_sigma,
@@ -1157,6 +1199,14 @@ class WarpEngine:
                 out_dose.numpy().copy(),
                 out_sigma.numpy().copy(),
             )
+            # Tick only now, with the group *complete*. Ticking right after transport
+            # instead charged each group's reduction, truncation and readback to its
+            # successor's interval: the first group then reported a rate no later one
+            # could reach, and the final group's share landed after the last tick as
+            # silence at 100 percent. The readback above is part of the group's cost,
+            # so the tick follows it; ``numpy()`` has already synchronized, so this
+            # still lands on an existing hard sync and adds none.
+            emitter.tick(group * n_histories_per_beamlet)
 
         shard.deposited_quanta = deposited_quanta
         shard.escaped_quanta = escaped_quanta
@@ -1434,7 +1484,10 @@ class WarpEngine:
             res = lane_resources[lane_index]
             try:
                 for b in range(lane_index, n_batches, lanes):
-                    _launch(kernels.fill_int64, len(res.edep), [res.edep, 0], device, res.stream)
+                    # No per-batch clear: the group-start clear ran on the default
+                    # stream (ordered by the synchronize above) and every fold since
+                    # has reset the entries it consumed. A lane's own fold is awaited
+                    # under ``cond`` below before it loops, so its map is clean here.
                     emitted_by_batch[b] = self._run_dij_batch(
                         res,
                         group_start,
