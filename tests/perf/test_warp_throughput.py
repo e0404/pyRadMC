@@ -27,11 +27,17 @@ GPU_EXIT_CRITERION_HISTORIES_PER_S = 1.0e6
 
 
 def _engine(device: str):
+    """Engine at shipped defaults; the chunk size auto-sizes from the device.
+
+    Not overridden on purpose — see ``tests/perf/test_dij_throughput.py``: a
+    benchmark that pins the knob it is meant to defend cannot detect a bad
+    default, which is exactly how the previous fixed value went unnoticed.
+    """
     from pyRadMC.backends.warp.engine import WarpEngine
 
     grid = VoxelGrid.uniform_water(shape=(64, 64, 64), spacing=(0.5, 0.5, 0.5))
     xs = AnalyticCrossSections(geometry_densities=grid.max_density_by_material())
-    return WarpEngine(grid=grid, cross_sections=xs, device=device, chunk_size=262_144)
+    return WarpEngine(grid=grid, cross_sections=xs, device=device)
 
 
 def _source() -> ParallelBeamSource:

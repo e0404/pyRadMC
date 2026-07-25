@@ -120,8 +120,44 @@ _GROUP_MEMORY_FRACTION = 0.5
 """Fraction of reported-free device memory budgeted for the dense group maps; the
 rest stays for geometry, tables, queues, and the sparse compaction output."""
 
+_CHUNK_HISTORIES_PER_SM = 8192
+"""Concurrent source histories per SM targeted by the auto chunk size.
 
-def _auto_group_size(free_bytes: int, n_voxels: int, n_beamlets: int, lanes: int) -> int:
+Measured 2026-07-25 on a 36-SM RTX 4070 Laptop, 6 MV spectral open field into a
+100^3 water phantom, interleaved best-of-3 (round-to-round spread under 0.5
+percent). Wall time falls monotonically with chunk size — 32k 7.16 s, 64k 5.59,
+128k 4.72, 256k 4.18, 512k 3.97, 1M 3.94 — then *regresses* at 2M (4.20 s) as the
+queues crowd the device. The transport is latency-bound, so the lever is simply
+how much independent work is resident per launch; the knee is at roughly 7-8k
+histories per SM and the curve is flat past ~16k. This coefficient sits at the
+knee rather than the flat top: the last 6 percent costs 3x the queue memory,
+which on the Dij is memory taken straight out of the beamlet group."""
+
+_CHUNK_SIZE_FALLBACK = 32_768
+"""Chunk size where the device reports neither SM count nor free memory (cpu)."""
+
+_CHUNK_SIZE_CAP = 1_048_576
+"""Upper bound on an auto chunk size: measured saturation, and 2M regressed."""
+
+_CHUNK_MEMORY_FRACTION = 0.25
+"""Fraction of reported-free device memory the auto chunk size may spend on queues."""
+
+
+_QUEUE_BYTES_PER_SLOT = 4 * 48 + 4
+"""Device bytes a lane holds per queue slot: four queues of twelve 4-byte columns,
+plus the lane's uint32 RNG-slot array. Pinned in ``tests/unit/test_warp_sizing.py``
+against an actual allocation, so a column added to ``Queue`` cannot silently
+invalidate the sizing arithmetic."""
+
+
+def _queue_bytes(chunk: int, queue_factor: int, lanes: int) -> int:
+    """Device memory the transport queues occupy for a given chunk size."""
+    return chunk * queue_factor * _QUEUE_BYTES_PER_SLOT * lanes
+
+
+def _auto_group_size(
+    free_bytes: int, n_voxels: int, n_beamlets: int, lanes: int, queue_bytes: int = 0
+) -> int:
     """Largest beamlet group whose dense device maps fit the memory budget.
 
     Group size is bit-inert (test-pinned), so this is pure scheduling policy.
@@ -129,12 +165,42 @@ def _auto_group_size(free_bytes: int, n_voxels: int, n_beamlets: int, lanes: int
     float64 running sums — ``(8 * lanes + 16) * n_voxels`` bytes. The result is
     clamped to ``[1, min(n_beamlets, cap)]``; unknown free memory falls back to
     the documented default.
+
+    ``queue_bytes`` is the transport queues' footprint (:func:`_queue_bytes`),
+    taken off the top before the dense budget is computed. The queues scale with
+    the chunk size, which this function does not otherwise see: budgeting a fixed
+    fraction and *assuming* the remainder covered them was safe only while the
+    chunk size was small. At the auto chunk size they are of the same order as
+    the dense maps, not a rounding error.
     """
     if free_bytes <= 0:
         return min(_GROUP_SIZE_FALLBACK, n_beamlets)
     per_beamlet = (8 * lanes + 16) * n_voxels
-    sized = int(free_bytes * _GROUP_MEMORY_FRACTION) // per_beamlet
+    budget = max(0, free_bytes - queue_bytes) * _GROUP_MEMORY_FRACTION
+    sized = int(budget) // per_beamlet
     return max(1, min(sized, n_beamlets, _GROUP_SIZE_CAP))
+
+
+def _auto_chunk_size(device: str, queue_factor: int) -> int:
+    """Concurrent histories per launch, sized from the device's width and memory.
+
+    Bit-inert like every other scheduling knob, so this is pure policy: enough
+    resident work to keep a latency-bound transport busy
+    (:data:`_CHUNK_HISTORIES_PER_SM` per SM), capped by
+    :data:`_CHUNK_SIZE_CAP` and by what the queues may occupy
+    (:data:`_CHUNK_MEMORY_FRACTION` of reported-free memory). A device that
+    reports neither width nor free memory — cpu — keeps the historic default.
+    """
+    d = wp.get_device(device)
+    sm_count = int(getattr(d, "sm_count", 0) or 0)
+    if not d.is_cuda or sm_count <= 0:
+        return _CHUNK_SIZE_FALLBACK
+    target = min(_CHUNK_HISTORIES_PER_SM * sm_count, _CHUNK_SIZE_CAP)
+    free = _device_free_bytes(device)
+    if free > 0:
+        affordable = int(free * _CHUNK_MEMORY_FRACTION) // (queue_factor * _QUEUE_BYTES_PER_SLOT)
+        target = min(target, affordable)
+    return max(1, target)
 
 
 def _device_free_bytes(device: str) -> int:
@@ -260,7 +326,12 @@ class WarpEngine:
         Warp device string: ``"cpu"`` or ``"cuda:N"``.
     chunk_size
         Histories transported concurrently. Statistically and bit-wise inert
-        (test-pinned); it only trades memory against launch count.
+        (test-pinned); it only trades memory against launch count. Default
+        ``None`` auto-sizes it per device from the SM count and reported-free
+        memory (:func:`_auto_chunk_size`); an explicit integer is used as given.
+        The transport is latency-bound, so this is the knob that decides how much
+        independent work is resident: measured on a 36-SM 4070, the historic
+        fixed 32768 ran a 6 MV open field at **0.55x** the auto size's throughput.
     queue_factor
         Queue capacity per chunk history. Overflow raises rather than dropping
         secondaries.
@@ -269,8 +340,9 @@ class WarpEngine:
     grid: VoxelGrid
     cross_sections: CrossSectionSource
     device: str = "cpu"
-    chunk_size: int = 32_768
+    chunk_size: int | None = None
     queue_factor: int = 16
+    _auto_chunk: dict = field(default_factory=dict, init=False, repr=False, compare=False)
     # Host-table cache: build_tables flattens the source by looping the Python query
     # API over every grid node — seconds of fixed overhead for a tabulated source —
     # while its result is frozen after construction, so one build per
@@ -281,6 +353,22 @@ class WarpEngine:
     _table_cache_lock: threading.Lock = field(
         default_factory=threading.Lock, init=False, repr=False, compare=False
     )
+
+    def _chunk_histories(self, device: str | None = None) -> int:
+        """Resolve ``chunk_size``, auto-sizing per device when it was left unset.
+
+        Memoized per device string: a ``devices=[...]`` Dij sizes each shard from
+        the device that will run it, so a mixed set does not inherit one card's
+        width. Bit-inert, so shards may legitimately differ here.
+        """
+        if self.chunk_size is not None:
+            return self.chunk_size
+        key = device or self.device
+        cached = self._auto_chunk.get(key)
+        if cached is None:
+            cached = _auto_chunk_size(key, self.queue_factor)
+            self._auto_chunk[key] = cached
+        return int(cached)
 
     def run(
         self,
@@ -366,7 +454,7 @@ class WarpEngine:
         table_energy = source.max_energy
         tab = self._upload_tables(table_energy, pcut, ecut, device, with_gs=msc_model_gs == 1)
 
-        chunk = min(self.chunk_size, n_histories)
+        chunk = min(self._chunk_histories(device), n_histories)
         capacity = chunk * self.queue_factor
         queues = [_upload_queue(capacity, device) for _ in range(4)]
         slots = wp.zeros(capacity, dtype=wp.uint32, device=device)
@@ -770,16 +858,23 @@ class WarpEngine:
 
         if beamlet_group_size is None:
             # One shared size for every device: group_starts partitions the beamlet
-            # axis once, so a multi-device set takes the tightest device's fit.
-            beamlet_group_size = min(
-                _auto_group_size(
+            # axis once, so a multi-device set takes the tightest device's fit. The
+            # queues are charged before the dense budget: they scale with the chunk
+            # size and, at the auto chunk size, are the same order as the dense maps.
+            # ``n_beamlets * per_batch`` bounds the block a group can ever launch, so
+            # this over- rather than under-states the queue cost.
+            def _fit(d: str) -> int:
+                lanes_d = min(concurrent_batches, n_batches) if wp.get_device(d).is_cuda else 1
+                chunk_d = min(self._chunk_histories(d), n_beamlets * per_batch)
+                return _auto_group_size(
                     _device_free_bytes(d),
                     scoring.n_voxels,
                     n_beamlets,
-                    min(concurrent_batches, n_batches) if wp.get_device(d).is_cuda else 1,
+                    lanes_d,
+                    _queue_bytes(chunk_d, self.queue_factor, lanes_d),
                 )
-                for d in device_list
-            )
+
+            beamlet_group_size = min(_fit(d) for d in device_list)
 
         # Beamlet groups are independent — no cross-group reduction — so sharding them
         # over devices needs no communication at all. Assignment is greedy from a
@@ -973,7 +1068,8 @@ class WarpEngine:
         # the mean/sigma they imply (see the finalize_run launch), so the group needs
         # no separate dense output maps.
         max_group = min(beamlet_group_size, n_beamlets)
-        max_capacity = max(1, min(self.chunk_size, max_group * per_batch)) * self.queue_factor
+        shard_chunk = self._chunk_histories(device)
+        max_capacity = max(1, min(shard_chunk, max_group * per_batch)) * self.queue_factor
         # A cpu device has no streams; lanes beyond the first would serialize on the
         # single device queue anyway, so they collapse to the sequential path.
         lanes = 1
@@ -996,8 +1092,14 @@ class WarpEngine:
         s2 = wp.zeros(max_group * n_voxels, dtype=wp.float64, device=device)
         total_q = wp.zeros(1, dtype=wp.int64, device=device)
         # Truncation runs one thread per (column, chunk) rather than one per column;
-        # the layout is scheduling only and the output is independent of it.
-        n_chunks, voxel_chunk = kernels.truncation_chunk_layout(n_voxels)
+        # the layout is scheduling only and the output is independent of it. Sized
+        # from the widest group and this device's SM count, so the launch fills the
+        # card: the chunk count a group needs falls as the group widens. A trailing
+        # short group reuses this layout — it launches proportionally fewer threads
+        # for proportionally less work, at unchanged per-thread cost.
+        n_chunks, voxel_chunk = kernels.truncation_chunk_layout(
+            n_voxels, max_group, int(getattr(wp.get_device(device), "sm_count", 0) or 0)
+        )
         col_max_dev = wp.zeros(max_group, dtype=wp.float64, device=device)
         chunk_counts_dev = wp.zeros(max_group * n_chunks, dtype=wp.int32, device=device)
 
@@ -1042,7 +1144,7 @@ class WarpEngine:
         while (group_start := next_group()) is not None:
             group = min(beamlet_group_size, n_beamlets - group_start)
             block_histories = group * per_batch  # one batch's block
-            chunk = min(self.chunk_size, block_histories)
+            chunk = min(shard_chunk, block_histories)
             # The per-group upload for whichever in-kernel route is active: analytic
             # bounds for the lattice, aperture centres for the spectral fan.
             group_arrays = None

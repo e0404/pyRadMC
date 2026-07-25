@@ -33,12 +33,19 @@ N_PER_BEAMLET = 400_000
 N_BEAMLETS = 100
 
 
-def _engine(device: str, chunk_size: int):
+def _engine(device: str):
+    """Engine at shipped defaults — the chunk size auto-sizes from the device.
+
+    Deliberately not overridden. These benchmarks previously pinned it, which is
+    how a fixed default costing 1.82x on open-field throughput survived unnoticed:
+    nothing that was timed ever ran at the value users got. A benchmark that does
+    not exercise the default cannot defend it.
+    """
     from pyRadMC.backends.warp.engine import WarpEngine
 
     grid = VoxelGrid.uniform_water(shape=(64, 64, 64), spacing=(0.4, 0.4, 0.4))
     xs = AnalyticCrossSections(geometry_densities=grid.max_density_by_material())
-    return WarpEngine(grid=grid, cross_sections=xs, device=device, chunk_size=chunk_size)
+    return WarpEngine(grid=grid, cross_sections=xs, device=device)
 
 
 def _lattice() -> BeamletGridSource:
@@ -51,7 +58,7 @@ def _lattice() -> BeamletGridSource:
 def test_cuda_dij_throughput_at_planning_statistics(benchmark) -> None:
     if not wp.is_cuda_available():
         pytest.skip("no CUDA device")
-    engine = _engine("cuda:0", chunk_size=1_048_576)
+    engine = _engine("cuda:0")
     engine.run_dij(_lattice(), n_histories_per_beamlet=1_000, n_batches=1, seed=SEED)  # warm
 
     n = N_BEAMLETS * N_PER_BEAMLET
@@ -80,7 +87,7 @@ def test_warp_cpu_dij_throughput(benchmark) -> None:
     On CPU the transport itself is the cost at any statistics, so the fixed-cost
     amortization argument above does not apply and small numbers suffice.
     """
-    engine = _engine("cpu", chunk_size=32_768)
+    engine = _engine("cpu")
     engine.run_dij(_lattice(), n_histories_per_beamlet=100, n_batches=1, seed=SEED)  # warm
 
     benchmark.pedantic(

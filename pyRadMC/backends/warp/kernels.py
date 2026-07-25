@@ -63,7 +63,7 @@ from pyRadMC.transport.particles import ELECTRON, PHOTON, POSITRON
 
 __all__ = [
     "ENERGY_QUANTUM_MEV",
-    "TRUNCATION_CHUNKS_PER_COLUMN",
+    "TRUNCATION_TARGET_THREADS",
     "GridInfo",
     "Queue",
     "Tables",
@@ -901,24 +901,64 @@ def compact_column(
 # ``tests/integration/test_warp_device_reduction.py``; the serial pair is retained as
 # that oracle.
 
-TRUNCATION_CHUNKS_PER_COLUMN = 256
-"""Target threads per column for the truncation sweep; scheduling only, never a result.
+TRUNCATION_TARGET_THREADS = 160_000
+"""Threads the truncation sweep aims to launch; scheduling only, never a result.
 
-At the CT-resolution scoring grids this exists for (order 1e6 voxels) it turns a
-1-thread, 1e6-iteration scan into 256 threads of ~4000 iterations each. Output is
-independent of the value (test-pinned across layouts), like ``chunk_size`` and
-``beamlet_group_size``.
-"""
+Swept 2026-07-25 on a 36-SM RTX 4070 Laptop (154 columns x 1e6 voxels, best-of-3),
+varying only the chunk count — total time for the three truncation kernels:
+
+=========  ==========  =======
+threads    per-thread  time
+=========  ==========  =======
+4,928          31,250  1173 ms
+19,712          7,813  1093 ms
+39,424          3,907   866 ms
+78,848          1,954   728 ms
+157,696           977   660 ms
+314,930           489   646 ms
+628,628           245   629 ms
+=========  ==========  =======
+
+The knee is near 160k threads — about 2.9x this card's 55,296 resident slots —
+and the curve is flat past it, so the last 3 percent costs 4x the launch width.
+
+This is a *thread* target rather than a per-column chunk count because the useful
+chunk count depends on how many columns there are: the same 160k threads is 1039
+chunks for a 154-column group and 156 for a 1024-column one. A fixed per-column
+constant cannot serve both, and the group width is itself auto-sized. Scaled by
+SM count in :func:`truncation_chunk_layout`, so a wider card asks for more.
+
+Fitted on one card and one workload; the shape (scale with SM count, floor the
+per-thread work) should generalise, the coefficient is unvalidated elsewhere."""
+
+_TRUNCATION_REFERENCE_SMS = 36
+"""SM count the thread target above was measured on; the target scales off this."""
+
+_TRUNCATION_MIN_VOXELS_PER_CHUNK = 64
+"""Floor on per-thread work, so a small grid does not degenerate into a launch of
+near-empty threads whose overhead exceeds their scan."""
 
 
-def truncation_chunk_layout(n_voxels: int) -> tuple[int, int]:
+def truncation_chunk_layout(
+    n_voxels: int, n_columns: int = 1, sm_count: int = 0
+) -> tuple[int, int]:
     """Tile ``[0, n_voxels)`` into ``(n_chunks, chunk_size)`` for the truncation sweep.
 
     The tiling covers every voxel exactly once with no wholly-empty trailing chunk:
     the chunk size is the ceiling division, then the chunk count is recomputed from
     it. Fewer voxels than the target chunk count degrades to one voxel per chunk.
+
+    ``n_columns`` (the beamlet group being truncated) and ``sm_count`` size the
+    request: the launch is ``n_columns * n_chunks`` threads, so the chunk count
+    needed to fill a device falls as the group widens. Defaults reproduce the
+    single-column, reference-width case. Output is independent of the layout
+    (test-pinned across an 8x span), like ``chunk_size`` and ``beamlet_group_size``.
     """
-    n_chunks = min(TRUNCATION_CHUNKS_PER_COLUMN, max(1, n_voxels))
+    scale = max(1, sm_count) / _TRUNCATION_REFERENCE_SMS if sm_count > 0 else 1.0
+    target = max(1, int(TRUNCATION_TARGET_THREADS * scale))
+    wanted = max(1, -(-target // max(1, n_columns)))  # chunks per column
+    ceiling = max(1, n_voxels // _TRUNCATION_MIN_VOXELS_PER_CHUNK)
+    n_chunks = min(wanted, ceiling, max(1, n_voxels))
     chunk = -(-n_voxels // n_chunks)  # ceil
     return -(-n_voxels // chunk), chunk
 

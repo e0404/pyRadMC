@@ -81,7 +81,9 @@ def thorax_engine():
         epdl.read_text(encoding="latin-1"), eedl.read_text(encoding="latin-1"), e_max=8.0
     )
     xs = TabulatedCrossSections(data, geometry_densities=grid.max_density_by_material())
-    return WarpEngine(grid=grid, cross_sections=xs, device="cuda:0", chunk_size=262_144)
+    # Shipped defaults: the chunk size auto-sizes from the device, so this measures
+    # what a user gets rather than a pinned configuration (see test_dij_throughput).
+    return WarpEngine(grid=grid, cross_sections=xs, device="cuda:0")
 
 
 def _center() -> tuple[float, float]:

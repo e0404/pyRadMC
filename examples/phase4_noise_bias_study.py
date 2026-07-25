@@ -213,7 +213,7 @@ def run_study(full: bool, phantom: str) -> tuple[list[dict], dict]:
         n_seeds = 8 if full else 4
         n_truth = 20_000
 
-    engine = WarpEngine(grid=grid, cross_sections=xs, device=device, chunk_size=1_048_576)
+    engine = WarpEngine(grid=grid, cross_sections=xs, device=device)
     engine.run_dij(lattice, n_histories_per_beamlet=500, n_batches=1, seed=SEED)  # warm
 
     t0 = time.perf_counter()
