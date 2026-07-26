@@ -6,14 +6,14 @@ routine may hardcode a cross-section formula; see AGENTS.md section 2.6.
 Two implementations are planned:
 
 ``analytic``
-    Closed-form parameterizations. Fast to stand up, adequate for Phase 0 and 1,
-    insufficient for final accuracy.
+    Closed-form parameterizations. Fast to stand up, adequate for development and
+    for water-only work, insufficient for final accuracy.
 
 ``tabulated``
     Interpolated tables (e.g. EPDL/EEDL-derived, or NIST XCOM/ESTAR-derived). Must
     integrate *products* over sub-grid intervals rather than evaluating separately
     averaged bin quantities at bin centers; see AGENTS.md section 2.7 and
-    ``tests/unit/test_table_integration.py``.
+    ``tests/unit/test_interface_contracts.py``.
 
 All energies are in MeV. All macroscopic cross-sections are in 1/cm. All mass
 attenuation and mass stopping-power quantities are per unit mass density, i.e. in
@@ -102,6 +102,19 @@ class CrossSectionSource(ABC):
         from pyRadMC.data.materials import MATERIALS
 
         return len(MATERIALS)
+
+    @property
+    def provenance(self) -> str:
+        """Human-readable citation for the data this source answers from.
+
+        Carried into every result's
+        :class:`~pyRadMC.backends.results.RunProvenance` so an archived dose says
+        which cross-sections produced it — the single most consequential thing about
+        a run and the one least recoverable from the dose array. The default names
+        the class, which is honest but uninformative; a source built from compiled
+        data overrides it with that data's own provenance string.
+        """
+        return type(self).__name__
 
     # -- photons ------------------------------------------------------------
 

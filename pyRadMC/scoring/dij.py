@@ -37,6 +37,10 @@ from pyRadMC.scoring.grid import ScoringGrid
 if TYPE_CHECKING:
     from scipy.sparse import csc_array
 
+    # Type-only: with postponed annotations the provenance record is just carried
+    # through, so scoring keeps no runtime dependency on the backend layer.
+    from pyRadMC.backends.results import RunProvenance
+
 __all__ = ["BatchedBeamletScorer", "BeamletDoseBlock", "DijAssembler", "DijResult"]
 
 
@@ -196,7 +200,7 @@ class DijResult:
     error. Voxel indices are flat C-order over ``grid_shape``.
 
     ``correlated`` records the stream mapping the Dij was computed under
-    (Phase 4). When True, columns share random streams and are statistically
+    . When True, columns share random streams and are statistically
     *dependent*: each per-entry ``sigma`` stays valid on its own, but sigmas
     must never be combined across columns in quadrature — cross-column
     covariance is not carried here.
@@ -217,6 +221,11 @@ class DijResult:
     energy_unscored: float = 0.0
     correlated: bool = False
     scoring_mode: str = "dose_to_medium"
+    provenance: RunProvenance | None = None
+    """How this matrix was produced; see
+    :class:`~pyRadMC.backends.results.RunProvenance`. Every engine ``run_dij``
+    populates it (test-pinned); optional on the dataclass so a hand-assembled or
+    reloaded matrix need not fabricate one."""
 
     @property
     def n_voxels(self) -> int:
@@ -276,7 +285,7 @@ class DijResult:
         own, but when the Dij was computed under **correlated sampling** (the
         shipped default) the columns are statistically *dependent*, so any
         cross-column combination of these variances — ``variance @ weights``, a
-        quadrature plan-dose sigma — is invalid (AGENTS.md, Phase 4 exit record).
+        quadrature plan-dose sigma — is invalid (AGENTS.md section 8).
         That known downstream use is why this export carries a
         :func:`warnings.warn` result caveat when ``correlated`` is True; compute
         a plan-dose sigma from batch-resolved data or an independent-columns run
@@ -325,6 +334,9 @@ class DijAssembler:
     truncation: float
     correlated: bool = False
     scoring_mode: str = "dose_to_medium"
+    provenance: RunProvenance | None = None
+    """Passed straight through to the assembled :class:`DijResult`; the engines set
+    it, hand-built assemblers (test instruments) need not."""
     _next_beamlet: int = 0
     _indices: list[np.ndarray] = field(default_factory=list)
     _dose: list[np.ndarray] = field(default_factory=list)
@@ -418,4 +430,5 @@ class DijAssembler:
             energy_unscored=energy_unscored,
             correlated=self.correlated,
             scoring_mode=self.scoring_mode,
+            provenance=self.provenance,
         )

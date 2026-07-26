@@ -42,8 +42,14 @@ import warp as wp
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
-from pyRadMC import DIJ_TRUNCATION_RELATIVE, ECUT_MEV, ELECTRON_MASS_MEV, PCUT_MEV
-from pyRadMC.backends.results import TransportResult
+from pyRadMC import (
+    DIJ_TRUNCATION_RELATIVE,
+    ECUT_MEV,
+    ELECTRON_MASS_MEV,
+    PCUT_MEV,
+    __version__,
+)
+from pyRadMC.backends.results import RunProvenance, TransportResult
 from pyRadMC.backends.warp import kernels
 from pyRadMC.backends.warp.kernels import ENERGY_QUANTUM_MEV, GridInfo, Queue, Tables
 from pyRadMC.data.interface import CrossSectionSource
@@ -353,6 +359,33 @@ class WarpEngine:
     _table_cache_lock: threading.Lock = field(
         default_factory=threading.Lock, init=False, repr=False, compare=False
     )
+
+    def _provenance(
+        self,
+        seed: int,
+        pcut: float,
+        ecut: float,
+        msc_model: str,
+        step_energy_fraction: float,
+        devices: Sequence[str] | None = None,
+    ) -> RunProvenance:
+        """Record the configuration this run actually used.
+
+        ``devices`` is the Dij sharding set: a matrix assembled across several cards
+        did not come from one device, and recording only ``self.device`` would claim
+        a reproducibility that does not hold. The joined string says what ran.
+        """
+        return RunProvenance(
+            version=__version__,
+            backend="warp",
+            device="+".join(devices) if devices else self.device,
+            seed=seed,
+            pcut_mev=pcut,
+            ecut_mev=ecut,
+            msc_model=msc_model,
+            step_energy_fraction=step_energy_fraction,
+            cross_sections=self.cross_sections.provenance,
+        )
 
     def _chunk_histories(self, device: str | None = None) -> int:
         """Resolve ``chunk_size``, auto-sizing per device when it was left unset.
@@ -711,6 +744,7 @@ class WarpEngine:
             n_histories=n_histories,
             n_batches=n_batches,
             scoring_mode=scoring_mode,
+            provenance=self._provenance(seed, pcut, ecut, msc_model, step_energy_fraction),
         )
 
     def run_dij(
@@ -804,13 +838,17 @@ class WarpEngine:
             Dij wall time — the knob exists for larger cards, where the balance
             may differ; measure before defaulting it on.
 
-        ``scoring_grid`` (semantics as in :meth:`run`) is the memory lever here:
-        ``n_voxels`` above is the *scoring* voxel count, so a coarser dose grid
-        shrinks the per-group device buffer and the sparse Dij cubically while
-        transport keeps the full CT resolution. ``scoring_mode`` weights the
-        column tallies as in :meth:`run`; the energy books stay physical.
-        ``msc_model`` as in :meth:`run`: the GS grid is built once, before any
-        launch, under the same lock every device shard takes.
+        scoring_grid
+            Semantics as in :meth:`run`, and the memory lever here: the
+            ``n_voxels`` above is the *scoring* voxel count, so a coarser dose
+            grid shrinks the per-group device buffer and the sparse Dij cubically
+            while transport keeps the full CT resolution.
+        scoring_mode
+            Weights the column tallies as in :meth:`run`; the energy books stay
+            physical in either mode.
+        msc_model
+            As in :meth:`run`. The GS grid is built once, before any launch, under
+            the same lock every device shard takes.
         progress
             Optional callback, as in :meth:`run` (see :mod:`pyRadMC.progress`).
             Ticks once per **beamlet group** *completed* (``ceil(n_beamlets /
@@ -905,6 +943,9 @@ class WarpEngine:
             truncation=truncation,
             correlated=correlated,
             scoring_mode=scoring_mode,
+            provenance=self._provenance(
+                seed, pcut, ecut, msc_model, step_energy_fraction, devices=device_list
+            ),
         )
 
         emitter = ProgressEmitter(progress, n_beamlets * n_histories_per_beamlet)

@@ -15,8 +15,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import partial
 
-from pyRadMC import DIJ_TRUNCATION_RELATIVE, ECUT_MEV, ELECTRON_MASS_MEV, PCUT_MEV
-from pyRadMC.backends.results import TransportResult
+from pyRadMC import (
+    DIJ_TRUNCATION_RELATIVE,
+    ECUT_MEV,
+    ELECTRON_MASS_MEV,
+    PCUT_MEV,
+    __version__,
+)
+from pyRadMC.backends.results import RunProvenance, TransportResult
 from pyRadMC.data.interface import CrossSectionSource
 from pyRadMC.geometry.grid import VoxelGrid
 from pyRadMC.geometry.source import BeamletSource, Source
@@ -26,6 +32,7 @@ from pyRadMC.scoring.dij import BatchedBeamletScorer, DijAssembler, DijResult
 from pyRadMC.scoring.dose import BatchedDoseScorer
 from pyRadMC.scoring.dose_to_water import validate_scoring_mode, water_spr
 from pyRadMC.scoring.grid import ScoringGrid
+from pyRadMC.transport.electron import default_step_energy_fraction
 from pyRadMC.transport.history import transport_history
 from pyRadMC.transport.particles import (
     ELECTRON,
@@ -68,6 +75,36 @@ class ReferenceEngine:
     cross_sections: CrossSectionSource
     rng: RNG
 
+    def _provenance(
+        self,
+        seed: int,
+        pcut: float,
+        ecut: float,
+        msc_model: str,
+        step_energy_fraction: float | None,
+    ) -> RunProvenance:
+        """Record the configuration this run actually used.
+
+        ``step_energy_fraction`` is resolved here rather than stored as the caller's
+        ``None``: the whole point of the record is to say what ran, and the default
+        follows ``msc_model``.
+        """
+        return RunProvenance(
+            version=__version__,
+            backend="ref",
+            device="cpu",
+            seed=seed,
+            pcut_mev=pcut,
+            ecut_mev=ecut,
+            msc_model=msc_model,
+            step_energy_fraction=(
+                default_step_energy_fraction(msc_model)
+                if step_energy_fraction is None
+                else step_energy_fraction
+            ),
+            cross_sections=self.cross_sections.provenance,
+        )
+
     def run(
         self,
         source: Source,
@@ -103,8 +140,8 @@ class ReferenceEngine:
             section 2.8); the defaults are the project-wide values and changing one
             in a call is a visible, greppable decision.
         transport_electrons
-            False selects the Phase 0 KERMA approximation (charged secondaries
-            deposit at their creation voxel) — the explicit option AGENTS.md 7.2
+            False selects the KERMA approximation (charged secondaries
+            deposit at their creation voxel) — the explicit option docs/decisions.md
             keeps for photon-only physics tests.
         primary_kind
             ``"photon"`` (default) or ``"electron"``: the fallback kind for sources
@@ -114,7 +151,7 @@ class ReferenceEngine:
             option exists for validating electron transport against ranges; electron
             *beams* as a clinical modality remain out of scope (AGENTS.md 6).
         scoring_grid
-            Dose grid to accumulate on (Phase 5 decoupled scoring). ``None``
+            Dose grid to accumulate on (decoupled scoring). ``None``
             (default) scores on the transport grid — byte-identical to the
             engine before scoring grids existed. Build a coarser, offset or
             subregion grid with :meth:`pyRadMC.scoring.grid.ScoringGrid.rebin`
@@ -217,6 +254,7 @@ class ReferenceEngine:
             n_histories=n_histories,
             n_batches=n_batches,
             scoring_mode=scoring_mode,
+            provenance=self._provenance(seed, pcut, ecut, msc_model, step_energy_fraction),
         )
 
     def run_dij(
@@ -247,7 +285,7 @@ class ReferenceEngine:
         regardless of how a backend schedules the transport, and a 1x1 lattice
         reproduces the open-field :meth:`run` bit for bit (test-pinned).
 
-        Correlated sampling (Phase 4) changes the *stream key* only: with
+        Correlated sampling changes the *stream key* only: with
         ``correlated=True``, the history at within-beamlet index
         ``rw = h - j * n_histories_per_beamlet`` draws the stream ``(seed, rw)``
         instead of ``(seed, h)``, so corresponding histories of every beamlet
@@ -275,8 +313,8 @@ class ReferenceEngine:
         correlated
             Key streams on the within-beamlet index so columns share random
             sequences (correlated sampling). **This is the shipped
-            configuration** (default True): the Phase 4 noise/bias study
-            (``examples/phase4_noise_bias_study.py``) found it halves the
+            configuration** (default True): the noise/bias study
+            (``examples/noise_bias_study.py``) found it halves the
             renormalized plan-dose error at matched per-beamlet sigma, in water
             and through a heterogeneity, and never worse on raw plan quality.
             ``correlated=False`` selects the independent mapping and exists
@@ -369,6 +407,7 @@ class ReferenceEngine:
             truncation=truncation,
             correlated=correlated,
             scoring_mode=scoring_mode,
+            provenance=self._provenance(seed, pcut, ecut, msc_model, step_energy_fraction),
         )
         assembler.add_block(0, block.dose, block.sigma)
         return assembler.finalize(

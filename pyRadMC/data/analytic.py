@@ -1,9 +1,9 @@
-"""Analytic photon cross-section parameterization for Phase 0.
+"""Analytic closed-form photon cross-section parameterization.
 
 One implementation of :class:`pyRadMC.data.interface.CrossSectionSource`. Its job is to
 stand up the reference transport loop with smooth, closed-form cross-sections that are
 correct to a few percent for water between 0.05 and 20 MeV. It is *not* final-accuracy
-data; the tabulated backend (Phase 5) replaces it wherever accuracy matters.
+data; the tabulated backend replaces it wherever accuracy matters.
 
 Channels and their parameterizations:
 
@@ -34,7 +34,7 @@ Rayleigh (coherent)
     the pair channel is calibrated against totals that *include* coherent scattering,
     above 2 MeV the pair channel silently absorbs the coherent contribution. This keeps
     the total correct and misassigns less than 0.5 percent of the total to the wrong
-    channel, which is acceptable for Phase 0 interaction branching.
+    channel, which is acceptable for interaction branching.
 
 All energies in MeV, mass attenuation coefficients in cm^2/g, macroscopic quantities in
 1/cm (see :mod:`pyRadMC.data.interface`).
@@ -65,7 +65,8 @@ _PHOTOELECTRIC_ANCHOR_WATER = 0.030
 """tau/rho for water at 50 keV in cm^2/g, NIST XCOM, one significant figure.
 
 One significant figure is all the E^-3 power law deserves. Verify against
-https://physics.nist.gov/PhysRefData/Xcom/ before trusting it further than Phase 0 does.
+https://physics.nist.gov/PhysRefData/Xcom/ before trusting it any further than this
+parameterization already does.
 """
 
 # Total mass attenuation coefficients for liquid water, coherent scattering included,
@@ -117,7 +118,7 @@ _WATER_RADIATION_LENGTH_G_CM2: float = 36.08
 
 
 class AnalyticCrossSections(CrossSectionSource):
-    """Closed-form Phase 0 photon cross-sections; see the module docstring.
+    """Closed-form photon cross-sections; see the module docstring.
 
     Parameters
     ----------
@@ -151,9 +152,22 @@ class AnalyticCrossSections(CrossSectionSource):
 
         The photoelectric anchor, pair calibration, I-value, density effect,
         radiative fit and radiation length are all water-specific. The registry may
-        grow past water (Phase 5 materials task); this source does not.
+        grow past water; this source does not.
         """
         return 1
+
+    @property
+    def provenance(self) -> str:
+        """Name the parameterization, so an archived dose is not mistaken for data.
+
+        These are closed-form fits with stated few-percent accuracy in the soft
+        spectrum, not measured cross-sections; a result built on them should say so
+        in the same place a tabulated result cites its library.
+        """
+        return (
+            "analytic closed-form water (Klein-Nishina without binding, power-law "
+            "photoelectric, fitted pair, Berger-Seltzer ICRU-37 stopping)"
+        )
 
     # -- photons ------------------------------------------------------------
 
@@ -195,7 +209,7 @@ class AnalyticCrossSections(CrossSectionSource):
             for material, density in self._geometry_densities
         )
 
-    # -- electrons (Phase 1; water-only, like the photon channels) -----------
+    # -- electrons (water-only, like the photon channels) -----------
 
     def restricted_stopping_power(self, energy: float, material: int, delta_cut: float) -> float:
         """Restricted collision stopping power, Berger-Seltzer form, in MeV cm^2/g.
@@ -203,7 +217,7 @@ class AnalyticCrossSections(CrossSectionSource):
         Delegates to :func:`pyRadMC.data.berger_seltzer.restricted_collision_stopping`
         (governing equation, citations and stated approximations there) with the water
         registry entry — whose I-value and Sternheimer coefficients are the constants
-        this backend evaluated inline before the Phase 5 materials task moved them.
+        this backend evaluated inline before the multi-material work moved them.
         """
         self._check_electron_args(energy, material)
         return berger_seltzer.restricted_collision_stopping(energy, MATERIALS[material], delta_cut)

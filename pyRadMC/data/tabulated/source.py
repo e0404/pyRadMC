@@ -105,6 +105,11 @@ class TabulatedCrossSections(CrossSectionSource):
         """The compiled table's row count; queries beyond it raise on lookup."""
         return len(self._data.materials)
 
+    @property
+    def provenance(self) -> str:
+        """The compiled table's own citation: libraries, stopping strategy, cuts."""
+        return self._data.provenance
+
     # -- photons ------------------------------------------------------------
 
     def sample_coherent_cos_theta(self, energy: float, material: int, rng_state: object) -> float:
