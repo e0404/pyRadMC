@@ -42,7 +42,12 @@ dev = [
     "pytest-benchmark>=4.0",
     "hypothesis>=6.100",
     "mypy>=1.10",
-    "ruff>=0.5",
+    # Pinned to a minor line, not floated. ruff's formatter is a CI gate, and a gate
+    # whose behaviour changes on someone else's release schedule is not a gate: an
+    # unpinned ">=0.5" once picked up a release that had graduated Markdown formatting
+    # out of preview and reformatted the README. The authoritative version is the rev in
+    # .pre-commit-config.yaml, which CI runs; this bound keeps a local `ruff` in step.
+    "ruff>=0.15.1,<0.16",
     "pre-commit>=3.7",
 ]
 # Documentation. mkdocs-material: MIT. mkdocstrings[python]: ISC (griffe/handler: ISC/MIT).
@@ -130,6 +135,12 @@ disallow_untyped_calls = false
 [tool.ruff]
 line-length = 100
 target-version = "py310"
+# Documentation is not formatter-managed. Newer ruff formats Python inside Markdown code
+# blocks, which is off by default only until that feature stabilizes -- so state the
+# intent here rather than depend on the version. Docs samples are prose: they use elision
+# (`...`), they align trailing comments for reading, and README examples are laid out to
+# be read rather than to be canonical source. The codebase is the formatter's job.
+extend-exclude = ["*.md"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "UP", "B", "SIM", "NPY", "RUF", "D", "T20"]

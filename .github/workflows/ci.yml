@@ -35,9 +35,15 @@ jobs:
       # The warp extra is installed for mypy: it type-checks the engine modules that
       # import warp, even though the kernels themselves are exempt (AGENTS.md 5).
       - run: pip install -e ".[warp,dev]"
-      - run: ruff check .
-      - run: ruff format --check .
-      - run: mypy pyRadMC
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/pre-commit
+          key: pre-commit-${{ hashFiles('.pre-commit-config.yaml') }}
+      # Run the hook definitions rather than re-listing the tools here. The pinned revs
+      # in .pre-commit-config.yaml are then the single authority: CI and a developer's
+      # commit hook cannot disagree, and neither can drift onto a new linter release.
+      # (mypy is a `language: system` hook, so it uses the environment installed above.)
+      - run: pre-commit run --all-files --show-diff-on-failure
 
   test:
     name: tests (py${{ matrix.python }}, ${{ matrix.os }})

@@ -35,11 +35,22 @@ workflow:
 
 quality:
   stage: check
+  variables:
+    PRE_COMMIT_HOME: "$CI_PROJECT_DIR/.cache/pre-commit"
+  cache:
+    key:
+      files: [.pre-commit-config.yaml]
+    paths: [.cache/pre-commit, .cache/pip]
   script:
     - pip install --quiet -e ".[warp,dev]"
-    - ruff check .
-    - ruff format --check .
-    - mypy pyRadMC
+    # Run the hook definitions rather than re-listing the tools. The pinned revs in
+    # .pre-commit-config.yaml are the single authority, so this pipeline, the GitHub
+    # one, and a developer's commit hook cannot disagree or drift onto a new release.
+    - pre-commit run --all-files --show-diff-on-failure
+  before_script:
+    - python -V
+    - pip install --quiet --upgrade pip
+    - git config --global --add safe.directory "$CI_PROJECT_DIR"
 
 tests:
   stage: test
