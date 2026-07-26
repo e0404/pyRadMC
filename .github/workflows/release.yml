@@ -1,0 +1,110 @@
+name: Release
+
+# Tagging is the release action. Tags mirrored from the DKFZ GitLab trigger this just as
+# tags pushed here do.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+jobs:
+  build:
+    name: build and verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      # The version is single-sourced from pyRadMC/__init__.py, so a tag is a *claim*
+      # about it that nothing else checks. A mismatch here would publish a release whose
+      # artifacts report a different version than the tag they were cut from — and every
+      # RunProvenance record stamped by that build would carry the wrong number. Refuse.
+      - name: tag must match pyRadMC.__version__
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          version=$(python -c "import re,pathlib; print(re.search(r'__version__ = \"([^\"]+)\"', pathlib.Path('pyRadMC/__init__.py').read_text()).group(1))")
+          echo "tag=$tag  __version__=$version"
+          if [ "$tag" != "$version" ]; then
+            echo "::error::tag v$tag does not match pyRadMC.__version__ ($version)"
+            exit 1
+          fi
+
+      # A stale CITATION.cff is how a release ends up being cited as the previous one.
+      - name: CITATION.cff version must match the release
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          cited=$(grep -E '^version:' CITATION.cff | head -1 | sed 's/version:[[:space:]]*//' | tr -d '"')
+          echo "tag=$tag  CITATION.cff=$cited"
+          if [ "$tag" != "$cited" ]; then
+            echo "::error::CITATION.cff says $cited but the tag is v$tag; update it before releasing"
+            exit 1
+          fi
+
+      - run: pip install build twine
+      - run: python -m build
+      - run: twine check dist/*
+
+      - name: verify the wheel installs and imports standalone
+        run: |
+          python -m venv /tmp/fresh
+          /tmp/fresh/bin/pip install dist/*.whl
+          /tmp/fresh/bin/python -c "
+          import pyRadMC, pathlib
+          assert (pathlib.Path(pyRadMC.__file__).parent / 'py.typed').is_file()
+          print('ok', pyRadMC.__version__)
+          "
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: distributions
+          path: dist/
+
+  publish:
+    name: publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    # Trusted publishing (OIDC): PyPI verifies this workflow's identity directly, so
+    # there is no long-lived API token to store or rotate. Configure the publisher once
+    # at https://pypi.org/manage/project/pyradmc/settings/publishing/ with
+    # owner e0404, repository pyRadMC, workflow release.yml, environment pypi.
+    environment:
+      name: pypi
+      url: https://pypi.org/p/pyRadMC
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: distributions
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+
+  github-release:
+    name: GitHub release
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: distributions
+          path: dist/
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          body: |
+            See [CHANGELOG.md](https://github.com/e0404/pyRadMC/blob/main/CHANGELOG.md)
+            for what changed, including anything that can move a computed dose.

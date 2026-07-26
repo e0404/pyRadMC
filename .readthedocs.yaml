@@ -1,0 +1,28 @@
+# ReadTheDocs build configuration.
+#
+# RTD builds from the GitHub mirror (github.com/e0404/pyRadMC), because the DKFZ GitLab
+# is not publicly visible and RTD must be able to reach the repository.
+version: 2
+
+build:
+  os: ubuntu-24.04
+  tools:
+    python: "3.13"
+
+mkdocs:
+  configuration: mkdocs.yml
+  # Broken references and missing nav entries fail the build. The API reference is
+  # generated from the source, so a renamed or removed public symbol is caught here
+  # rather than silently rendering an empty page.
+  fail_on_warning: true
+
+python:
+  install:
+    # The docs extra pulls mkdocs-material and mkdocstrings; the package itself is
+    # installed because mkdocstrings imports it to read signatures and docstrings.
+    # No warp extra: mkdocstrings resolves the lazily re-exported names through the
+    # TYPE_CHECKING block, so the API reference builds without a CUDA toolchain.
+    - method: pip
+      path: .
+      extra_requirements:
+        - docs

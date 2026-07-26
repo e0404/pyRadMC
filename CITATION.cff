@@ -1,0 +1,27 @@
+cff-version: 1.2.0
+message: "If you use pyRadMC in work you publish, please cite it as below."
+title: pyRadMC
+abstract: >-
+  A fast, permissively licensed photon Monte Carlo dose engine for radiotherapy treatment
+  planning. Its primary product is a beamlet-resolved dose influence matrix (Dij),
+  computed on CPU and CUDA from a single physics source, with condensed-history electron
+  transport and Woodcock delta tracking for photons.
+type: software
+authors:
+  - family-names: Wahl
+    given-names: Niklas
+    email: n.wahl@dkfz-heidelberg.de
+    affiliation: German Cancer Research Center (DKFZ)
+    orcid: "https://orcid.org/0000-0002-1451-223X"
+version: 0.1.0
+date-released: "2026-07-26"
+license: Apache-2.0
+repository-code: "https://github.com/e0404/pyRadMC"
+url: "https://pyradmc.readthedocs.io"
+keywords:
+  - Monte Carlo
+  - radiotherapy
+  - dose calculation
+  - treatment planning
+  - dose influence matrix
+  - GPU computing

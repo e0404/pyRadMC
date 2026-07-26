@@ -1,0 +1,114 @@
+name: CI
+
+# Development happens on the DKFZ GitLab, which is not publicly visible; this mirror is
+# where CI, ReadTheDocs and the PyPI release run. Mirrored pushes to main and develop are
+# therefore the primary trigger, with pull_request kept for outside contributors.
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  FORCE_COLOR: "1"
+
+jobs:
+  quality:
+    name: lint, format, types
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      # The warp extra is installed for mypy: it type-checks the engine modules that
+      # import warp, even though the kernels themselves are exempt (AGENTS.md 5).
+      - run: pip install -e ".[warp,dev]"
+      - run: ruff check .
+      - run: ruff format --check .
+      - run: mypy pyRadMC
+
+  test:
+    name: tests (py${{ matrix.python }}, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        python: ["3.10", "3.11", "3.12", "3.13"]
+        include:
+          # The maintainer develops on Windows, and several past bugs were
+          # Windows-specific (path handling, subprocess behaviour). One job keeps that
+          # platform honest without quadrupling the matrix.
+          - os: windows-latest
+            python: "3.13"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - run: pip install -e ".[warp,dev]"
+      # Runners have no CUDA device: warp runs on CPU and the gpu-marked tests skip
+      # themselves via wp.is_cuda_available(). The validation and perf tiers are
+      # excluded by the default addopts; validation runs on its own schedule.
+      - run: pytest -q
+
+  docs:
+    name: docs build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - run: pip install -e ".[docs]"
+      # --strict turns broken references and missing nav entries into failures. The API
+      # reference is generated from the source, so a renamed public symbol breaks the
+      # docs build here rather than silently emptying a page on ReadTheDocs.
+      - run: mkdocs build --strict
+
+  build:
+    name: build distributions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - run: pip install build twine
+      - run: python -m build
+      - run: twine check dist/*
+      # Installing the built wheel into a clean environment is the only check that
+      # catches a package that imports fine from the source tree but ships broken:
+      # a missing py.typed, a subpackage left out of the wheel, a bad entry point.
+      - name: verify the wheel installs and imports standalone
+        run: |
+          python -m venv /tmp/fresh
+          /tmp/fresh/bin/pip install dist/*.whl
+          /tmp/fresh/bin/python -c "
+          import pyRadMC, pathlib
+          print('version', pyRadMC.__version__)
+          assert (pathlib.Path(pyRadMC.__file__).parent / 'py.typed').is_file(), 'py.typed missing from wheel'
+          assert pyRadMC.VoxelGrid is not None
+          print('public names:', len(pyRadMC.__all__))
+          "
+      - uses: actions/upload-artifact@v4
+        with:
+          name: distributions
+          path: dist/

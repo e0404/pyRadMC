@@ -16,5 +16,6 @@ dist/
 
 # Phase-space demo outputs derive from an external (proprietary, machine-local)
 # phase-space file and are not reproducible in the repo, so they are not tracked.
-examples/phase5_phasespace_demo.png
-examples/phase5_phasespace_demo.csv
+examples/phasespace_demo.png
+examples/phasespace_demo.csv
+site/

@@ -1,0 +1,81 @@
+# GitLab CI for the DKFZ GitLab, which is the primary development remote.
+#
+# This pipeline VALIDATES ONLY — there is deliberately no deploy stage. Releases
+# (PyPI, GitHub Releases) and the documentation build run from the public GitHub
+# mirror, where trusted publishing and ReadTheDocs are wired up; see
+# .github/workflows/release.yml. Keeping publication in exactly one place is what
+# prevents two pipelines racing to upload the same version.
+#
+# The validation tier is not here either: it needs the ~120 MB EPICS libraries and runs
+# on a schedule in .github/workflows/validation.yml.
+
+stages: [check, test, build]
+
+default:
+  image: python:3.13-slim
+  # Warp and SciPy wheels are large; caching pip keeps repeat pipelines cheap.
+  cache:
+    key:
+      files: [pyproject.toml]
+    paths: [.cache/pip]
+  before_script:
+    - python -V
+    - pip install --quiet --upgrade pip
+
+variables:
+  PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == "main"
+    - if: $CI_COMMIT_BRANCH == "develop"
+    - if: $CI_PIPELINE_SOURCE == "web"
+
+quality:
+  stage: check
+  script:
+    - pip install --quiet -e ".[warp,dev]"
+    - ruff check .
+    - ruff format --check .
+    - mypy pyRadMC
+
+tests:
+  stage: test
+  parallel:
+    matrix:
+      - PYTHON_VERSION: ["3.10", "3.11", "3.12", "3.13"]
+  image: python:$PYTHON_VERSION-slim
+  script:
+    - pip install --quiet -e ".[warp,dev]"
+    # No CUDA device on a standard runner: warp runs on CPU and the gpu-marked tests
+    # skip themselves. The default addopts already exclude the validation and perf tiers.
+    - pytest -q --junitxml=report.xml
+  artifacts:
+    when: always
+    reports:
+      junit: report.xml
+    expire_in: 1 week
+
+docs:
+  stage: check
+  script:
+    - pip install --quiet -e ".[docs]"
+    # --strict only; the built site is not published from here.
+    - mkdocs build --strict
+
+build:
+  stage: build
+  script:
+    - pip install --quiet build twine
+    - python -m build
+    - twine check dist/*
+    # The wheel must import from a clean environment — this catches a missing py.typed
+    # or a subpackage left out of the wheel, which a source-tree import never would.
+    - python -m venv /tmp/fresh
+    - /tmp/fresh/bin/pip install --quiet dist/*.whl
+    - /tmp/fresh/bin/python -c "import pyRadMC, pathlib; assert (pathlib.Path(pyRadMC.__file__).parent / 'py.typed').is_file(); print(pyRadMC.__version__)"
+  artifacts:
+    paths: [dist/]
+    expire_in: 1 week

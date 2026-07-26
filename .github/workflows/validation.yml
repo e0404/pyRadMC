@@ -1,0 +1,55 @@
+name: Validation tier
+
+# Deliberately NOT on push: the validation tier is slow, needs the ~120 MB EPICS
+# libraries, and gates physics rather than code. AGENTS.md section 7 requires it to pass
+# before a release, so it runs on a schedule (to catch rot) and on demand (before
+# tagging), not on every commit.
+on:
+  schedule:
+    - cron: "0 3 * * 1" # Mondays, 03:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validation:
+    name: validation tier (with EPICS libraries)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - run: pip install -e ".[warp,dev]"
+
+      # Cached so a scheduled run does not re-fetch 120 MB from the IAEA every week.
+      # The cache key carries the pinned digests, so changing a pin necessarily misses
+      # the cache and re-downloads — which is the correct behaviour, since a changed pin
+      # means the libraries themselves are supposed to be different.
+      - name: cache EPICS libraries
+        id: epics-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pyRadMC/epics
+          key: epics-2023-${{ hashFiles('pyRadMC/data/tabulated/build.py') }}
+
+      # download_library verifies every file against its pinned SHA-256 and fails
+      # closed. This is also what exercises the pins themselves in CI: a silent upstream
+      # revision shows up here as a hard failure rather than as drift in a dose gate.
+      - name: fetch and verify EPICS libraries
+        run: |
+          python -c "
+          from pyRadMC.data.tabulated import build
+          for which in ('epdl', 'eedl'):
+              print(which, '->', build.download_library(which))
+          "
+
+      - name: run the validation tier
+        env:
+          PYRADMC_EPDL_PATH: ~/.cache/pyRadMC/epics/EPDL2023.ALL
+          PYRADMC_EEDL_PATH: ~/.cache/pyRadMC/epics/EEDL2023.ALL
+        run: pytest -m validation -q

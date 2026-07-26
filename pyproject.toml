@@ -4,20 +4,28 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pyRadMC"
-version = "0.0.1.dev0"
+# Single-sourced from pyRadMC/__init__.py: the module is the one place the version
+# lives, so a release tag can never disagree with what the package reports at runtime
+# (and with what every RunProvenance record stamps onto a result).
+dynamic = ["version"]
 description = "Fast photon Monte Carlo engine for beamlet-resolved radiotherapy treatment planning"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
-authors = [{ name = "Niklas Wahl" }]
+authors = [{ name = "Niklas Wahl" , email = "n.wahl@dkfz-heidelberg.de"}]
 keywords = ["monte-carlo", "radiotherapy", "dose-calculation", "treatment-planning"]
 classifiers = [
-    "Development Status :: 2 - Pre-Alpha",
+    "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering :: Medical Science Apps.",
     "Topic :: Scientific/Engineering :: Physics",
+    "Typing :: Typed",
 ]
 
 # Core stays deliberately thin. The reference backend needs nothing but NumPy.
@@ -35,9 +43,16 @@ dev = [
     "hypothesis>=6.100",
     "mypy>=1.10",
     "ruff>=0.5",
+    "pre-commit>=3.7",
 ]
-docs = ["mkdocs-material>=9.5"]
-# Phase-exit examples only (AGENTS.md 7.1). matplotlib license: BSD-style, permissive.
+# Documentation. mkdocs-material: MIT. mkdocstrings[python]: ISC (griffe/handler: ISC/MIT).
+# All docs-only; none of this is imported by the engine at runtime.
+docs = [
+    "mkdocs-material>=9.5",
+    "mkdocstrings[python]>=0.26",
+]
+# Runnable demonstration scripts under examples/ (AGENTS.md section 7); not needed to use
+# the engine. matplotlib license: BSD-style, permissive.
 examples = ["matplotlib>=3.8"]
 # CT image adapter (pyRadMC.adapters.ct), optional and out of the core. SimpleITK
 # license: Apache-2.0, permissive. Reads DICOM/NIfTI/MetaImage into a VoxelGrid.
@@ -45,11 +60,27 @@ ct = ["SimpleITK>=2.3"]
 all = ["pyRadMC[warp,dev,docs,examples,ct]"]
 
 [project.urls]
-Homepage = "https://github.com/CHANGEME/pyRadMC"
-Issues = "https://github.com/CHANGEME/pyRadMC/issues"
+# Development happens on the DKFZ GitLab; the GitHub mirror is what the outside world
+# reaches, and is where CI, ReadTheDocs and the PyPI release run from.
+Homepage = "https://github.com/e0404/pyRadMC"
+Documentation = "https://pyradmc.readthedocs.io"
+Repository = "https://github.com/e0404/pyRadMC"
+Issues = "https://github.com/e0404/pyRadMC/issues"
+Changelog = "https://github.com/e0404/pyRadMC/blob/main/CHANGELOG.md"
+
+[tool.hatch.version]
+path = "pyRadMC/__init__.py"
+
+[tool.hatch.build.targets.sdist]
+# Tests and examples ship: this is scientific software, and a user who wants to verify a
+# dose should not have to clone to run the suite. Agent configuration does not.
+exclude = [".claude"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["pyRadMC"]
+# PEP 561: the package is typed, and consumers (the pyRadPlan adapter first among
+# them) only see that if the marker ships in the wheel.
+artifacts = ["pyRadMC/py.typed"]
 
 # ---------------------------------------------------------------------------
 # Tests

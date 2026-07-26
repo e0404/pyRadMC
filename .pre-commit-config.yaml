@@ -1,0 +1,51 @@
+# Pre-commit gates: fast, file-scoped checks only.
+#
+#     pip install -e ".[dev]" && pre-commit install
+#
+# Deliberately NO test run. The suite takes minutes, and a gate slow enough to be
+# resented is a gate that gets bypassed with --no-verify. Tests are CI's job — see
+# .github/workflows/ci.yml and .gitlab-ci.yml, which run the fast tiers on every push to
+# main and develop, and the validation tier on its own schedule.
+#
+# Run against everything (not just staged files) with:  pre-commit run --all-files
+default_language_version:
+  python: python3
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+        # The EGSnrc benchmark is stored verbatim; reformatting reference data would
+        # silently change what the validation tier compares against.
+        exclude: ^tests/validation/data/
+      - id: end-of-file-fixer
+        exclude: ^tests/validation/data/
+      - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-case-conflict
+      - id: check-added-large-files
+        # The committed example figures run to ~230 KB; this catches an accidental
+        # cross-section table or phase-space file, which are the real risks.
+        args: [--maxkb=512]
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.1
+    hooks:
+      - id: ruff-check
+        args: [--fix]
+      - id: ruff-format
+
+  - repo: local
+    hooks:
+      # Run from the project environment, not an isolated one: mypy --strict needs the
+      # real NumPy, SciPy and Warp stubs to say anything true, and it is configured
+      # whole-package in pyproject.toml (kernels exempt), so it does not take filenames.
+      - id: mypy
+        name: mypy --strict (non-kernel code)
+        entry: mypy pyRadMC
+        language: system
+        types: [python]
+        pass_filenames: false
+        require_serial: true
