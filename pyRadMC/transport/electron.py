@@ -1,6 +1,6 @@
 """Class II condensed-history electron (and positron) transport.
 
-One particle at a time, for the reference backend. The scheme, per AGENTS.md 7.2:
+One particle at a time, for the reference backend. The scheme, per docs/decisions.md:
 
 - **Continuous** energy loss along each substep from the restricted collision
   stopping power (Berger-Seltzer, cut at ECUT), deposited at the two segment

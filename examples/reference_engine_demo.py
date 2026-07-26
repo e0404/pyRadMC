@@ -1,12 +1,12 @@
-"""Phase 0 example: the reference photon engine on a water phantom.
+"""The reference photon engine on a water phantom.
 
 Runs two small problems on the pure-NumPy reference backend and renders one 2x2 figure
-(``phase0_reference_engine.png``, saved beside this script) — a depth-dose curve and a
+(``reference_engine_demo.png``, saved beside this script) — a depth-dose curve and a
 central-plane dose map for each:
 
 - **Broad 2 MeV parallel beam** (top row): the depth dose, with its 2-sigma band, pulls
   away from the primary-only exponential ``exp(-mu z)`` with depth — scatter buildup,
-  the physics Phase 0 exists to get right. The slice shows the whole irradiated cube
+  the physics this engine exists to get right. The slice shows the whole irradiated cube
   attenuating with depth.
 - **2 MeV pencil beam** (bottom row): on the narrow central axis, scattered photons
   mostly *leave* the axis instead of accumulating, so the central-axis depth dose hugs
@@ -14,11 +14,11 @@ central-plane dose map for each:
   three decades, shows the primary column and the faint scatter halo around it.
 
 There is no electron buildup at the surface in either case: electrons are not
-transported yet (KERMA approximation, Phase 1 work).
+transported in this example (KERMA approximation).
 
 Run it from the repository root (requires the ``examples`` extra, i.e. matplotlib)::
 
-    python examples/phase0_reference_engine.py
+    python examples/reference_engine_demo.py
 
 Runtime is a few seconds. The printed energy balance is exact bookkeeping, not an
 estimate; if emitted != deposited + escaped, the engine is broken.
@@ -192,7 +192,7 @@ def main() -> None:
 
     fig, axes = plt.subplots(2, 2, figsize=(11.5, 9.2), facecolor=SURFACE, constrained_layout=True)
     fig.suptitle(
-        "pyRadMC Phase 0 — reference photon engine, 2 MeV in water (KERMA approximation)",
+        "pyRadMC — reference photon engine, 2 MeV in water (KERMA approximation)",
         color=INK,
         fontsize=12,
     )

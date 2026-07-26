@@ -223,7 +223,7 @@ class Queue:
     at zero everywhere, which makes them the one-column degenerate case.
 
     ``primary`` is 1 for a source photon and 0 for every secondary. Only a
-    primary splits at its first Compton scatter (Compton splitting, Phase 4);
+    primary splits at its first Compton scatter (Compton splitting);
     the generators set it, ``_queue_push`` always pushes 0.
     """
 
@@ -476,8 +476,8 @@ def _deposit(
 ):
     """Round-to-nearest fixed-point deposit at a position inside the transport grid.
 
-    Routes by position into the *scoring* grid ``si`` (Phase 5 decoupled dose
-    grid), mirroring ``BatchedDoseScorer.deposit_at``: the containing scoring
+    Routes by position into the *scoring* grid ``si`` (decoupled dose grid),
+    mirroring ``BatchedDoseScorer.deposit_at``: the containing scoring
     voxel of this particle's column, or the unscored ledger counter when the
     scoring grid does not cover the position — never a clamped edge voxel, which
     would corrupt edge dose. Quantization happens once, before routing, so
@@ -1147,7 +1147,7 @@ def photon_kernel(
             ux, uy, uz = rotate_direction(ux, uy, uz, cos_coherent, phi)
         elif process == PhotonProcess.COMPTON:
             if PHOTON_SPLIT_N > 1 and primary != 0:
-                # Compton splitting (Phase 4): the source photon samples
+                # Compton splitting: the source photon samples
                 # PHOTON_SPLIT_N independent final states, each copy (scattered
                 # photon + recoil electron) weighted w/N and pushed as a
                 # non-primary photon; the primary's thread ends here. Ships at
@@ -2028,7 +2028,7 @@ def generate_beamlet_lattice(
     history still draws exactly the stream its ``(seed, key)`` names, so this is a
     pure scheduling change.
 
-    Correlated sampling (Phase 4) keys the stream on ``r`` instead of ``h`` —
+    Correlated sampling keys the stream on ``r`` instead of ``h`` —
     see ``ReferenceEngine.run_dij`` for the mapping's definition and caveats.
     Neither ``r`` nor ``h`` depends on the grouping or chunking, so the
     scheduling bit-inertness above holds in both modes (test-pinned).

@@ -1,4 +1,4 @@
-"""Phase 5 demo: dose scoring decoupled from the transport grid + dose-to-water.
+"""Dose scoring decoupled from the transport grid + dose-to-water.
 
 Transport runs on a fine 2 mm CT-like phantom (water body, cortical-bone slab,
 low-density lung block); dose is *accumulated* on a separate 3 mm dose grid —

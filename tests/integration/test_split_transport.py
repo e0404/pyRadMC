@@ -3,9 +3,9 @@
 Splitting samples a *primary* photon's first Compton final state
 ``PHOTON_SPLIT_N`` times, each copy (scattered photon + recoil electron)
 carrying weight ``1 / PHOTON_SPLIT_N``. It **ships off** (``PHOTON_SPLIT_N`` ==
-1, exactly analog transport): the Phase 4 efficiency measurement found it does
+1, exactly analog transport): the efficiency measurement found it does
 not earn its keep for the analytic-water Dij (see the constant's docstring).
-The mechanism is retained for Phase 5 phase-space sources, so these tests
+The mechanism is retained for phase-space sources, so these tests
 enable it with the sanctioned instrument — pointing the transport module's
 multiplicity constant at 2 via monkeypatching (AGENTS.md 2.10) — to keep the
 ``N > 1`` path validated though it is dormant.
@@ -36,7 +36,7 @@ from pyRadMC.transport.photon import photon_steps
 from tests.conftest import SEED, assert_chi2_consistent_batched
 
 # The instrument multiplicity: these tests turn the dormant split path on to N
-# copies so it stays validated for Phase 5. Not the shipped value (which is 1).
+# copies so it stays validated. Not the shipped value (which is 1).
 SPLIT_N = 2
 
 

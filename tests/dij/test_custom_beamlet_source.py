@@ -1,4 +1,4 @@
-"""A user BeamletSource drives the reference Dij (Phase 5 source interface).
+"""A user BeamletSource drives the reference Dij.
 
 The Dij engine asks a :class:`~pyRadMC.geometry.source.BeamletSource` only for
 ``n_beamlets`` and per-beamlet ``emit`` (beamlet *geometry* is the source's own

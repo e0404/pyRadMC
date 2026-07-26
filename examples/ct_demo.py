@@ -1,4 +1,4 @@
-"""Phase 5 demo: Monte Carlo dose on a CT-derived geometry.
+"""Monte Carlo dose on a CT-derived geometry.
 
 Builds a synthetic patient-like CT phantom (a water body with a cortical-bone slab and
 an off-axis lung region), writes it to a NRRD file, and reads it back through the CT
@@ -15,9 +15,9 @@ On first run this **downloads the ~120 MB EPDL/EEDL libraries** into
 for the figure, ``examples`` (matplotlib). Defaults to Warp (GPU if present). Run from
 the repository root::
 
-    python examples/phase5_ct_demo.py [--histories N] [--backend B]
+    python examples/ct_demo.py [--histories N] [--backend B]
 
-Renders ``phase5_ct_demo.png`` beside this script. Wall-clock is machine-dependent and
+Renders ``ct_demo.png`` beside this script. Wall-clock is machine-dependent and
 not a benchmark.
 """
 

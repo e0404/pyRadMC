@@ -84,7 +84,7 @@ class TestGridCoverage:
 
 
 class TestSourceDeclaredMaterials:
-    """Table sizing is source-declared (Phase 5 materials task).
+    """Table sizing is source-declared .
 
     A source flattens exactly the materials it carries data for. The analytic source
     is calibrated for water only and must say so — once the registry grows past

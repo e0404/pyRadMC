@@ -14,7 +14,7 @@ An *absolute* external gate (ICRU-35 water mass scattering powers) is intentiona
 as a documented slot: those values require the report and cannot be verified against a
 live source here, and the true physical validator for this quantity is the slice-D
 2%/2mm depth-dose gate (central-axis PDD is insensitive to scattering power; penumbra is
-where it bites). See AGENTS.md 7.1 for the same maintainer-supplied-data pattern.
+where it bites). See AGENTS.md section 7 for the same maintainer-supplied-data pattern.
 
 Point ``PYRADMC_EEDL_PATH`` at a local ``EEDL2023.ALL`` to run this; otherwise it skips.
 """

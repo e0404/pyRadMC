@@ -1,4 +1,4 @@
-"""Russian roulette: the unbiased particle-population control of Phase 3.
+"""Russian roulette: the unbiased particle-population control.
 
 Russian roulette removes a particle with probability ``1 - survival`` and boosts
 a survivor's statistical weight by ``1 / survival``, so the expected weight — and

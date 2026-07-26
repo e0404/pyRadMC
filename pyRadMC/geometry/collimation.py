@@ -1044,7 +1044,7 @@ class _FactorWrappedBeamletSource(BeamletSource):
     The factor is deterministic in ``(energy, ray)``, so under correlated
     sampling every beamlet still replays the same energy and aperture offset —
     only the beamlet's ray, and hence its factor, differs. Per-column sigmas
-    stay valid; the Phase 4 rule (never combine column sigmas in quadrature) is
+    stay valid; the standing rule (never combine column sigmas in quadrature) is
     untouched.
     """
 

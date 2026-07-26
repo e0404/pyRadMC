@@ -1,4 +1,4 @@
-"""HU -> (density, material) calibration and CT array -> VoxelGrid (Phase 5 CT adapter).
+"""HU -> (density, material) calibration and CT array -> VoxelGrid.
 
 The pure, dependency-free half of the CT adapter: a Schneider-like Hounsfield
 calibration that a scanner-independent default provides and a site overrides. Maps CT

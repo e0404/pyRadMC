@@ -1,6 +1,11 @@
-r"""Multiple-scattering hinge deflection.
+r"""Multiple-scattering hinge deflection: the Gaussian small-angle model.
 
-Pure scalar functions (AGENTS.md section 2.5). Phase 1 uses the Gaussian small-angle
+**This is not the shipped default.** The engine ships Goudsmit-Saunderson
+(:mod:`pyRadMC.physics.gs`, selected by ``msc_model="gs"``); the Gaussian model here
+is retained as the ``"gaussian"`` instrument, because a model whose approximations are
+different from the default's is what makes the default's error visible.
+
+Pure scalar functions (AGENTS.md section 2.5). The Gaussian small-angle
 (Fermi-Eyges) model, named here where it is implemented: over a condensed-history
 substep the accumulated deflection has
 
@@ -14,10 +19,10 @@ angles are independent Gaussians, so :math:`\\theta^2` is exponentially distribu
 (Rayleigh in :math:`\\theta`) and inverts with a single uniform. Eyges, Phys. Rev. 74,
 1534 (1948), doi:10.1103/PhysRev.74.1534.
 
-Stated approximations: no large-angle (Rutherford tail) events, no Moliere/Goudsmit-
-Saunderson shape correction, deflection applied at the random hinge point rather than
-continuously. Adequate for depth-dose observables; penumbra work should revisit all
-three.
+Stated approximations of *this* model: no large-angle (Rutherford tail) events, no
+Moliere/Goudsmit-Saunderson shape correction, deflection applied at the random hinge
+point rather than continuously. Adequate for depth-dose observables; the first two are
+precisely what the shipped Goudsmit-Saunderson model exists to fix.
 """
 
 from __future__ import annotations

@@ -5,9 +5,12 @@ session-level workflow notes.
 
 ## Before you write anything
 
-1. Check `AGENTS.md` section 7 for the current phase. Work outside the current phase is
-   out of scope; say so rather than doing it.
-2. Check that a failing test exists for what you are about to write. If not, write it.
+1. Check `AGENTS.md` section 6 (out of scope) and section 7 (how work is accepted). Work
+   outside that scope is out of scope; say so rather than doing it.
+2. Check `AGENTS.md` section 8 for a standing constraint covering what you are about to
+   touch. Several current defaults are the result of a measurement that came out negative;
+   re-deriving one by guesswork is the most expensive mistake available here.
+3. Check that a failing test exists for what you are about to write. If not, write it.
 
 ## The five things most often gotten wrong here
 
@@ -19,13 +22,20 @@ session-level workflow notes.
 
 ## Commands
 
+There is no Makefile; these are the commands, identical on every platform.
+
 ```bash
-make test        # fast tiers: unit, physics, integration, dij
-make test-all    # adds validation and perf
-make lint        # ruff check + format --check
-make types       # mypy --strict on non-kernel code
-make bench       # perf tier against recorded baselines
+pytest                            # fast tiers: unit, physics, integration, dij
+pytest -m ""                      # every tier, adding validation and perf
+pytest -m validation              # validation tier alone (slow; needs EPICS data)
+pytest -m perf --benchmark-only   # perf tier against recorded baselines
+ruff check . && ruff format .     # lint and format
+mypy pyRadMC                      # types (--strict; kernels exempt)
+pre-commit run --all-files        # everything the commit hook gates on
+mkdocs build --strict             # docs, as CI and ReadTheDocs build them
 ```
+
+The commit hook runs the fast gates only. Tests are CI's job — run `pytest` yourself.
 
 ## When you are uncertain
 

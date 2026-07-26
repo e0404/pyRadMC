@@ -1,6 +1,6 @@
 """IAEA phase-space reader: header parse + fixed-length binary record iteration.
 
-Phase 5, phase-space source, Slice 1. Pure I/O — no physics. The byte layout is
+Pure I/O — no physics. The byte layout is
 the IAEA (NDS)-0484 format (Capote et al., Vienna 2006); this test pins it against
 *hand-authored* record bytes with hand-computed expected fields, so the reader is
 anchored to the external spec, not to a fixture writer that could share its bug.

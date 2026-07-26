@@ -1,4 +1,4 @@
-"""Transporting a phase-space source through the reference engine (Phase 5, Slice 2).
+"""Transporting a phase-space source through the reference engine.
 
 The invariant that proves per-record *weight* and *kind* are threaded end to end is
 energy conservation: emitted = deposited + escaped, exactly (bookkeeping, not

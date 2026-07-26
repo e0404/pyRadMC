@@ -1,4 +1,4 @@
-"""EEDL -> radiative stopping power (Phase 5, tabulated, slice B, electrons).
+"""EEDL -> radiative stopping power.
 
 Synthetic ENDF text (no committed data): a 23/527 bremsstrahlung cross section plus a
 26/527 secondary-distribution section carrying a LAW=1 photon-spectrum subsection (to

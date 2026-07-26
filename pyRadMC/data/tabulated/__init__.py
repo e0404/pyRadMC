@@ -1,4 +1,4 @@
-"""Tabulated cross-section backend (Phase 5).
+"""Tabulated cross-section backend.
 
 A compile-once / load-fast split: authoritative source data (EPDL/ESTAR, or
 user-supplied) is parsed into the canonical :class:`~pyRadMC.data.tabulated.model.TabulatedData`,

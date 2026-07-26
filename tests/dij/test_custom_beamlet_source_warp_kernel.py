@@ -1,4 +1,4 @@
-"""A user warp_beamlet_sampler drives the Warp Dij in-kernel (Phase 5, advanced route).
+"""A user warp_beamlet_sampler drives the Warp Dij in-kernel.
 
 A BeamletSource exposing a ``@wp.func`` ``warp_beamlet_sampler`` is generated on-device:
 the engine wraps it into a beamlet generator kernel that bakes the correlated-sampling

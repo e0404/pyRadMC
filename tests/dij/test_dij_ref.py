@@ -1,6 +1,6 @@
 """Dij on the reference engine: the correctness anchor for beamlet scoring.
 
-Two properties make the Phase 3 design testable to the bit on one target:
+Two properties make the design testable to the bit on one target:
 streams are pure functions of (seed, history_index), and beamlet assignment is a
 deterministic function of the history index. A 1x1 lattice therefore transports
 *exactly* the histories of the open-field run, and its single Dij column must
@@ -78,7 +78,7 @@ class TestFluenceSum:
         ``correlated=False`` is load-bearing here, not incidental: the sigma of
         the column mean below combines the per-column sigmas in quadrature,
         which is valid only when the columns are statistically independent. The
-        shipped default is correlated (Phase 4), whose columns share streams; a
+        shipped default is correlated, whose columns share streams; a
         quadrature sigma would then understate the variance and the chi-squared
         would false-fail. The independent mapping is the sanctioned test
         instrument for exactly this (AGENTS.md 2.10). The identity under test —

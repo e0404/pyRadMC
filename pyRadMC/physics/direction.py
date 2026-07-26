@@ -2,7 +2,6 @@
 
 Pure scalar functions (AGENTS.md section 2.5). Directions are three floats, never an
 array: the tuple return compiles to a multiple-value return on the Warp targets
-(Phase 2).
 """
 
 from __future__ import annotations

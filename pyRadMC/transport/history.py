@@ -66,8 +66,8 @@ def transport_history(
         Transport/production cutoffs in MeV. Accuracy-defining (AGENTS.md 2.8);
         always explicit here, defaulted only at the engine surface.
     transport_electrons
-        False selects the Phase 0 KERMA approximation: charged secondaries deposit
-        at their creation voxel. Explicit engine option per AGENTS.md 7.2.
+        False selects the KERMA approximation: charged secondaries deposit
+        at their creation voxel. Explicit engine option per docs/decisions.md.
     weight
         Statistical weight of the primary (1.0 for analog beam sources; a
         phase-space record supplies its own). Descendants inherit it and the scorer

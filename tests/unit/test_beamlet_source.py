@@ -1,4 +1,4 @@
-"""BeamletGridSource: the stratified beamlet lattice (Phase 3).
+"""BeamletGridSource: the stratified beamlet lattice.
 
 The source is the semantic anchor of the Dij design: a beamlet is a rectangle of
 the field, the lattice tiles the field exactly, and which beamlet a history feeds

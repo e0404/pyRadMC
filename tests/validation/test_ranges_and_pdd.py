@@ -1,6 +1,6 @@
 """Validation tier: ESTAR-anchored range gates and physics-derived PDD characteristics.
 
-Runs only with ``-m validation`` (nightly / tagged). Phase 1 content per the
+Runs only with ``-m validation`` (nightly / tagged). Content per the
 maintainer-approved plan: gates anchored to NIST ESTAR ranges and to physics-derived
 depth-dose expectations, plus a documented slot awaiting maintainer-supplied benchmark
 PDD curves — the gamma-index comparison (the field convention, and welcome *only* in
@@ -123,7 +123,7 @@ _COMPARE_MIN_CM = 0.3
 # scattered photons well below 300 keV, where the analytic data layer's documented
 # soft-spectrum deficit dominates: measured gamma(5%/3mm) pass rate over the full
 # 25 cm was 84.8 percent at gate-writing, failing exclusively in the deep tail with
-# the slow-decay signature. That region is gated in Phase 5 (tabulated data), which
+# the slow-decay signature. That region is gated by the tabulated backend, which
 # must pass the full range at 2 percent / 2 mm; gating it here would gate data the
 # phase cannot change, not transport.
 _COMPARE_MAX_CM = {1.0: 15.0, 2.0: 25.0, 6.0: 25.0}
@@ -166,14 +166,14 @@ def test_pdd_gamma_against_egsnrc_benchmark(energy: float) -> None:
     (slice sums) — every history then contributes at every depth. Normalization is
     free (least squares over the comparison range): benchmark units are arbitrary.
 
-    The criterion is deliberately 5 percent / 3 mm in Phase 1, not the field's
+    The criterion is deliberately 5 percent / 3 mm for the analytic backend, not the field's
     2 percent / 2 mm, and the reasons are recorded (data/README.md): (a) the analytic
     cross-sections under-absorb the *soft* scattered spectrum (Klein-Nishina without
     binding, crude photoelectric, no Rayleigh), which shows up as a few-percent slow
     decay at depth, strongest at 1 MeV; (b) the benchmark's EGSnrc transport settings
     and exact cylinder size are unknown. Measured shape residuals at gate-writing
     (2026-07-10): within ~plus-minus 3 percent at 6 MeV, up to ~plus-minus 5 percent
-    at 1 MeV. **Tightening to 2 percent / 2 mm against this same file is the Phase 5
+    at 1 MeV. **Tightening to 2 percent / 2 mm against this same file is the standing
     (tabulated data) acceptance criterion — do not loosen this gate; replace the data
     layer.**
     """
@@ -232,7 +232,7 @@ def tabulated_water() -> TabulatedData:
 def test_tabulated_pdd_gamma_against_egsnrc_benchmark(
     energy: float, tabulated_water: TabulatedData
 ) -> None:
-    """Phase 5 first correctness check: the compiled tabulated backend vs EGSnrc, 5%/3mm.
+    """The compiled tabulated backend vs EGSnrc, 5%/3mm.
 
     Same benchmark, geometry and pencil-kernel superposition as the analytic gate above,
     but transporting through the *compiled* tabulated backend (EPDL photons + EEDL
@@ -240,7 +240,7 @@ def test_tabulated_pdd_gamma_against_egsnrc_benchmark(
     confirms the whole tabulated path — parse, mix, compile, load, transport — reproduces
     EGSnrc full physics.
 
-    **On the 2%/2mm target recorded for Phase 5 (AGENTS.md 7.2): it is not reachable
+    **On the 2%/2mm target (docs/decisions.md): it is not reachable
     against *this* file, and the limiter is the benchmark's geometry/metadata, not the
     cross-section data.** Measured (2026-07-12, warp GPU, 2e6 histories): the tabulated
     backend passes 5%/3mm (95-100% over these ranges) but only ~40-90% at 2%/2mm, with

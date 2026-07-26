@@ -1,6 +1,6 @@
 """PhaseSpaceSource: sampling primaries from an IAEA phase-space file.
 
-Phase 5, phase-space source, Slice 2. The source loads phsp records once and
+The source loads phsp records once and
 :meth:`emit` draws one per history from the history's RNG stream (random sampling
 with replacement), returning a :class:`Primary` that carries the record's particle
 *kind* and statistical *weight* — unlike the monoenergetic beam sources, a phsp is

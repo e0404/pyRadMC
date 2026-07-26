@@ -31,9 +31,9 @@ DepositFn = Callable[[float, float, float, float, float], None]
 
 The position (cm) is the deposit site, guaranteed inside the *transport* grid by
 the caller; the scorer routes it to a scoring-grid voxel — or to the unscored
-ledger bucket when the scoring grid does not cover it (Phase 5 decoupled dose
-grid). Deposits are keyed by position, not voxel index, precisely so that the
-scoring grid may differ from the transport grid.
+ledger bucket when the scoring grid does not cover it. Deposits are keyed by
+position, not voxel index, precisely so that the scoring grid may differ from the
+transport grid.
 
 ``energy_mev`` is the physical energy — what the ledger books — and
 ``scored_mev`` is what the dose tally accumulates: identical under
@@ -41,7 +41,7 @@ dose-to-medium, SPR-weighted under dose-to-water (see
 :mod:`pyRadMC.scoring.dose_to_water`). Carrying both keeps the energy balance
 exact in every scoring mode.
 
-With Phase 3 variance reduction, both energies are already weight-scaled: the
+Under variance reduction, both energies are already weight-scaled: the
 scorer sees expected energy, never per-particle energy.
 """
 
@@ -85,7 +85,7 @@ def annihilate_at_rest(
 ) -> None:
     """Positron annihilation at rest: two back-to-back 511 keV photons, isotropic.
 
-    A stated approximation (annihilation in flight neglected; AGENTS.md 7.2). Called
+    A stated approximation (annihilation in flight neglected; docs/decisions.md). Called
     only for positions inside the transport grid. If PCUT is at or above 511 keV the
     photons would die immediately, so the 1.022 MeV is deposited instead — weighted
     by ``scored_factor``, the caller's dose-to-water SPR at the deposit site (1.0

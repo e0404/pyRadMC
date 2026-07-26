@@ -1,4 +1,4 @@
-"""The first red tests of Phase 1: electron interaction data for water.
+"""Electron interaction data for water.
 
 Reference values are NIST ESTAR (https://physics.nist.gov/PhysRefData/Star/Text/ESTAR.html)
 collision and radiative stopping powers and CSDA ranges for liquid water. As with the
@@ -30,7 +30,7 @@ from scipy import integrate
 
 pytest.importorskip(
     "pyRadMC.data.analytic",
-    reason="analytic backend must exist (Phase 0)",
+    reason="analytic backend must exist",
 )
 
 from pyRadMC import ELECTRON_MASS_MEV
@@ -166,7 +166,7 @@ class TestMollerConsistency:
 
 
 class TestMollerCrossSection:
-    """The restricted Moller cross-section accessor added to the interface in Phase 1."""
+    """The restricted Moller cross-section accessor on the cross-section interface."""
 
     def test_zero_below_threshold(self, xs: AnalyticCrossSections) -> None:
         """No delta above the cut is kinematically possible unless T > 2 * cut."""

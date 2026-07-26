@@ -1,9 +1,9 @@
-"""Phase 1 example: condensed-history electron transport on the reference backend.
+"""Condensed-history electron transport on the reference backend.
 
-Renders one figure (``phase1_electron_transport.png``, saved beside this script):
+Renders one figure (``electron_transport_demo.png``, saved beside this script):
 
 - **Left**: depth dose of a broad monoenergetic 6 MeV photon beam with electrons
-  transported (Phase 1) against the same beam in the KERMA approximation (Phase 0).
+  transported against the same beam in the KERMA approximation.
   The difference *is* the phase: the buildup region — surface dose of a few percent
   climbing over the secondary-electron range — only exists when electrons carry their
   energy downstream before depositing it.
@@ -13,7 +13,7 @@ Renders one figure (``phase1_electron_transport.png``, saved beside this script)
 
 Run it from the repository root (requires the ``examples`` extra, i.e. matplotlib)::
 
-    python examples/phase1_electron_transport.py
+    python examples/electron_transport_demo.py
 
 Runtime is tens of seconds (the reference backend is deliberately unoptimized).
 """
@@ -65,8 +65,8 @@ def photon_panel(ax: Axes) -> None:
     # KERMA deposits arrive in few large lumps, so that curve needs (cheap) extra
     # histories to look as smooth as the transport one.
     for label, transport_electrons, n_histories, color, style in [
-        ("electrons transported (Phase 1)", True, 30_000, SERIES[0], "-"),
-        ("KERMA approximation (Phase 0)", False, 100_000, INK_SECONDARY, "--"),
+        ("electrons transported", True, 30_000, SERIES[0], "-"),
+        ("KERMA approximation", False, 100_000, INK_SECONDARY, "--"),
     ]:
         result = engine.run(
             source,
@@ -135,7 +135,7 @@ def main() -> None:
         1, 2, figsize=(11.0, 4.6), facecolor=SURFACE, constrained_layout=True
     )
     fig.suptitle(
-        "pyRadMC Phase 1 — Class II condensed-history electron transport in water",
+        "pyRadMC — Class II condensed-history electron transport in water",
         color=INK,
         fontsize=12,
     )

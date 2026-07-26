@@ -1,4 +1,4 @@
-"""A user Source runs on Warp via the pre-sampling route (Phase 5 source interface).
+"""A user Source runs on Warp via the pre-sampling route.
 
 A custom :class:`~pyRadMC.geometry.source.Source` with no ``warp_sampler`` reaches the
 GPU through the general pre-sampling path (``sample_batch`` -> ``generate_from_upload``),

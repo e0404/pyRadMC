@@ -1,4 +1,4 @@
-"""Phase 1 exit criteria: electron buildup and range behaviour (integration tier).
+"""electron buildup and range behaviour (integration tier).
 
 Expectations are physics-derived from the engine's own data source (CSDA ranges), so
 these tests isolate the *transport* from the data, which is ESTAR-pinned in the unit

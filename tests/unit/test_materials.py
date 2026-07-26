@@ -1,9 +1,6 @@
 """The material registry carries elemental composition and stopping-power data.
 
-Phase 5 materials task: multi-material compilation needs, per material, the elemental
-mass fractions (to mix per-element EPDL/EEDL data), the mean excitation energy and
-Sternheimer density-effect coefficients (Berger-Seltzer collision stopping), and the
-ESTAR radiative anchors (the log-quadratic radiative fit). This file pins the model
+This file pins the model
 and the water entry; the water numbers must equal the constants the analytic backend
 has always used (AGENTS.md 2.2: the oracle does not move during a refactor).
 

@@ -1,6 +1,6 @@
 """Dij pipeline throughput benchmark. Alerts, not pass/fail — with one floor.
 
-The workload is a planning-shaped Phase 3 scenario: a 10x10 beamlet lattice of a
+The workload is a planning-shaped scenario: a 10x10 beamlet lattice of a
 6 MeV field on a 64^3 water phantom, full coupled transport, batched sigma, sparse
 assembly at the default truncation. Statistics are set near the planning target
 (the phase criterion is 2-3 percent per-beamlet high-dose sigma), because the Dij

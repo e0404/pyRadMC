@@ -14,7 +14,7 @@ Values are interpolated **linearly in the value on the log-energy grid**. At the
 default 2048 points over these spans the local spacing is ~3e-3 in log energy and the
 interpolation error is second order in it — a few 1e-5 relative for the smooth
 channels, pinned in ``tests/unit/test_tables.py``. (This per-energy lookup is distinct
-from the *spectrum-integration* requirement of AGENTS.md 2.7, which binds the Phase 5
+from the *spectrum-integration* requirement of AGENTS.md 2.7, which binds the
 tabulated ``CrossSectionSource`` itself.)
 
 The Woodcock majorant nodes carry a relative headroom above the float64 maximum so
@@ -229,7 +229,7 @@ def build_cross_section_tables(
     """Flatten a :class:`CrossSectionSource` onto the two lookup grids.
 
     Generic over sources: everything goes through the host query API, so the
-    analytic and (Phase 5) tabulated backends flatten identically.
+    analytic and tabulated backends flatten identically.
 
     Parameters
     ----------

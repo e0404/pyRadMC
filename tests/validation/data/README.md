@@ -23,8 +23,12 @@ beam (pencil-kernel superposition), so the test runs a pencil beam and scores sl
 sums — every history contributes at every depth. Normalization is free (least squares)
 because the benchmark units are arbitrary.
 
-Columns below ~1 MeV are not gated in Phase 1: the analytic cross-section layer is an
-explicitly few-percent parameterization for the soft spectrum (Klein-Nishina without
-binding, crude photoelectric power law, no Rayleigh), which is also why the Phase 1
-gamma criterion is 5%/3mm rather than the 2%/2mm the tabulated backend (Phase 5) must
-meet against this same file.
+Columns below ~1 MeV are not gated against the analytic backend: its cross-section layer
+is an explicitly few-percent parameterization for the soft spectrum (Klein-Nishina
+without binding, crude photoelectric power law, no Rayleigh). That is also why the gamma
+criterion is 5%/3mm rather than 2%/2mm.
+
+**2%/2mm is not reachable against this file, and the limiter is the missing metadata
+above rather than the cross-section data** — see `AGENTS.md` section 8. Do not loosen the
+5%/3mm gate, and do not expect a better data layer to close the gap; a genuine 2%/2mm
+gate needs a fully specified benchmark.

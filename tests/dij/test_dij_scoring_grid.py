@@ -3,7 +3,7 @@
 The scoring grid changes only where energy is accumulated: the Dij columns live
 on the scoring grid (its shape, its flat voxel indices), the per-group device
 buffer scales with the *scoring* voxel count, and the grouping bit-inertness of
-the Phase 3 design must survive the re-based column offsets. The unscored ledger
+the design must survive the re-based column offsets. The unscored ledger
 bucket closes the three-way energy balance on a subregion grid.
 """
 

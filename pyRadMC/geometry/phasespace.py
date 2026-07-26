@@ -1,6 +1,6 @@
 """IAEA phase-space file reader.
 
-Phase 5, phase-space source, Slice 1. Reads the two-file IAEA phase-space format
+Reads the two-file IAEA phase-space format
 (Capote et al., *Phase-space database for external beam radiotherapy*, IAEA
 (NDS)-0484, Vienna, 2006): an ASCII ``.IAEAheader`` describing the record layout
 and a binary ``.IAEAphsp`` of fixed-length records. This module is pure I/O — it
@@ -452,7 +452,7 @@ class PhaseSpaceSource(Source):
     breaks the unique beamlet ownership the Dij design relies on; it plugs into
     ``run`` on either backend, never ``run_dij``. Per-history :meth:`emit` serves
     the reference engine; :meth:`sample_batch` serves the warp engine, which
-    transports a whole chunk at once (AGENTS.md 7.2).
+    transports a whole chunk at once (docs/decisions.md).
     """
 
     def __init__(self, path: Path | str, *, skip_unsupported: bool = True) -> None:

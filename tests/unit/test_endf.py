@@ -1,4 +1,4 @@
-"""ENDF-6 reader for EPICS data (Phase 5, tabulated, slice B).
+"""ENDF-6 reader for EPICS data.
 
 Format-correct ENDF lines are generated in code (no committed data), matching the
 real EPDL layout observed in ``EPDL2023.ALL``: HEAD then TAB1, ``MAT = 1000 * Z``,

@@ -1,4 +1,4 @@
-"""Phase 5 demo: multi-material transport through bone and lung heterogeneities.
+"""Multi-material transport through bone and lung heterogeneities.
 
 Compiles the whole material registry (water, air, lung, adipose, cortical bone) from
 the EPICS libraries via :func:`pyRadMC.data.tabulated.precompile.compile_materials`,
@@ -22,9 +22,9 @@ On first run this **downloads the ~120 MB EPDL/EEDL libraries** into
 ``~/.cache/pyRadMC/epics`` (cached thereafter). Defaults to Warp (GPU if present),
 else the reference engine. Run from the repository root::
 
-    python examples/phase5_materials_demo.py [--histories N] [--backend B]
+    python examples/materials_demo.py [--histories N] [--backend B]
 
-Renders ``phase5_materials_demo.png`` and ``phase5_materials_demo.csv`` beside this
+Renders ``materials_demo.png`` and ``materials_demo.csv`` beside this
 script. Wall-clock is machine-dependent and not a benchmark.
 """
 

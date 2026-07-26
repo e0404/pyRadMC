@@ -1,10 +1,10 @@
 """Warp backend throughput benchmarks. Alerts, not pass/fail — with one exception.
 
-The workload is the Phase 2 exit scenario: a 6 MeV parallel field in a 32 cm water
+The workload is the exit scenario: a 6 MeV parallel field in a 32 cm water
 cube with full coupled transport. Benchmarks record wall time via pytest-benchmark
-(``make bench``); regressions surface as baseline drift, not failures.
+(``pytest -m perf --benchmark-only``); regressions surface as baseline drift, not failures.
 
-The single hard assertion is the Phase 2 exit criterion itself: at least 1e6
+The single hard assertion is the exit criterion itself: at least 1e6
 histories per second on a CUDA device. Measured headroom at adoption was ~19x on a
 laptop RTX 4070, so tripping this floor means something is catastrophically wrong,
 not merely slow. The reference backend is deliberately unbenchmarked (AGENTS.md 2.2).
@@ -61,14 +61,14 @@ def test_cuda_throughput_meets_phase2_exit_criterion(benchmark) -> None:
         pytest.skip("benchmarking disabled; the throughput floor needs timing data")
     throughput = n / benchmark.stats["mean"]
     assert throughput >= GPU_EXIT_CRITERION_HISTORIES_PER_S, (
-        f"{throughput:.3e} histories/s is below the Phase 2 exit criterion"
+        f"{throughput:.3e} histories/s is below the exit criterion"
     )
 
 
 def test_warp_cpu_throughput(benchmark) -> None:
     """CPU baseline for regression tracking; no threshold.
 
-    The numba cross-check backend was dropped at Phase 2 exit (maintainer decision,
+    The numba cross-check backend was dropped at exit (maintainer decision,
     2026-07-11), so this baseline is the only CPU performance record.
     """
     engine = _engine("cpu")

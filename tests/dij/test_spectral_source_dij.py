@@ -1,4 +1,4 @@
-"""A divergent polyenergetic SpectralBeamletSource drives the reference Dij (Phase 5).
+"""A divergent polyenergetic SpectralBeamletSource drives the reference Dij.
 
 Transport-level pins for the spectral source: the energy ledger closes exactly for a
 polyenergetic beam (emitted energy is whatever the spectrum sampled, booked per

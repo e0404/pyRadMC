@@ -16,7 +16,7 @@ import pytest
 
 pytest.importorskip(
     "pyRadMC.data.analytic",
-    reason="Phase 0: analytic cross-section backend not implemented yet",
+    reason="analytic cross-section backend not implemented yet",
 )
 
 # Energy (MeV) -> mu/rho (cm^2/g), liquid water, NIST XCOM, with coherent scattering.
@@ -30,8 +30,8 @@ NIST_WATER_MU_OVER_RHO: dict[float, float] = {
 
 # The analytic backend is a parameterization, not a table. It is not expected to
 # reproduce XCOM to better than a few percent. This tolerance is a *statement of what
-# the analytic backend is for*: standing up the transport loop in Phase 0. The
-# sub-percent reproduction promised for Phase 5 landed with the tabulated backend, in
+# the analytic backend is for*: standing up the transport loop. The
+# sub-percent reproduction landed with the tabulated backend, in
 # tests/validation/test_epdl_water_nist.py (EPDL-derived water vs NIST XCOM, gate 1%,
 # measured ~0.3%); this analytic gate stays at 5% because loosening the oracle to the
 # parameterization is exactly what AGENTS.md 2.2 forbids.

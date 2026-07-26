@@ -1,4 +1,4 @@
-"""Warp phase-space source against the reference oracle (Phase 5).
+"""Warp phase-space source against the reference oracle.
 
 The warp engine transports a phase-space source by host-sampling each chunk and
 seeding the photon and electron queues by kind. These tests hold it to the same

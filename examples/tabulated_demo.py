@@ -1,4 +1,4 @@
-"""Phase 5 demo: the tabulated cross-section backend against EGSnrc.
+"""The tabulated cross-section backend against EGSnrc.
 
 Compiles liquid water from the EPICS libraries (EPDL photons with coherent form factors,
 EEDL elastic scattering, ICRU-37 electron stopping) via
@@ -10,7 +10,7 @@ the maintainer's EGSnrc full-physics benchmark
 The tabulated backend reproduces this benchmark at the field-standard 5%/3mm gamma
 criterion (``tests/validation/test_ranges_and_pdd.py``); the 2%/2mm difference is set by
 the benchmark's geometry/metadata, not the cross-section data (see that test's docstring
-and AGENTS.md 7.2). The pencil beam's laterally integrated (slice-sum) dose is the
+and docs/decisions.md). The pencil beam's laterally integrated (slice-sum) dose is the
 central-axis dose of a broad beam under lateral scatter equilibrium, which is what the
 benchmark scored.
 
@@ -18,9 +18,9 @@ On first run this **downloads the ~120 MB EPDL/EEDL libraries** into
 ``~/.cache/pyRadMC/epics`` (cached thereafter). Defaults to Warp (GPU if present), else
 the reference engine. Run from the repository root::
 
-    python examples/phase5_tabulated_demo.py [--histories N] [--backend B]
+    python examples/tabulated_demo.py [--histories N] [--backend B]
 
-Renders ``phase5_tabulated_demo.png`` and ``phase5_tabulated_demo.csv`` beside this
+Renders ``tabulated_demo.png`` and ``tabulated_demo.csv`` beside this
 script. Wall-clock is machine-dependent and not a benchmark.
 """
 

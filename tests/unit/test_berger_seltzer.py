@@ -1,4 +1,4 @@
-"""Material-parameterized Berger-Seltzer electron stopping (Phase 5 materials task).
+"""Material-parameterized Berger-Seltzer electron stopping .
 
 The formulas the analytic backend has always evaluated for water — Berger-Seltzer
 restricted collision stopping, the Sternheimer density effect, the restricted Moller

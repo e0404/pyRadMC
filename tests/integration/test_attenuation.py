@@ -1,4 +1,4 @@
-"""Phase 0 exit criterion: exponential attenuation against the analytic law.
+"""exponential attenuation against the analytic law.
 
 The expectations are computed from the *same* CrossSectionSource the transport uses,
 so these tests isolate the transport (Woodcock tracking, free-path sampling, channel

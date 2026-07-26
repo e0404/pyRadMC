@@ -1,4 +1,4 @@
-"""EPDL -> canonical photon cross-section conversion (Phase 5, tabulated, slice B).
+"""EPDL -> canonical photon cross-section conversion.
 
 Exercises the deterministic conversion pipeline on synthetic ENDF-6 text (no
 committed data, same authoring style as ``test_endf.py``): the MT->channel mapping,

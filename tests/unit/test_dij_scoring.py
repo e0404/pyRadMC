@@ -1,4 +1,4 @@
-"""Dij scoring: batched per-beamlet accumulation and sparse assembly (Phase 3).
+"""Dij scoring: batched per-beamlet accumulation and sparse assembly.
 
 The scorer is the per-column generalization of BatchedDoseScorer: dose *and*
 dose-squared per batch per beamlet, so every Dij column carries a sigma
@@ -222,7 +222,7 @@ class TestDijConsumerHooks:
     Column doses are MeV/g per emitted history; a planning consumer (the pyRadPlan
     adapter) needs them in Gy per history so its own particles-per-MU scaling can
     apply downstream, and needs the per-entry variance for ``physical_dose_var`` —
-    with the Phase 4 caveat attached when the Dij was sampled correlated.
+    with the caveat attached when the Dij was sampled correlated.
     """
 
     def _dij(self, correlated: bool) -> DijResult:
@@ -276,11 +276,11 @@ class TestDijConsumerHooks:
     def test_variance_of_a_correlated_dij_carries_the_caveat(self) -> None:
         """Correlated columns are dependent: exporting per-entry variance warns.
 
-        Per-column sigma stays valid for per-beamlet QA, but the known downstream
-        use of a variance matrix is a cross-column combination (a plan-dose
-        variance), which quadrature cannot give under correlated sampling
-        (AGENTS.md Phase 4 record). The caveat is a ``warnings.warn`` per the
-        library output policy.
+         Per-column sigma stays valid for per-beamlet QA, but the known downstream
+         use of a variance matrix is a cross-column combination (a plan-dose
+         variance), which quadrature cannot give under correlated sampling
+        . The caveat is a ``warnings.warn`` per the
+         library output policy.
         """
         with pytest.warns(UserWarning, match="correlated"):
             self._dij(correlated=True).variance_csc()

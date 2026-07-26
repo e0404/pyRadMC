@@ -10,9 +10,9 @@ cross-section and interactions are accepted with probability mu_real / mu_majora
 so voxel boundaries never need to be ray-traced. Woodcock et al. (1965), ANL-7050.
 
 Interactions hand their charged secondaries to the caller through ``spawn`` when
-electron transport is on (Phase 1); with it off, the electron energy is deposited at
-the interaction voxel — the Phase 0 KERMA approximation, kept as an explicit option
-for photon-only physics tests (AGENTS.md 7.2).
+electron transport is on; with it off, the electron energy is deposited at
+the interaction voxel — the KERMA approximation, kept as an explicit option
+for photon-only physics tests (docs/decisions.md).
 
 Stated approximations, named here because this is where they are implemented:
 
@@ -32,20 +32,20 @@ Photons at or below ``pcut`` deposit their energy locally and terminate.
 
 **Variance reduction** (one configuration, AGENTS.md 2.10):
 
-- *Russian roulette (Phase 3), always on.* A Compton-scattered photon dropping
+- *Russian roulette, always on.* A Compton-scattered photon dropping
   below ``PHOTON_ROULETTE_MEV`` plays Russian roulette
   (:mod:`pyRadMC.physics.roulette`) while its weight is under
   ``PHOTON_ROULETTE_WEIGHT_CAP``. The game is exactly fair, and its
   weight-energy change is booked through the escaped-energy ledger, so the
   per-run energy balance stays exact. Instrument: zero the threshold constant.
-- *Compton splitting (Phase 4), shipped off.* The mechanism is here but
+- *Compton splitting, shipped off.* The mechanism is here but
   ``PHOTON_SPLIT_N`` ships at 1 (analog: a primary Comptons into one full-weight
-  copy) — the Phase 4 efficiency measurement found it does not earn its keep for
+  copy) — the efficiency measurement found it does not earn its keep for
   the analytic-water Dij and does not help the low-dose tail (see the constant's
   docstring). For ``N > 1`` a **primary** photon's first Compton samples the
   final state N times, each copy weighted ``1/N`` and energy-conserving per
   realization; only the primary splits, so the population is bounded and the
-  roulette culls the degraded copies. Phase 5 re-measured the FOM on a
+  roulette culls the degraded copies. The FOM was re-measured on a
   phase-space source and it is still < 1 (see the constant's docstring), so it
   stays off; the N > 1 path remains test-pinned with N = 2 as the instrument.
 """
@@ -296,7 +296,7 @@ def transport_photon(
     deposit: DepositFn,
     pcut: float,
 ) -> float:
-    """Transport one photon history in KERMA mode (Phase 0 behaviour).
+    """Transport one photon history in KERMA mode.
 
     Electron energy deposits at the interaction voxel; annihilation photons are
     followed. Kept as the photon-only entry point for attenuation and scatter tests,

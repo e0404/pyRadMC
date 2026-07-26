@@ -1,4 +1,4 @@
-"""TabulatedCrossSections loader over compiled data (Phase 5, tabulated, slice A2).
+"""TabulatedCrossSections loader over compiled data.
 
 Interpolation and contract behaviour on synthetic tables with known analytic forms —
 no real EPDL/ESTAR data. Physical accuracy (water vs NIST, the 2%/2mm gate) lands in

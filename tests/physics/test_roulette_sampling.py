@@ -1,4 +1,4 @@
-"""Russian roulette weight sampling: the Phase 3 basic variance reduction.
+"""Russian roulette weight sampling: the basic variance reduction.
 
 The game must be exactly fair: E[weight out] = weight in, with outcomes only 0
 (killed) or weight/survival (survivor). Fairness is what makes every roulette

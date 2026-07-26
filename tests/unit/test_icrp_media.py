@@ -1,9 +1,6 @@
 """The ICRP reference media: registry data and electron-stopping validation.
 
-Phase 5 materials task, slice: the registry grows air, lung, adipose tissue and
-cortical bone — the ICRP formulations, exactly as NIST ESTAR and the PDG
-atomic-properties compilation define them, so every number here is cross-checkable
-against both. The Berger-Seltzer machinery (``pyRadMC.data.berger_seltzer``) is then
+The Berger-Seltzer machinery (``pyRadMC.data.berger_seltzer``) is then
 gated against ESTAR per material at the same tolerances the water gate has always
 used: collision 3%, radiative 5% (calibration regression pin), CSDA range 3%.
 

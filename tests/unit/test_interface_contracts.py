@@ -28,7 +28,7 @@ class TestMajorantContract:
         from pyRadMC.data.analytic import AnalyticCrossSections
         from pyRadMC.data.materials import WATER
 
-        # Densities bracketing what a Phase 0 water-with-density-scaling geometry can
+        # Densities bracketing what a water-with-density-scaling geometry can
         # contain, including a >1 g/cm^3 voxel (contoured bolus, wet lung, CT noise).
         geometry = ((WATER, 1.2),)
         xs = AnalyticCrossSections(geometry_densities=geometry)

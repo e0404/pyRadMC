@@ -1,7 +1,7 @@
-"""Phase 4 study instrumentation: a toy fluence optimizer and DVH endpoints.
+"""Study instrumentation: a toy fluence optimizer and DVH endpoints.
 
 This module exists to measure one thing: how statistical noise in the Dij
-biases the plans an optimizer produces from it (AGENTS.md 7.2, Phase 4). It is
+biases the plans an optimizer produces from it (docs/decisions.md). It is
 **not** a treatment planning system and must not grow into one — no clinical
 objective vocabulary, no beam models, no constraints beyond what the study
 needs. The engine's product remains the Dij; anything richer belongs in a
@@ -143,7 +143,7 @@ def dose_at_volume(dose_in_roi: np.ndarray, volume_percent: float) -> float:
 
     The (100 - v)-th percentile of the ROI's voxel doses — D98 is a coverage
     (near-minimum) endpoint, D2 a hot-spot (near-maximum) endpoint. Matches
-    the convention of the Phase 3 truncation certification.
+    the convention of the truncation certification.
     """
     if dose_in_roi.size == 0:
         raise ValueError("empty ROI has no DVH")

@@ -1,4 +1,4 @@
-"""A user BeamletSource drives the Warp Dij via pre-sampling (Phase 5 source interface).
+"""A user BeamletSource drives the Warp Dij via pre-sampling.
 
 A custom :class:`~pyRadMC.geometry.source.BeamletSource` with no ``warp_beamlet_sampler``
 reaches the GPU Dij through host pre-sampling: per beamlet, ``sample_beamlet_batch``

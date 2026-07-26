@@ -1,11 +1,11 @@
-"""Phase 4 study: per-beamlet Dij noise vs. the bias of the optimized plan.
+"""Per-beamlet Dij noise vs. the bias of the optimized plan.
 
-The question this answers (AGENTS.md 7.2, Phase 4): when a plan is optimized on
+The question this answers (docs/decisions.md): when a plan is optimized on
 a *noisy* Dij, how wrong is the plan — not the matrix — and how does that
 shrink as per-beamlet statistics grow? The optimizer exploits noise: it sees
 favourable fluctuations as real and shapes weights around them. Measured here
 against high-statistics ground truth for both stream mappings (independent and
-correlated, Phase 4), with the workflow of clinical practice in mind: the
+correlated), with the workflow of clinical practice in mind: the
 final plan is *recalculated independently and renormalized*, so what matters
 is the true quality of the delivered plan, not what the optimizer believed.
 
@@ -37,8 +37,8 @@ central 4 cm PTV box with an OAR box directly downstream — the simplest
 geometry with a real coverage-vs-sparing trade-off for the toy objective of
 :mod:`pyRadMC.study`.
 
-Renders ``phase4_noise_bias_study.png`` and the raw per-realization table
-``phase4_noise_bias_study.csv`` beside this script; ``--full`` switches to the
+Renders ``noise_bias_study.png`` and the raw per-realization table
+``noise_bias_study.csv`` beside this script; ``--full`` switches to the
 decision-grade configuration (32 seeds, a sixth statistics level at the 2-3
 percent target sigma, deeper truths) and ``--phantom halfslab`` adds a lateral
 lung-density slab upstream of the PTV — uniform water is correlated sampling's
@@ -46,7 +46,7 @@ best case, so the default decision needs the heterogeneous curves too. Output
 files gain matching ``_halfslab`` / ``_full`` suffixes. Run from the
 repository root (``examples`` and ``warp`` extras)::
 
-    python examples/phase4_noise_bias_study.py [--full] [--phantom halfslab]
+    python examples/noise_bias_study.py [--full] [--phantom halfslab]
 
 Quick mode stays around a minute on a laptop GPU (Warp-CPU fallback reduces
 statistics); ``--full`` takes several minutes. Wall-clock numbers printed at
@@ -114,7 +114,7 @@ OAR_SLICES = (slice(12, 20), slice(12, 20), slice(18, 24))
 # that symmetry — half the beamlets traverse lung, half don't, and shared-stream
 # histories decorrelate at the interface — while the optimizer must modulate
 # across it. Variable-density water is the project's heterogeneity idiom until
-# Phase 5 brings real materials.
+# Real materials are available via the tabulated backend.
 SLAB_SLICES = (slice(0, 16), slice(0, 32), slice(4, 8))
 SLAB_DENSITY = 0.3
 
@@ -496,7 +496,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    print(f"phase 4 noise/bias study ({'full' if args.full else 'quick'} mode, {args.phantom})")
+    print(f"noise/bias study ({'full' if args.full else 'quick'} mode, {args.phantom})")
     records, baseline = run_study(args.full, args.phantom)
     agg = _aggregate(records, baseline)
 

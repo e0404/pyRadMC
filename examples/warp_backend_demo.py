@@ -1,6 +1,6 @@
-"""Phase 2 example: the Warp backend — CPU and CUDA from one physics source.
+"""The Warp backend — CPU and CUDA from one physics source.
 
-Renders one figure (``phase2_warp_backend.png``, saved beside this script):
+Renders one figure (``warp_backend_demo.png``, saved beside this script):
 
 - **Left**: depth dose of a broad monoenergetic 6 MeV photon beam with full coupled
   photon-electron transport, computed three times — by the reference backend (the
@@ -10,12 +10,12 @@ Renders one figure (``phase2_warp_backend.png``, saved beside this script):
   Warp curves sit inside the reference's uncertainty. Statistical equivalence, never
   bit equality (AGENTS.md 2.3).
 - **Right**: throughput of the same workload per backend and device, histories per
-  second on a log scale. The Phase 2 exit criterion (1e6 histories/s on a GPU) is
+  second on a log scale. The 1e6 histories/s design target on a GPU is
   marked.
 
 Run it from the repository root (requires the ``examples`` and ``warp`` extras)::
 
-    python examples/phase2_warp_backend.py
+    python examples/warp_backend_demo.py
 
 Runtime is under a minute; most of it is the (deliberately unoptimized) reference
 run and one-time kernel compilation.
@@ -137,7 +137,7 @@ def throughput_panel(ax: Axes, throughput: dict) -> None:
     ax.text(
         1.0e6 * 0.82,
         0.97,
-        "Phase 2 exit criterion (GPU)",
+        "1e6 histories/s target (GPU)",
         fontsize=7,
         color=INK_SECONDARY,
         rotation=90,

@@ -1,6 +1,6 @@
 """Warp Dij against the reference oracle and its own scheduling invariances.
 
-The Phase 3 design claim: because streams are pure functions of (seed, history)
+The design claim: because streams are pure functions of (seed, history)
 and scoring is associative int64, *how* the engine schedules beamlets — one per
 launch, grouped, any chunk size — cannot change the Dij by a single bit on one
 device. That claim is pinned here. Statistical equivalence with the reference
@@ -204,7 +204,7 @@ class TestBookkeeping:
 
 
 class TestCorrelatedSampling:
-    """The Phase 4 stream remap on the kernel path.
+    """The stream remap on the kernel path.
 
     The mapping specification lives in ``ReferenceEngine.run_dij`` and is
     pinned in ``test_dij_correlated.py``; here only what the kernel adds needs
@@ -218,9 +218,9 @@ class TestCorrelatedSampling:
     def test_default_is_correlated_and_beamlet_zero_is_mode_invariant(self, device: str) -> None:
         """Default run_dij is correlated; for beamlet 0 the remap is the identity.
 
-        The shipped configuration keys on the within-beamlet index (Phase 4
-        exit); ``correlated=False`` is the test instrument. On beamlet 0 the
-        two mappings coincide (rw == h), and column 1 must actually move.
+        The shipped configuration keys on the within-beamlet index;
+        ``correlated=False`` is the test instrument. On beamlet 0 the two mappings
+        coincide (rw == h), and column 1 must actually move.
         """
         engine = _warp_engine(device)
         kwargs = dict(n_histories_per_beamlet=800, n_batches=4, seed=SEED, truncation=0.0)

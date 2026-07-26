@@ -35,7 +35,7 @@ def sample_compton_energy_ratio(energy: float, rng_state: RNGState) -> float:
     Kahn (1956), RAND AECU-3259; see also Salvat et al., PENELOPE-2018, sec. 2.3
     (doi:10.1787/32da5043-en). Exact at all energies; the rejection *efficiency*
     degrades above a few MeV, where Koblinger's direct method is preferred — an
-    acceptable cost in the reference backend; the Warp kernels (Phase 2) adopted it
+    acceptable cost in the reference backend; the Warp kernels adopted it
     unchanged, since rejection efficiency is not their bottleneck.
 
     Parameters

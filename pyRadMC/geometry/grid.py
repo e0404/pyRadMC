@@ -262,7 +262,7 @@ class VoxelGrid:
         if self.material.shape != self.shape:
             raise ValueError(f"material shape {self.material.shape} != grid shape {self.shape}")
         if np.any(self.density <= 0.0):
-            raise ValueError("non-positive voxel density; vacuum is not supported in Phase 0")
+            raise ValueError("non-positive voxel density; vacuum is not supported")
         if np.any((self.material < 0) | (self.material >= len(MATERIALS))):
             raise ValueError("material index outside the registry")
 
@@ -273,7 +273,7 @@ class VoxelGrid:
         spacing: tuple[float, float, float],
         origin: tuple[float, float, float] = (0.0, 0.0, 0.0),
     ) -> VoxelGrid:
-        """Build a homogeneous unit-density water grid, the Phase 0 workhorse phantom."""
+        """Build a homogeneous unit-density water grid, the workhorse phantom."""
         return cls(
             shape=shape,
             spacing=spacing,

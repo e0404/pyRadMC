@@ -1,4 +1,4 @@
-"""Heterogeneous-material transport plumbing (Phase 5 materials task).
+"""Heterogeneous-material transport plumbing .
 
 A two-material synthetic table (water row plus an 'air' row at half the water
 attenuation — a test instrument, not physics) through a slab phantom: the voxel
@@ -8,7 +8,7 @@ data; this fast-tier test pins the *plumbing* — grid material array to source 
 kernel lookup — with statistics loose enough for the integration tier.
 
 Both slab voxels and water voxels carry unit density, isolating the material-index
-path from the density-scaling path (which Phase 0 tests already pin).
+path from the density-scaling path (which tests already pin).
 """
 
 from __future__ import annotations

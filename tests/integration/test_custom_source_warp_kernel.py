@@ -1,4 +1,4 @@
-"""A user warp_sampler runs in-kernel (Phase 5 source interface, advanced route).
+"""A user warp_sampler runs in-kernel.
 
 A source that exposes a ``@wp.func`` ``warp_sampler`` is generated on-device: the engine
 wraps the sampler into a generator kernel (``make_generator_kernel``) instead of

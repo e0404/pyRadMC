@@ -1,4 +1,4 @@
-"""Precompiler guards (Phase 5, tabulated, slice C).
+"""Precompiler guards.
 
 Fast-tier checks that need no data: argument validation and the strategy enum. The full
 real-library compilation of both strategies is exercised in the validation tier

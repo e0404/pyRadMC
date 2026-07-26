@@ -1,4 +1,4 @@
-"""Divergent polyenergetic sources: geometry and spectrum contracts (Phase 5).
+"""Divergent polyenergetic sources: geometry and spectrum contracts.
 
 A :class:`~pyRadMC.geometry.source.SpectralBeamletSource` fans from a focal point
 through per-bixel apertures at a reference plane, all **in the engine frame** —
@@ -112,7 +112,7 @@ def test_rays_pass_through_their_bixel_aperture(beamlet: int) -> None:
 def test_correlated_streams_replay_the_same_aperture_offset() -> None:
     """The same stream gives every beamlet the same energy and in-bixel offset.
 
-    This is what makes correlated sampling (AGENTS.md, Phase 4) effective for this
+    This is what makes correlated sampling effective for this
     source: corresponding histories differ only by the bixel centre.
     """
     rng = HostRNG()
@@ -167,7 +167,7 @@ def test_per_beamlet_sampled_spectrum_matches_input() -> None:
 # ---------------------------------------------------------------------------
 # Vectorized pre-sampling batch (the simple Warp route)
 #
-# Like the phase-space source (AGENTS.md 7.2), the spectral sources override the
+# Like the phase-space source (docs/decisions.md), the spectral sources override the
 # default per-history pre-sampling with a vectorized batch on its own PCG64 stream:
 # the backends draw *independent* primaries and agree statistically, never bit-wise.
 # What is pinned here is the stream contract, not equality with emit.
@@ -193,7 +193,7 @@ def test_sample_beamlet_batch_replays_draws_across_beamlets() -> None:
 
     Correlated Dij sampling hands every beamlet the same history keys; the batch
     then replays the same energies and in-aperture offsets in every beamlet, so the
-    correlation the Phase 4 study relies on survives the vectorized route.
+    correlation the study relies on survives the vectorized route.
     """
     source = _source()
     a = source.sample_beamlet_batch(SEED, 0, 32, beamlet=0)

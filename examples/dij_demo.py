@@ -1,6 +1,6 @@
-"""Phase 3 example: the beamlet-resolved dose influence matrix (Dij).
+"""The beamlet-resolved dose influence matrix (Dij).
 
-Renders one figure (``phase3_dij.png``, saved beside this script):
+Renders one figure (``dij_demo.png``, saved beside this script):
 
 - **Left**: the dose column of one central beamlet, side view through its axis on a
   log scale. It reads like a pencil beam: a sharp core under the 2 x 2 cm beamlet
@@ -19,7 +19,7 @@ Renders one figure (``phase3_dij.png``, saved beside this script):
 
 Run it from the repository root (requires the ``examples`` and ``warp`` extras)::
 
-    python examples/phase3_dij.py
+    python examples/dij_demo.py
 
 Runtime is well under a minute on a laptop; it uses CUDA when available and falls
 back to Warp-CPU with fewer histories.

@@ -1,4 +1,4 @@
-"""The Phase 4 study instrumentation: toy plan optimization and DVH endpoints.
+"""The study instrumentation: toy plan optimization and DVH endpoints.
 
 The noise/bias study's conclusions are only as trustworthy as its harness, so
 the harness is tested like everything else: the optimizer must solve problems

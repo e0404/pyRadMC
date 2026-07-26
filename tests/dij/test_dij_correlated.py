@@ -1,6 +1,6 @@
-"""Correlated sampling across beamlets (Phase 4): the stream-mapping pin.
+"""Correlated sampling across beamlets: the stream-mapping pin.
 
-Correlated sampling is a change of the *stream mapping* only (AGENTS.md 7.2):
+Correlated sampling is a change of the *stream mapping* only (docs/decisions.md):
 with ``correlated=True``, the history at within-beamlet index ``rw`` of beamlet
 ``j`` draws the stream keyed on ``rw`` instead of the global index
 ``h = j * n_per + rw``, so corresponding histories of every beamlet replay the
@@ -8,10 +8,10 @@ same random sequence and only the entry position differs. The physics, the
 scoring, and the batching are untouched.
 
 The mapping pinned here on the reference engine is the specification every
-backend follows, exactly like the Phase 3 ``h`` mapping fixed in
+backend follows, exactly like the ``h`` mapping fixed in
 ``ReferenceEngine.run_dij``.
 
-``correlated=True`` is the shipped Dij configuration (decided at Phase 4 exit
+``correlated=True`` is the shipped Dij configuration (decided at exit
 from the noise/bias study); ``correlated=False`` is the sanctioned test
 instrument (AGENTS.md 2.10) that the fluence-sum identity needs. A correlated
 Dij's columns are *not* statistically independent: per-column sigmas stay valid,
@@ -96,9 +96,9 @@ class TestStreamMapping:
         assert dij.correlated is True
 
     def test_default_run_dij_is_correlated(self) -> None:
-        """Correlated sampling is the shipped configuration (Phase 4 exit).
+        """Correlated sampling is the shipped configuration.
 
-        The noise/bias study (``examples/phase4_noise_bias_study.py``) settled
+        The noise/bias study (``examples/noise_bias_study.py``) settled
         the default in correlated's favour, so ``run_dij`` without the flag
         keys streams on the within-beamlet index. One configuration ships
         (AGENTS.md 2.10); ``correlated=False`` survives only as the test
@@ -116,7 +116,7 @@ class TestStreamMapping:
         assert dij.correlated is True
 
     def test_independent_instrument_keys_on_the_global_index(self) -> None:
-        """``correlated=False`` is the test instrument: the Phase 3 h-mapping.
+        """``correlated=False`` is the test instrument: the h-mapping.
 
         Its one remaining job is to isolate column independence for the
         fluence-sum identity, whose quadrature sigma requires it

@@ -1,4 +1,4 @@
-"""Compiled cross-section format: round-trip and versioning (Phase 5, tabulated, slice A).
+"""Compiled cross-section format: round-trip and versioning.
 
 The precompiler writes authoritative source data (EPDL/ESTAR) into this internal
 format; the loader reads it back with no knowledge of where it came from. This test

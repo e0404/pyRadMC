@@ -5,7 +5,7 @@ interaction sampling with its *start* voxel's density and material. Without capp
 the substep at the next voxel face, a step that crosses a sharp density interface
 plows one medium's stopping power across the boundary and deposits it into the
 neighbour's (much smaller) mass, producing a single-voxel dose spike right at the
-interface (the artifact the Phase 5 materials demo surfaced).
+interface (the artifact the materials demo surfaced).
 
 This drives the fix directly through ``transport.electron.electron_steps``: transport
 many electrons across a pure density step (same material, so the mass stopping power is

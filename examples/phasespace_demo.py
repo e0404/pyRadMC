@@ -1,4 +1,4 @@
-"""Phase 5 demo: transport an IAEA phase-space source into a water phantom.
+"""Transport an IAEA phase-space source into a water phantom.
 
 Reads a real IAEA phase-space file (default: the Varian TrueBeam 6 MV file at
 ``D:/data/phsp``), places a water phantom downstream of the recorded particles,
@@ -23,9 +23,9 @@ By default this runs on the Warp backend (GPU if a CUDA device is present, else
 Warp-CPU), falling back to the reference engine if Warp is not installed. Run from
 the repository root::
 
-    python examples/phase5_phasespace_demo.py [PHSP] [--histories N] [--backend B]
+    python examples/phasespace_demo.py [PHSP] [--histories N] [--backend B]
 
-Renders ``phase5_phasespace_demo.png`` and ``phase5_phasespace_demo.csv`` beside
+Renders ``phasespace_demo.png`` and ``phasespace_demo.csv`` beside
 this script. Wall-clock is machine-dependent and not a benchmark.
 """
 

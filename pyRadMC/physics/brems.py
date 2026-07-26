@@ -1,7 +1,7 @@
 """Discrete thin-target bremsstrahlung.
 
-Pure scalar functions (AGENTS.md section 2.5). The Phase 1 model, named here where it
-is implemented (maintainer-approved, AGENTS.md section 7.2):
+Pure scalar functions (AGENTS.md section 2.5). The model, named here where it
+is implemented (maintainer-approved, docs/decisions.md):
 
 - Photon energies follow a thin-target ``1/k`` spectrum between PCUT and the electron
   kinetic energy — the leading behaviour of the Bethe-Heitler cross-section (Bethe &

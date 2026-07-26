@@ -1,7 +1,7 @@
 """Validation tier: EPDL-derived water reproduces NIST XCOM to better than 1 percent.
 
 This is the accuracy claim the analytic backend's 5-percent test
-(``tests/unit/test_cross_sections_water.py``) always deferred to Phase 5. It runs the
+(``tests/unit/test_cross_sections_water.py``) always deferred. It runs the
 full tabulated photon path — parse ``EPDL2023.ALL``, convert units, mix H and O by
 mass fraction onto the canonical geometric grid, and query through the shipping
 :class:`~pyRadMC.data.tabulated.source.TabulatedCrossSections` loader — and gates the
@@ -11,7 +11,7 @@ included) at 1, 2, 6, 10 and 15 MeV.
 The measured agreement is ~0.3 percent; the gate is set at 1 percent because the NIST
 reference values transcribed here carry only three significant figures, whose rounding
 (up to ~0.2 percent) dominates the residual. Do not loosen this gate to accommodate a
-data-layer regression (AGENTS.md 2.4 / the Phase 4 exit record's 2%/2mm carried item);
+data-layer regression (AGENTS.md 2.4 / the exit record's 2%/2mm carried item);
 tighten the *references* instead if sub-percent resolution is ever needed.
 
 The ~90 MB EPDL file is not committed. Point ``PYRADMC_EPDL_PATH`` at a local
@@ -104,7 +104,7 @@ def test_epdl_water_has_a_nonzero_rayleigh_channel() -> None:
     """The tabulated backend carries coherent scattering the analytic backend omits.
 
     A data statement, not a flag (AGENTS.md 2.10): Rayleigh enters because the EPDL
-    coherent cross section is nonzero, and the pair-refit warning (Phase 4 exit record)
+    coherent cross section is nonzero, and the pair-refit warning
     is moot here because every channel comes from one consistent EPDL decomposition.
     """
     from pyRadMC.data.interface import PhotonProcess

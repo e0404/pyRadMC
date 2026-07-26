@@ -3,9 +3,9 @@
 The Berger-Seltzer restricted collision stopping power, the Sternheimer density
 effect, the restricted Moller cross-section, the log-quadratic ESTAR radiative fit,
 and the CSDA range integral — the formulas the analytic backend evaluated for water
-since Phase 1 — parameterized by :class:`~pyRadMC.data.materials.MaterialData` so the
-tabulated precompiler can evaluate them for any registry material (Phase 5 materials
-task). The analytic backend delegates here with the water entry; the delegation
+— parameterized by :class:`~pyRadMC.data.materials.MaterialData` so the
+tabulated precompiler can evaluate them for any registry material (multi-material
+work). The analytic backend delegates here with the water entry; the delegation
 identity is test-pinned (``tests/unit/test_berger_seltzer.py``), because these
 formulas *are* the electron oracle and moving them must not change them
 (AGENTS.md 2.2).

@@ -1,4 +1,4 @@
-"""Phase 0 exit criterion: broad-beam depth dose shows scatter buildup.
+"""broad-beam depth dose shows scatter buildup.
 
 In the KERMA approximation there is no electron buildup, but *scatter* buildup is
 fully present: with increasing depth the scattered-photon fluence adds dose that a
@@ -38,9 +38,9 @@ def depth_dose() -> tuple[np.ndarray, np.ndarray, float, np.ndarray]:
     source = ParallelBeamSource(energy=ENERGY_MEV, z=-1.0, x_range=(0.0, 16.0), y_range=(0.0, 16.0))
     engine = ReferenceEngine(grid=grid, cross_sections=xs, rng=HostRNG())
     # KERMA mode, deliberately: this test's analytic expectation (D exp(mu z) growth
-    # from *scatter* alone) is a photon-only statement, and AGENTS.md 7.2 keeps KERMA
+    # from *scatter* alone) is a photon-only statement, and docs/decisions.md keeps KERMA
     # as the explicit option for exactly this kind of test. Electron buildup has its
-    # own Phase 1 test on a fine grid.
+    # own test on a fine grid.
     result = engine.run(
         source, n_histories=N_HISTORIES, n_batches=N_BATCHES, seed=SEED, transport_electrons=False
     )

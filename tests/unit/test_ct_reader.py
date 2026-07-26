@@ -1,4 +1,4 @@
-"""SimpleITK CT image -> VoxelGrid (Phase 5 CT adapter, reader slice).
+"""SimpleITK CT image -> VoxelGrid.
 
 The image-reading half: SimpleITK indexes (z, y, x) and works in mm with a physical
 origin at the first voxel's centre, while the engine grid is (x, y, z) in cm with the

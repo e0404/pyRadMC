@@ -1,4 +1,4 @@
-"""The public Source / BeamletSource interface (Phase 5 source-interface work).
+"""The public Source / BeamletSource interface.
 
 A user can define a source by subclassing ``Source`` (open field) or ``BeamletSource``
 (Dij) and implementing ``emit`` + ``max_energy``; the reference backend runs it through

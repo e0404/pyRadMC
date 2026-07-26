@@ -1,4 +1,4 @@
-"""Histogram spectrum sampling and the Ali-Rogers analytic MV form (Phase 5).
+"""Histogram spectrum sampling and the Ali-Rogers analytic MV form.
 
 The :class:`~pyRadMC.geometry.spectrum.Spectrum` is the energy model of the spectral
 beam sources: a photon-number histogram sampled by CDF inversion. These tests pin

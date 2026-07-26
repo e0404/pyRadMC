@@ -1,8 +1,8 @@
 """Material definitions for the cross-section backends.
 
-Phase 0 transported photons in water only. The registry is nevertheless a registry, not
+The engine began as water-only. The registry is nevertheless a registry, not
 a constant, so that adding lung/bone-like media in later phases is a data change and not
-a code change — that change is the Phase 5 materials task, which gave every entry its
+a code change — that change is the multi-material work, which gave every entry its
 elemental composition (to mix per-element EPDL/EEDL data into per-material tables), its
 mean excitation energy and Sternheimer density-effect coefficients (the Berger-Seltzer
 collision stopping inputs), and its ESTAR radiative anchors (the log-quadratic radiative

@@ -315,7 +315,7 @@ class PencilBeamSource(Source):
 class ParallelBeamSource(Source):
     """Broad parallel beam along +z, uniform over a rectangular field at plane z.
 
-    The broad-beam geometry of the Phase 0 buildup test: uniform fluence over
+    The broad-beam geometry of the buildup test: uniform fluence over
     ``x_range`` x ``y_range``, all photons travelling in +z.
     """
 
@@ -347,7 +347,7 @@ class ParallelBeamSource(Source):
 class BeamletGridSource(BeamletSource):
     """Parallel beamlet lattice along +z: an ``n_x`` x ``n_y`` tiling of the field.
 
-    The Phase 3 Dij source. Each beamlet is one rectangle of the tiling, indexed
+    The Dij source. Each beamlet is one rectangle of the tiling, indexed
     x-major: ``j = jx * n_y + jy``. Which beamlet a history feeds is the *caller's*
     decision — the engines derive it deterministically from the history index
     (stratified sampling), so per-beamlet history counts are exact rather than
@@ -359,7 +359,7 @@ class BeamletGridSource(BeamletSource):
     Beamlets partition the primary fluence and transport is linear in the source,
     so scoring each history's whole family into its beamlet's column decomposes
     the open-field dose exactly — no crosstalk approximation. (A phase-space
-    source would break unique beamlet ownership; that is a Phase 5 concern.)
+    source would break unique beamlet ownership; that is a known limitation.)
     """
 
     energy: float
@@ -508,7 +508,7 @@ class _DivergentFan:
         """Vectorized pre-sampling of ``n`` primaries through one aperture.
 
         The vectorized sibling of :meth:`emit_through` (the phase-space precedent,
-        AGENTS.md 7.2): the four per-history uniforms come from a single
+        docs/decisions.md): the four per-history uniforms come from a single
         ``PCG64(seed)`` stream advanced to ``4 * history_offset``, so history ``h``
         always consumes draws ``4h .. 4h + 3`` regardless of chunking
         (chunk-invariant) and independently of the aperture (correlated Dij

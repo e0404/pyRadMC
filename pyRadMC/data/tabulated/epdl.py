@@ -57,7 +57,7 @@ MT_TO_PROCESS: dict[int, int] = {
 }
 
 # STANDARD_ATOMIC_WEIGHT lives in pyRadMC.data.materials (its canonical home since the
-# Phase 5 materials task) and is re-exported here because the EPDL/EEDL parsers are
+# multi-material work) and is re-exported here because the EPDL/EEDL parsers are
 # where the barns -> cm^2/g conversions that consume it happen.
 
 
