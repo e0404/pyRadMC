@@ -48,7 +48,8 @@ AVOGADRO: float = 6.022_140_76e23
 # doi:10.1515/pac-2019-0603). The elements of the ICRP/ICRU reference media (H..Ca
 # for the bulk constituents plus the Fe/Zn traces of the ICRP tissues) and of the
 # beam-limiting-device materials (W, with the Ni/Cu binders of the common heavy
-# alloys). This is the canonical table; the EPDL/EEDL parsers import it from here.
+# alloys, and Al for the flattening-filter attenuation the Ali-Rogers spectra carry).
+# This is the canonical table; the EPDL/EEDL parsers import it from here.
 STANDARD_ATOMIC_WEIGHT: dict[int, float] = {
     1: 1.008,
     6: 12.011,
@@ -56,6 +57,7 @@ STANDARD_ATOMIC_WEIGHT: dict[int, float] = {
     8: 15.999,
     11: 22.98976928,
     12: 24.305,
+    13: 26.9815384,
     15: 30.973761998,
     16: 32.06,
     17: 35.45,

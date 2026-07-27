@@ -178,28 +178,72 @@ def test_ali_rogers_filtration_hardens_the_beam() -> None:
     assert ali_rogers_mv(harder).mean_energy > ali_rogers_mv(base).mean_energy
 
 
-def test_ali_rogers_annihilation_line_adds_to_the_511_bin() -> None:
-    """C4 books an integral energy fluence at 511 keV: C4/0.511 photons on the same scale.
+def _line_to_continuum(params: AliRogersMV, n_bins: int = 100) -> tuple[float, float, float]:
+    """Recover the 511 keV line's strength from public spectra alone.
 
-    Built with and without the line, only the bin containing 0.511 MeV changes, and
-    its excess photon number matches C4 / 0.511 on the shared continuum scale.
+    Building the same beam with and without C4 isolates the line: the off-line bins
+    are rescaled by one common factor r = S / (S + L), with S the continuum photon
+    total and L the line's photon number. Returns ``(L / S, 1 - r, p_continuum[k])``
+    — the line-to-continuum ratio, the line's share of all emitted photons, and the
+    normalized continuum content of the bin holding 511 keV.
+
+    Nothing here reaches into :mod:`pyRadMC.geometry.spectrum` internals: the point
+    of these tests is to constrain ``ali_rogers_mv`` from the outside, so that a wrong
+    mu(E) parameterization or a wrong quadrature cannot satisfy them by construction.
     """
-    base = AliRogersMV(e_e=5.76, c1=1.222, c2=5.147, c3=-1.186)
-    lined = AliRogersMV(e_e=5.76, c1=1.222, c2=5.147, c3=-1.186, c4=0.00881)
-    n_bins = 100
-    p0 = ali_rogers_mv(base, n_bins=n_bins).bin_probabilities
-    p1 = ali_rogers_mv(lined, n_bins=n_bins).bin_probabilities
-
-    edges = np.linspace(0.15, 5.76, n_bins + 1)
+    p0 = ali_rogers_mv(params._replace(c4=0.0), n_bins=n_bins).bin_probabilities
+    p1 = ali_rogers_mv(params, n_bins=n_bins).bin_probabilities
+    edges = np.linspace(0.15, params.e_e, n_bins + 1)
     k = int(np.searchsorted(edges, 0.511, side="right") - 1)
-    # Off-line bins keep their relative shape: one common renormalization factor
-    # r = S / (S + L), with S the continuum photon total and L = C4 / 0.511 the line.
-    ratio = np.delete(p1, k) / np.delete(p0, k)
-    r = float(ratio[0])
-    assert ratio == pytest.approx(r, rel=1e-12)
-    assert r < 1.0
-    # The line bin's excess over its rescaled continuum is the line share, 1 - r.
-    assert p1[k] - r * p0[k] == pytest.approx(1.0 - r, rel=1e-9)
+    off_ratio = np.delete(p1, k) / np.delete(p0, k)
+    r = float(off_ratio[0])
+    # The common-rescale claim is itself an assertion: the line must land in bin k only.
+    assert off_ratio == pytest.approx(r, rel=1e-12)
+    return (1.0 - r) / r, 1.0 - r, float(p0[k])
+
+
+def test_ali_rogers_annihilation_line_rides_the_same_filtration_envelope() -> None:
+    """Function 13 puts C4 inside the common W/Al envelope, so the line is filtered.
+
+    Ali and Rogers (2012), table 2, replaces ``psi_thin`` in function 12 by
+    ``psi_thin + C4 delta(E - E511)`` *before* multiplying by
+    ``exp(-mu_W C1^2 - mu_Al C2^2)``. The observable consequence, and the only one
+    that survives the spectrum's internal normalization, is a double ratio: between
+    two beams differing only in filtration, the line's strength relative to the
+    continuum must change by the same factor as the 511 keV continuum bin's own
+    share does. The unknown continuum totals cancel, so this holds without knowing
+    mu_W, mu_Al, or the quadrature — it fails only if the line skips the envelope.
+
+    Tolerance: the line is a delta at exactly 511 keV while the continuum bin carries
+    a bin-averaged transmission, an irreducible discretization mismatch measured at
+    0.70 percent for this pair at the shipped n_bins=100. The pre-fix behaviour
+    (line added after the envelope) misses by a factor of 11.1, so 3 percent
+    separates them by roughly three orders of magnitude.
+    """
+    heavy = AliRogersMV(e_e=5.76, c1=1.222, c2=5.147, c3=-1.186, c4=0.00881)
+    light = heavy._replace(c1=0.200, c2=0.500)
+
+    ratio_heavy, _, continuum_heavy = _line_to_continuum(heavy)
+    ratio_light, _, continuum_light = _line_to_continuum(light)
+
+    assert ratio_heavy / ratio_light == pytest.approx(continuum_heavy / continuum_light, rel=3e-2)
+
+
+def test_ali_rogers_annihilation_line_stays_a_perturbation_on_every_preset() -> None:
+    """The 511 keV line is a small feature on the continuum, never a dominant one.
+
+    Positron annihilation contributes a visible spike to an MV spectrum, not a
+    significant fraction of the fluence. Leaving the line outside the filtration
+    envelope inflated it to 36.1 percent of all photons for ``varian-18mv`` and
+    48.8 percent for ``elekta-25mv`` — a physically impossible spectrum that the
+    6 MV-only mean-energy check above was too weak to see. Filtered, the largest
+    share across the nine presets is 0.82 percent, so the 5 percent bound holds
+    with six-fold headroom while still excluding the unfiltered treatment outright.
+    """
+    for name, params in ALI_ROGERS_BEAMS.items():
+        assert params.c4 > 0.0, name
+        _, share, _ = _line_to_continuum(params)
+        assert 0.0 < share < 0.05, f"{name}: line carries {share:.1%} of emitted photons"
 
 
 def test_ali_rogers_low_edge_respects_the_mu_parameterization_floor() -> None:

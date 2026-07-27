@@ -25,12 +25,31 @@ must be able to find out from this file whether the numbers should have moved.
   compaction on the device. `TransmissionMaskSource` exposes its inner source and mask
   plane geometry through accessor properties for backend generators and user inspection.
 
+- Aluminium (Z = 13) in `STANDARD_ATOMIC_WEIGHT`, so the EPDL/EEDL parsers can build it.
+  It is not a registered transport material; the entry exists because aluminium is half of
+  the Ali–Rogers flattening-filter attenuation and the validation tier now checks those
+  parameterizations against EPICS 2023.
+
 ### Changed
 
 - Warp's general host-pre-sampled source route no longer seeds exactly-zero-weight
   primaries into transport queues. The attempted-history denominator and global history
   keys are unchanged; reference-vs-Warp agreement remains statistical, and repeated runs
   on one target remain bit-reproducible.
+
+### Fixed
+
+- **The Ali–Rogers 511 keV annihilation line is now filtered with the continuum.** The
+  `C4` delta term belongs inside the same tungsten/aluminium envelope as `psi_thin` in
+  the paper's function 13; it was previously added after the envelope, leaving the line
+  unattenuated. Transmission at 511 keV spans 0.115 (`siemens-6mv`, an 8.7x reduction of
+  the line) to 0.0087 (`elekta-25mv`, 115x), so **all nine presets move and the
+  high-energy beams move most**. The line's share of emitted photons falls from 36.1% to
+  0.71% (`varian-18mv`) and from 48.8% to 0.82% (`elekta-25mv`), raising their mean
+  photon energies from 3.05 to 4.51 MeV and from 2.95 to 5.30 MeV — the previous values
+  were unphysically soft for those nominal energies. No released version is affected, so
+  no published result needs re-running; any dose computed from a preset on `main` before
+  this commit is wrong by the amounts above.
 
 ## [0.1.0] — unreleased
 

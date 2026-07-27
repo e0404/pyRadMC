@@ -160,8 +160,11 @@ class AliRogersMV(NamedTuple):
     c3: float
     """Dimensionless shape coefficient of the thin-target term."""
     c4: float = 0.0
-    """Integral energy fluence of the 511 keV annihilation line, MeV, on the same
-    scale as the continuum ``psi(E)``; 0 omits the line (the four-parameter form)."""
+    """Integral-energy-fluence coefficient of the 511 keV delta term, MeV.
+
+    Function 13 places this term inside the same tungsten/aluminium filtration
+    envelope as ``psi_thin``; 0 omits the line (the four-parameter form).
+    """
 
 
 ALI_ROGERS_BEAMS: dict[str, AliRogersMV] = {
@@ -181,7 +184,21 @@ ALI_ROGERS_BEAMS: dict[str, AliRogersMV] = {
 which differs from the nominal MV (e.g. 5.76 MeV for the Varian 6 MV beam)."""
 
 _MU_W_FLOOR_MEV = 0.0695
-"""Validity floor of the tungsten mu(E) parameterization (its K-edge), paper table 3."""
+"""Validity floor of the tungsten mu(E) parameterization (its K-edge), paper table 3.
+
+Tungsten's K edge is a discontinuity — mu/rho jumps by roughly 4.6x across it, from
+about 2.4 to about 11 cm^2/g — and a single smooth form cannot straddle it, so
+:func:`_mu_over_rho_tungsten` represents the **above-edge** branch. It tracks EPDL 2023
+to within 1.4 percent from 0.070 MeV upward (validated in
+``tests/validation/test_ali_rogers_mu_parameterization.py``).
+
+The paper states the range inclusively, and the guard in :func:`ali_rogers_mv` follows
+it, so ``e_min`` exactly at this floor is accepted and evaluates the above-edge branch a
+few hundred eV *below* where the library places the jump. The affected sliver is far
+narrower than one bin, sits below ``PCUT``, and is 80 keV below the 0.15 MeV default
+``e_min``; it is recorded here because it looks like a bug when first encountered, not
+because it moves dose.
+"""
 
 _E_ANNIHILATION_MEV = 0.511
 """Photon energy of the positron annihilation line."""
@@ -236,7 +253,8 @@ def ali_rogers_mv(beam: str | AliRogersMV, e_min: float = 0.15, n_bins: int = 10
     The governing equation is in :func:`_psi_continuum`; per-bin photon numbers are
     the sub-grid integrals of ``psi(E) / E`` (the product is integrated, not bin
     means — the AGENTS.md 2.7 rule), and a ``c4 > 0`` adds the 511 keV annihilation
-    line as ``c4 / 0.511`` photons on the same scale into the bin containing it.
+    line inside the common filtration envelope of function 13. Its photon content is
+    ``c4 * exp(-mu_W C1^2 - mu_Al C2^2) / 0.511`` at 511 keV.
 
     Parameters
     ----------
@@ -281,5 +299,12 @@ def ali_rogers_mv(beam: str | AliRogersMV, e_min: float = 0.15, n_bins: int = 10
                 f"[{e_min}, {beam.e_e}) MeV"
             )
         k = int(np.searchsorted(edges, _E_ANNIHILATION_MEV, side="right") - 1)
-        weights[k] += beam.c4 / _E_ANNIHILATION_MEV
+        line_energy = np.array([_E_ANNIHILATION_MEV], dtype=np.float64)
+        line_transmission = float(
+            np.exp(
+                -_mu_over_rho_tungsten(line_energy)[0] * beam.c1**2
+                - _mu_over_rho_aluminium(line_energy)[0] * beam.c2**2
+            )
+        )
+        weights[k] += beam.c4 * line_transmission / _E_ANNIHILATION_MEV
     return Spectrum(edges, weights)
