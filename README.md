@@ -87,7 +87,9 @@ result.provenance    # version, seed, cutoffs, backend, device, cross-sections
 ```
 
 Swap in `WarpEngine(grid=..., cross_sections=..., device="cuda:0")` for the production backend —
-the `run` and `run_dij` signatures are identical.
+the `run` signatures are identical. On under-filled CUDA forward runs,
+`run(..., concurrent_batches=2)` or `4` overlaps independent statistical batches while
+preserving same-device bit reproducibility; memory use grows with the lane count.
 
 Everything importable from the top-level `pyRadMC` namespace is public API. Beam-limiting
 devices (`pyRadMC.geometry.collimation`), the treatment-head pre-solve (`pyRadMC.geometry.head`),

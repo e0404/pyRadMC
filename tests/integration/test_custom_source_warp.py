@@ -10,6 +10,7 @@ never bit-wise; AGENTS.md 2.3) and the Warp energy ledger closes.
 
 from __future__ import annotations
 
+import numpy as np
 import pytest
 
 from pyRadMC.backends.ref.engine import ReferenceEngine
@@ -43,6 +44,17 @@ class WobbleBeamSource(Source):
         x = 3.0 + 10.0 * uniform(rng_state)
         y = 3.0 + 10.0 * uniform(rng_state)
         return Primary(self.energy, x, y, -1.0, 0.0, 0.0, 1.0)
+
+
+class HalfZeroWobbleSource(WobbleBeamSource):
+    """The same beam, with every even global history carrying exactly zero weight."""
+
+    def sample_batch(self, seed: int, history_offset: int, n: int) -> dict[str, np.ndarray]:
+        batch = dict(super().sample_batch(seed, history_offset, n))
+        weight = batch["weight"].copy()
+        weight[np.arange(history_offset, history_offset + n) % 2 == 0] = 0.0
+        batch["weight"] = weight
+        return batch
 
 
 def _grid() -> VoxelGrid:
@@ -88,3 +100,28 @@ def test_warp_energy_ledger_closes_for_the_custom_source() -> None:
     assert result.energy_emitted == pytest.approx(
         result.energy_deposited + result.energy_escaped, rel=1e-4
     )
+
+
+def test_zero_weight_presampled_primaries_are_not_seeded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Exactly-zero records contribute nothing and must not enter a transport queue."""
+    from pyRadMC.backends.warp.engine import WarpEngine
+
+    seeded_histories: list[int] = []
+    original = WarpEngine._seed_queue
+
+    def recording_seed(self, queue, seed, hist_g, *args, **kwargs):
+        seeded_histories.extend(int(h) for h in hist_g)
+        return original(self, queue, seed, hist_g, *args, **kwargs)
+
+    monkeypatch.setattr(WarpEngine, "_seed_queue", recording_seed)
+    grid = _grid()
+    xs = AnalyticCrossSections(geometry_densities=grid.max_density_by_material())
+    WarpEngine(grid=grid, cross_sections=xs, device="cpu", chunk_size=64).run(
+        HalfZeroWobbleSource(),
+        n_histories=128,
+        n_batches=2,
+        seed=SEED,
+        transport_electrons=False,
+    )
+
+    assert seeded_histories == list(range(1, 128, 2))

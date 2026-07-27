@@ -11,6 +11,27 @@ must be able to find out from this file whether the numbers should have moved.
 
 ## [Unreleased]
 
+### Added
+
+- **Concurrent forward batches on CUDA.** `WarpEngine.run(...,
+  concurrent_batches=N)` can overlap independent statistical batches on private CUDA
+  streams while preserving the same-device result bit for bit by folding batch dose maps
+  in order. The reference backend and Warp CPU accept the same interface and remain
+  sequential. Each CUDA lane owns another queue set and dose map, so memory grows roughly
+  linearly with `N`.
+- **Device-native spectral transmission masks.** An exact
+  `TransmissionMaskSource(SpectralBeamSource(...))` composition now uploads its spectrum
+  and mask once and performs source sampling, bilinear mask evaluation and zero-weight
+  compaction on the device. `TransmissionMaskSource` exposes its inner source and mask
+  plane geometry through accessor properties for backend generators and user inspection.
+
+### Changed
+
+- Warp's general host-pre-sampled source route no longer seeds exactly-zero-weight
+  primaries into transport queues. The attempted-history denominator and global history
+  keys are unchanged; reference-vs-Warp agreement remains statistical, and repeated runs
+  on one target remain bit-reproducible.
+
 ## [0.1.0] — unreleased
 
 First public release.

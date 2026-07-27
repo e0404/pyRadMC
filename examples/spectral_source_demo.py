@@ -18,6 +18,7 @@ Uses analytic water cross-sections (no downloads); defaults to Warp (GPU if
 present), else the reference engine. Run from the repository root::
 
     python examples/spectral_source_demo.py [--histories N] [--backend B]
+        [--concurrent-batches L]
 
 Renders ``spectral_source_demo.png`` beside this script.
 """
@@ -70,6 +71,12 @@ def main() -> None:
     parser.add_argument("--batches", type=int, default=10)
     parser.add_argument("--seed", type=int, default=20260715)
     parser.add_argument("--backend", choices=("auto", "warp", "ref"), default="auto")
+    parser.add_argument(
+        "--concurrent-batches",
+        type=int,
+        default=1,
+        help="overlapping CUDA batch lanes (try 2 or 4; CPU remains sequential)",
+    )
     args = parser.parse_args()
 
     spectrum = ali_rogers_mv(BEAM)
@@ -87,7 +94,13 @@ def main() -> None:
 
     print(f"transporting {args.histories:,} histories on {backend_name} ...")
     t0 = time.perf_counter()
-    result = engine.run(source, n_histories=args.histories, n_batches=args.batches, seed=args.seed)
+    result = engine.run(
+        source,
+        n_histories=args.histories,
+        n_batches=args.batches,
+        seed=args.seed,
+        concurrent_batches=args.concurrent_batches,
+    )
     dt = time.perf_counter() - t0
     print(f"  {args.histories:,} histories in {dt:.1f} s ({backend_name}); not a benchmark")
 

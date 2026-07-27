@@ -62,13 +62,26 @@ the cross-section citation, so an archived result still says how it was produced
 from pyRadMC import WarpEngine
 
 engine = WarpEngine(grid=grid, cross_sections=xs, device="cuda:0")
-result = engine.run(source, n_histories=8_000_000, n_batches=10, seed=20260726)
+result = engine.run(
+    source,
+    n_histories=8_000_000,
+    n_batches=10,
+    seed=20260726,
+    concurrent_batches=2,
+)
 ```
 
-The `run` and `run_dij` signatures are identical to the reference engine's — swapping the
-backend is a one-line change. Results agree statistically, never bit-for-bit: atomic
-float accumulation is non-associative, so compare with a chi-squared test, not
-`assert_allclose`.
+On CUDA, `concurrent_batches` can overlap independent statistical batches when one
+transport stream does not fill the card. Try 1, 2, and 4 on the actual workload;
+each lane owns another queue set and dose map, so memory grows approximately linearly.
+The batch fold remains ordered, making the lane count bitwise inert on one device.
+CPU and the reference engine accept the option but run sequentially. An exact
+`TransmissionMaskSource(SpectralBeamSource(...))` composition is generated and
+masked on-device, including compaction of exactly-zero mask weights.
+
+The `run` signatures are identical between backends, so swapping the backend is a
+one-line change. Results agree statistically across targets, never bit-for-bit: compare
+with a chi-squared test, not `assert_allclose`.
 
 ## The influence matrix
 

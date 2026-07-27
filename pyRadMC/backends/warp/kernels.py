@@ -86,6 +86,7 @@ __all__ = [
     "generate_pencil_beam",
     "generate_spectral_beam",
     "generate_spectral_beamlets",
+    "generate_spectral_masked_beam",
     "make_beamlet_generator_kernel",
     "make_generator_kernel",
     "photon_kernel",
@@ -1992,6 +1993,118 @@ def generate_spectral_beam(
     q.uz[tid] = dz * inv_norm
     q.rng[tid] = slots[tid]
     _escape(emitted, energy)
+
+
+@wp.kernel
+def generate_spectral_masked_beam(
+    seed: int,
+    history_offset: int,
+    edges: wp.array(dtype=float),
+    cdf: wp.array(dtype=float),
+    n_bins: int,
+    fx: float,
+    fy: float,
+    fz: float,
+    ax: float,
+    ay: float,
+    az: float,
+    source_ux: float,
+    source_uy: float,
+    source_uz: float,
+    source_vx: float,
+    source_vy: float,
+    source_vz: float,
+    source_width_u: float,
+    source_width_v: float,
+    mask: wp.array(dtype=float),
+    mask_n_u: int,
+    mask_n_v: int,
+    mask_cx: float,
+    mask_cy: float,
+    mask_cz: float,
+    mask_ux: float,
+    mask_uy: float,
+    mask_uz: float,
+    mask_vx: float,
+    mask_vy: float,
+    mask_vz: float,
+    mask_width_u: float,
+    mask_width_v: float,
+    slots: wp.array(dtype=wp.uint32),
+    q: Queue,
+    emitted: wp.array(dtype=wp.int64),
+):
+    """Device-native spectral fan followed by a bilinear transmission mask.
+
+    This is the scalar device twin of ``SpectralBeamSource`` wrapped by
+    ``TransmissionMaskSource``. Four uniforms generate the same source variables
+    as :func:`generate_spectral_beam`; the resulting full ray is intersected with
+    the mask plane and evaluated using ``_MaskTransmission``'s pixel-centre,
+    clamped-bilinear convention. Exactly-zero factors are not queued: they carry
+    no dose or ledger contribution, while the statistical denominator remains the
+    caller's attempted-history count.
+    """
+    tid = wp.tid()
+    slots[tid] = init_slot(seed, history_offset + tid)
+    state = WarpRNGState()
+    state.slots = slots
+    state.idx = tid
+    u_bin = uniform(state)
+    u_within = uniform(state)
+    du = (uniform(state) - 0.5) * source_width_u
+    dv = (uniform(state) - 0.5) * source_width_v
+    k = wp.min(wp.lower_bound(cdf, u_bin), n_bins - 1)
+    lo = edges[k]
+    energy = lo + (edges[k + 1] - lo) * u_within
+    dx = ax + du * source_ux + dv * source_vx - fx
+    dy = ay + du * source_uy + dv * source_vy - fy
+    dz = az + du * source_uz + dv * source_vz - fz
+    inv_norm = 1.0 / wp.sqrt(dx * dx + dy * dy + dz * dz)
+    dx *= inv_norm
+    dy *= inv_norm
+    dz *= inv_norm
+
+    normal_x = mask_uy * mask_vz - mask_uz * mask_vy
+    normal_y = mask_uz * mask_vx - mask_ux * mask_vz
+    normal_z = mask_ux * mask_vy - mask_uy * mask_vx
+    denominator = dx * normal_x + dy * normal_y + dz * normal_z
+    if denominator == 0.0:
+        return
+    t = (
+        (mask_cx - fx) * normal_x + (mask_cy - fy) * normal_y + (mask_cz - fz) * normal_z
+    ) / denominator
+    off_x = fx + t * dx - mask_cx
+    off_y = fy + t * dy - mask_cy
+    off_z = fz + t * dz - mask_cz
+    u = off_x * mask_ux + off_y * mask_uy + off_z * mask_uz
+    v = off_x * mask_vx + off_y * mask_vy + off_z * mask_vz
+    if wp.abs(u) > 0.5 * mask_width_u or wp.abs(v) > 0.5 * mask_width_v:
+        return
+
+    pixel_u = (u + 0.5 * mask_width_u) / (mask_width_u / float(mask_n_u)) - 0.5
+    pixel_v = (v + 0.5 * mask_width_v) / (mask_width_v / float(mask_n_v)) - 0.5
+    pixel_u = wp.max(0.0, wp.min(pixel_u, float(mask_n_u - 1)))
+    pixel_v = wp.max(0.0, wp.min(pixel_v, float(mask_n_v - 1)))
+    i0 = wp.min(int(pixel_u), wp.max(mask_n_u - 2, 0))
+    j0 = wp.min(int(pixel_v), wp.max(mask_n_v - 2, 0))
+    i1 = wp.min(i0 + 1, mask_n_u - 1)
+    j1 = wp.min(j0 + 1, mask_n_v - 1)
+    fu = pixel_u - float(i0)
+    fv = pixel_v - float(j0)
+    value00 = mask[i0 * mask_n_v + j0]
+    value10 = mask[i1 * mask_n_v + j0]
+    value01 = mask[i0 * mask_n_v + j1]
+    value11 = mask[i1 * mask_n_v + j1]
+    weight = (
+        value00
+        + fu * (value10 - value00)
+        + fv * (value01 - value00)
+        + fu * fv * (value11 - value10 - value01 + value00)
+    )
+    if weight == 0.0:
+        return
+    _escape(emitted, weight * energy)
+    _push_source(q, PHOTON, energy, weight, fx, fy, fz, dx, dy, dz, slots[tid])
 
 
 @wp.kernel

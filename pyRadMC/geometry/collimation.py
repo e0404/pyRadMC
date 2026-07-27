@@ -1024,6 +1024,11 @@ class _FactorWrappedSource(Source):
         self._model = model
 
     @property
+    def inner(self) -> Source:
+        """The source whose primaries receive the deterministic weight factor."""
+        return self._inner
+
+    @property
     def max_energy(self) -> float:
         """The inner source's maximum energy (a weight factor never raises it)."""
         return self._inner.max_energy
@@ -1148,9 +1153,42 @@ class TransmissionMaskSource(_FactorWrappedSource):
         v_axis: tuple[float, float, float] = (0.0, 1.0, 0.0),
     ) -> None:
         """Wrap ``inner`` with a mask plane given in the engine frame (cm)."""
-        super().__init__(
-            inner, _MaskTransmission(mask, plane_center, width_u, width_v, u_axis, v_axis)
-        )
+        model = _MaskTransmission(mask, plane_center, width_u, width_v, u_axis, v_axis)
+        super().__init__(inner, model)
+        self._mask_model = model
+
+    @property
+    def mask(self) -> NDArray[np.float64]:
+        """The 2D transmission values, indexed along :attr:`u_axis`, then ``v``."""
+        return self._mask_model._mask
+
+    @property
+    def plane_center(self) -> tuple[float, float, float]:
+        """Mask-plane centre in the engine frame (cm)."""
+        center = self._mask_model._center
+        return (float(center[0]), float(center[1]), float(center[2]))
+
+    @property
+    def width_u(self) -> float:
+        """Mask rectangle width along :attr:`u_axis` (cm)."""
+        return self._mask_model._widths[0]
+
+    @property
+    def width_v(self) -> float:
+        """Mask rectangle width along :attr:`v_axis` (cm)."""
+        return self._mask_model._widths[1]
+
+    @property
+    def u_axis(self) -> tuple[float, float, float]:
+        """Mask pixel-axis unit vector for the first array dimension."""
+        axis = self._mask_model._u_axis
+        return (float(axis[0]), float(axis[1]), float(axis[2]))
+
+    @property
+    def v_axis(self) -> tuple[float, float, float]:
+        """Mask pixel-axis unit vector for the second array dimension."""
+        axis = self._mask_model._v_axis
+        return (float(axis[0]), float(axis[1]), float(axis[2]))
 
 
 class TransmissionMaskBeamletSource(_FactorWrappedBeamletSource):

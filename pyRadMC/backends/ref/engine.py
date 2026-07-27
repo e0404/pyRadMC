@@ -120,6 +120,7 @@ class ReferenceEngine:
         step_energy_fraction: float | None = None,
         msc_model: str = "gs",
         progress: ProgressCallback | None = None,
+        concurrent_batches: int = 1,
     ) -> TransportResult:
         """Transport ``n_histories`` primaries in ``n_batches`` equal batches.
 
@@ -182,9 +183,15 @@ class ReferenceEngine:
             :mod:`pyRadMC.progress` — the same tick cadence as
             :meth:`~pyRadMC.backends.warp.engine.WarpEngine.run`, so a callback
             written against one backend behaves identically against the other.
+        concurrent_batches
+            Scheduling hint shared with the Warp API. The single-history reference
+            oracle is deliberately sequential, so any positive value is accepted
+            and has no effect.
         """
         if n_histories < 1:
             raise ValueError(f"need at least one history, got {n_histories}")
+        if concurrent_batches < 1:
+            raise ValueError(f"need at least one lane, got concurrent_batches={concurrent_batches}")
         if n_histories % n_batches != 0:
             raise ValueError(
                 f"n_histories={n_histories} not divisible by n_batches={n_batches}; "

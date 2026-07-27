@@ -85,6 +85,26 @@ class TestLookup:
 
 
 class TestValidation:
+    def test_mask_geometry_is_exposed_for_device_generators(self) -> None:
+        inner = _pencil(8.0, 8.0)
+        mask = MASK_2X2.copy()
+        source = TransmissionMaskSource(
+            inner,
+            mask=mask,
+            plane_center=(8.0, 9.0, 10.0),
+            width_u=4.0,
+            width_v=6.0,
+            u_axis=(0.0, 1.0, 0.0),
+            v_axis=(0.0, 0.0, 1.0),
+        )
+        assert source.inner is inner
+        np.testing.assert_array_equal(source.mask, mask)
+        assert source.plane_center == (8.0, 9.0, 10.0)
+        assert source.width_u == 4.0
+        assert source.width_v == 6.0
+        assert source.u_axis == (0.0, 1.0, 0.0)
+        assert source.v_axis == (0.0, 0.0, 1.0)
+
     def test_values_outside_unit_interval_raise(self) -> None:
         with pytest.raises(ValueError, match=r"0\.\.1"):
             _mask_source(_pencil(8.0, 8.0), np.array([[0.5, 1.5]]))
