@@ -60,6 +60,12 @@ installed; touching it then raises an error naming the extra to install.
 
 ::: pyRadMC.geometry.source.GaussianSpotBeamSource
 
+::: pyRadMC.geometry.source.GaussianSpotBeamletSource
+
+::: pyRadMC.geometry.source.PrimaryFluenceBeamSource
+
+::: pyRadMC.geometry.source.PrimaryFluenceBeamletSource
+
 ::: pyRadMC.geometry.source.SpectralBeamSource
 
 ::: pyRadMC.geometry.source.SpectralBeamletSource
@@ -77,6 +83,10 @@ installed; touching it then raises an error naming the extra to install.
 ::: pyRadMC.geometry.spectrum.Spectrum
 
 ::: pyRadMC.geometry.spectrum.ali_rogers_mv
+
+## Primary fluence
+
+::: pyRadMC.geometry.fluence.RadialFluence
 
 ## Random numbers
 

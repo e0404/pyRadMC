@@ -143,6 +143,7 @@ if TYPE_CHECKING:
         MaterialData,
     )
     from pyRadMC.data.tabulated.source import TabulatedCrossSections
+    from pyRadMC.geometry.fluence import RadialFluence
     from pyRadMC.geometry.grid import VoxelGrid
     from pyRadMC.geometry.phasespace import InMemoryPhaseSpaceSource, PhaseSpaceSource
     from pyRadMC.geometry.source import (
@@ -155,6 +156,8 @@ if TYPE_CHECKING:
         ParallelBeamSource,
         PencilBeamSource,
         Primary,
+        PrimaryFluenceBeamletSource,
+        PrimaryFluenceBeamSource,
         Source,
         SpectralBeamletSource,
         SpectralBeamSource,
@@ -188,6 +191,9 @@ _LAZY_EXPORTS: dict[str, str] = {
     "PhaseSpaceSource": "pyRadMC.geometry.phasespace",
     "PhotonProcess": "pyRadMC.data.interface",
     "Primary": "pyRadMC.geometry.source",
+    "PrimaryFluenceBeamSource": "pyRadMC.geometry.source",
+    "PrimaryFluenceBeamletSource": "pyRadMC.geometry.source",
+    "RadialFluence": "pyRadMC.geometry.fluence",
     "ReferenceEngine": "pyRadMC.backends.ref.engine",
     "ScoringGrid": "pyRadMC.scoring.grid",
     "Source": "pyRadMC.geometry.source",
@@ -270,6 +276,9 @@ __all__ = [
     "PhaseSpaceSource",
     "PhotonProcess",
     "Primary",
+    "PrimaryFluenceBeamSource",
+    "PrimaryFluenceBeamletSource",
+    "RadialFluence",
     "ReferenceEngine",
     "ScoringGrid",
     "Source",

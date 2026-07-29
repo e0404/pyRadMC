@@ -46,7 +46,8 @@ planning, and readable.
   tabulated EPDL/EEDL data with coherent form factors and ICRU-37 stopping for accuracy. Same
   engine, same API.
 - **Real geometry inputs.** CT images via a Hounsfield calibration, ICRP reference media, jaws
-  and a rounded-tip MLC, IAEA phase-space sources, polyenergetic spectra, and a dose grid
+  and a rounded-tip MLC, IAEA phase-space sources, polyenergetic spectra, virtual source
+  models driven by a measured radial primary fluence, and a dose grid
   decoupled from the transport grid with optional dose-to-water scoring.
 
 ## What it does not do
@@ -132,7 +133,8 @@ runs thousands of times.
 The rest: `tabulated_demo.py` (EPDL/EEDL cross-sections), `materials_demo.py` (bone/lung
 heterogeneity), `ct_demo.py` (dose on a CT), `dose_grid_demo.py` (decoupled scoring grid and
 dose-to-water), `spectral_source_demo.py` (6 MV polyenergetic fan), `collimation_demo.py`
-(staircase MLC field), `phasespace_demo.py` (IAEA phase-space source), `custom_source_demo.py`,
+(staircase MLC field), `virtual_source_demo.py` (measured-primary-fluence source model),
+`phasespace_demo.py` (IAEA phase-space source), `custom_source_demo.py`,
 and `noise_bias_study.py` (the correlated-sampling decision study).
 
 ## Backends

@@ -13,6 +13,35 @@ must be able to find out from this file whether the numbers should have moved.
 
 ### Added
 
+- **Measured-primary-fluence virtual source model** (`PrimaryFluenceBeamSource`,
+  `PrimaryFluenceBeamletSource`, and the `RadialFluence` table they read), after Tacke et
+  al., *Med. Phys.* **33** (2006) 1125-1132, doi:10.1118/1.2181298. Photons are sampled on a
+  plane in the treatment head, given a direction from a finite Gaussian focal spot and an
+  energy from a `Spectrum`, and weighted by the machine's measured radial primary fluence at
+  that point — so a commissioning curve's horn and the primary collimator's field edge enter
+  the transport directly. `RadialFluence.from_file` reads the two-column PPBKC `primflu.dat`
+  layout. Both sources run on the reference and Warp backends through the vectorized
+  pre-sampling route, and the beamlet variant is `run_dij`-ready.
+
+  The geometry is exactly `GaussianSpotBeamSource`'s and the fluence enters **as the
+  per-history statistical weight, not as importance sampling**, so the draw count stays at
+  six uniforms and correlated Dij sampling, chunk-invariance and the vectorized batch route
+  are unchanged; a table flat over the emission rectangle reproduces the Gaussian-spot source
+  bit for bit. Stated approximations: one spectrum at every off-axis radius (no off-axis
+  softening), and zero fluence beyond the last tabulated radius. No existing engine behaviour
+  changes and no shipped dose moves.
+
+- **Virtual-source example** (`examples/virtual_source_demo.py`). Runs the model on a
+  synthetic Artiste-like commissioning curve (or a real `primflu.dat` via `--fluence-file`)
+  and shows the input fluence, the horn transferring into a 30 x 30 cm profile against a
+  flat-fluence control on the same seed, and a field-edge penumbra with a point-spot control
+  run. That last panel records a measurement worth knowing: the usual quadrature
+  back-calculation of focal-spot size from a penumbra (`P_total^2 = P_geom^2 +
+  P_transport^2`) **over-estimates the spot**, because the 80-20 widths of a Gaussian spot
+  and of the electron-transport kernel do not add in quadrature. On this geometry a spot
+  derived for a 5 mm penumbra measured 6.2 mm, with the transport-only control at 3.6 mm
+  against the 3.5 mm the derivation assumed.
+
 - **Concurrent forward batches on CUDA.** `WarpEngine.run(...,
   concurrent_batches=N)` can overlap independent statistical batches on private CUDA
   streams while preserving the same-device result bit for bit by folding batch dose maps

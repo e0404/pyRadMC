@@ -23,12 +23,13 @@ from __future__ import annotations
 import math
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, ClassVar, NamedTuple
 
 import numpy as np
 import numpy.typing as npt
 
+from pyRadMC.geometry.fluence import RadialFluence
 from pyRadMC.geometry.spectrum import Spectrum
 from pyRadMC.rng import RNGState, uniform
 
@@ -42,6 +43,8 @@ __all__ = [
     "ParallelBeamSource",
     "PencilBeamSource",
     "Primary",
+    "PrimaryFluenceBeamSource",
+    "PrimaryFluenceBeamletSource",
     "Source",
     "SpectralBeamSource",
     "SpectralBeamletSource",
@@ -931,3 +934,262 @@ class GaussianSpotBeamletSource(BeamletSource):
         return self._spot_fan.sample_from_plane_batch(
             self._spectrum, beamlet, seed, history_offset, n
         )
+
+
+# Relative slack when checking that every aperture centre lies on one plane. The
+# centres are usually built by projecting a bixel lattice, so they carry a few ulp
+# of arithmetic noise about a common plane distance; anything larger is a caller
+# error, not rounding.
+_COPLANAR_RELATIVE_TOLERANCE = 1.0e-9
+
+
+@dataclass(frozen=True)
+class _PrimaryFluenceFan:
+    """The Gaussian-spot fan weighted by a measured radial primary fluence.
+
+    The virtual source model of Tacke et al., Med. Phys. 33 (2006) 1125-1132,
+    doi:10.1118/1.2181298: primaries are sampled on a plane upstream of the
+    beam-limiting devices, distributed according to the machine's measured
+    primary fluence, and given a direction (from the finite focal spot) and an
+    energy (from the spectrum).
+
+    **How the fluence shape is realized: as a weight, not as importance
+    sampling.** Positions stay uniform on the rectangle exactly as
+    :class:`_GaussianSpotFan` draws them, and psi(r) multiplies the history's
+    statistical weight. This keeps the draw count fixed at six uniforms, which
+    is what correlated Dij sampling, chunk-invariance and the vectorized batch
+    route all rest on, and it reuses the same weight channel the collimation
+    wrappers attenuate through. The estimator is the same; only the variance
+    differs, and in-field psi spans about 1.00 to 1.08, so the added variance
+    there is negligible. The cost is at the field edge: histories emitted where
+    psi has rolled off to zero are transported for nothing on the reference
+    backend (the Warp pre-sampling route compacts exactly-zero weights away).
+    Size the emission rectangle to the useful field, not to the whole table.
+
+    The radius psi is read at is the *table's* radius: the emission point's
+    distance from the central axis, projected from the plane out to
+    ``fluence.reference_distance``. The projection runs through the nominal
+    focal point, not through the sampled spot point, because the primary
+    fluence is a property of the plane it was measured on.
+    """
+
+    spot: _GaussianSpotFan
+    fluence: RadialFluence
+    axis: tuple[float, float, float] = field(init=False, default=(0.0, 0.0, 1.0))
+    plane_distance: float = field(init=False, default=0.0)
+    projection: float = field(init=False, default=1.0)
+
+    def __post_init__(self) -> None:
+        """Derive the central axis and the emission plane; reject an ill-posed one."""
+        u, v = self.spot.fan.u_axis, self.spot.fan.v_axis
+        normal = _normalized(
+            (
+                u[1] * v[2] - u[2] * v[1],
+                u[2] * v[0] - u[0] * v[2],
+                u[0] * v[1] - u[1] * v[0],
+            ),
+            "plane normal",
+        )
+        focal = self.spot.fan.focal_point
+        distance = self._axial(self.spot.fan.centers[0], focal, normal)
+        if distance < 0.0:  # orient the normal along the beam, not against it
+            normal = (-normal[0], -normal[1], -normal[2])
+            distance = -distance
+        if distance <= 0.0:
+            raise ValueError(
+                "the emission plane must lie downstream of the focal spot; the aperture "
+                "centre projects onto the focal point itself"
+            )
+        for center in self.spot.fan.centers:
+            other = self._axial(center, focal, normal)
+            if abs(other - distance) > _COPLANAR_RELATIVE_TOLERANCE * distance:
+                raise ValueError(
+                    "all aperture centres must lie on the same plane (a measured primary "
+                    f"fluence is defined on one plane), got {other} and {distance} cm "
+                    "from the focal spot"
+                )
+        object.__setattr__(self, "axis", normal)
+        object.__setattr__(self, "plane_distance", distance)
+        object.__setattr__(self, "projection", self.fluence.reference_distance / distance)
+
+    @staticmethod
+    def _axial(
+        point: tuple[float, float, float],
+        focal: tuple[float, float, float],
+        normal: tuple[float, float, float],
+    ) -> float:
+        """Signed distance of ``point`` from ``focal`` along ``normal``."""
+        return sum((p - f) * n for p, f, n in zip(point, focal, normal, strict=True))
+
+    def weight_at(self, point: tuple[float, float, float]) -> float:
+        """Evaluate psi at ``point``, a position on the emission plane (engine frame, cm)."""
+        focal = self.spot.fan.focal_point
+        d = tuple(p - f for p, f in zip(point, focal, strict=True))
+        s = sum(di * ni for di, ni in zip(d, self.axis, strict=True))
+        q = tuple(di - s * ni for di, ni in zip(d, self.axis, strict=True))
+        radius = math.sqrt(sum(qi * qi for qi in q))
+        return self.fluence.at_radius(radius * self.projection)
+
+    def weights_at(self, points: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+        """Vectorized :meth:`weight_at` over an ``(n, 3)`` array of plane positions."""
+        axis = np.asarray(self.axis, dtype=np.float64)
+        d = points - np.asarray(self.spot.fan.focal_point, dtype=np.float64)
+        radius = np.linalg.norm(d - (d @ axis)[:, None] * axis, axis=1)
+        return self.fluence.at_radii(radius * self.projection)
+
+    def emit_weighted(self, spectrum: Spectrum, aperture: int, rng_state: RNGState) -> Primary:
+        """Emit one primary on the plane, weighted by psi; consumes six uniforms.
+
+        Exactly :meth:`_GaussianSpotFan.emit_from_plane`'s draw stream and
+        geometry — the fluence only replaces the unit weight.
+        """
+        primary = self.spot.emit_from_plane(spectrum, aperture, rng_state)
+        return primary._replace(weight=self.weight_at((primary.x, primary.y, primary.z)))
+
+    def sample_weighted_batch(
+        self, spectrum: Spectrum, aperture: int, seed: int, history_offset: int, n: int
+    ) -> dict[str, npt.NDArray[Any]]:
+        """Vectorized sibling of :meth:`emit_weighted`; chunk-invariant, beamlet-blind."""
+        columns = self.spot.sample_from_plane_batch(spectrum, aperture, seed, history_offset, n)
+        points = np.stack((columns["x"], columns["y"], columns["z"]), axis=1, dtype=np.float64)
+        columns["weight"] = self.weights_at(points).astype(np.float32)
+        return columns
+
+
+class PrimaryFluenceBeamSource(Source):
+    """Open field from a measured primary fluence: the Tacke et al. (2006) VSM.
+
+    Photons are born on a rectangle of a plane upstream of the beam-limiting
+    devices, aimed from a 2D-Gaussian focal spot, with an energy drawn from
+    ``spectrum`` and a statistical weight equal to the machine's measured radial
+    primary fluence at that point. It is
+    :class:`GaussianSpotBeamSource` plus the fluence shape, and degenerates to it
+    exactly for a table that is flat over the rectangle.
+
+    Compose with :class:`~pyRadMC.geometry.collimation.CollimatedSource` to add
+    jaws and an MLC downstream of the plane, or feed it to the head pre-solve.
+    See :class:`_PrimaryFluenceFan` for the weighting rationale and its cost, and
+    :class:`~pyRadMC.geometry.fluence.RadialFluence` for the table conventions.
+    Transports on both backends via the vectorized pre-sampling route.
+
+    Stated approximation: the emitted spectrum is the same at every off-axis
+    radius. Real flattened beams soften off axis (the filter is thicker on the
+    central ray), an effect the source paper models with a radius-dependent
+    spectrum; a caller who needs it can build a
+    :class:`CompositeSource` of annular components with different spectra.
+    """
+
+    def __init__(
+        self,
+        spectrum: Spectrum,
+        fluence: RadialFluence,
+        focal_point: tuple[float, float, float],
+        center: tuple[float, float, float],
+        width_u: float,
+        width_v: float,
+        sigma_u: float,
+        sigma_v: float,
+        u_axis: tuple[float, float, float] = (1.0, 0.0, 0.0),
+        v_axis: tuple[float, float, float] = (0.0, 1.0, 0.0),
+    ) -> None:
+        self._spectrum = spectrum
+        self._fan = _PrimaryFluenceFan(
+            _GaussianSpotFan(
+                _DivergentFan(focal_point, (center,), width_u, width_v, u_axis, v_axis),
+                sigma_u,
+                sigma_v,
+            ),
+            fluence,
+        )
+
+    @property
+    def max_energy(self) -> float:
+        """The spectrum's top bin edge, for cross-section table sizing."""
+        return self._spectrum.max_energy
+
+    @property
+    def fluence(self) -> RadialFluence:
+        """The measured radial primary fluence weighting each history."""
+        return self._fan.fluence
+
+    def weight_at(self, point: tuple[float, float, float]) -> float:
+        """Report the weight a primary born at ``point`` on the emission plane carries."""
+        return self._fan.weight_at(point)
+
+    def emit(self, rng_state: RNGState) -> Primary:
+        """Emit one weighted primary on the plane; consumes exactly six uniforms."""
+        return self._fan.emit_weighted(self._spectrum, 0, rng_state)
+
+    def sample_batch(self, seed: int, history_offset: int, n: int) -> dict[str, npt.NDArray[Any]]:
+        """Vectorized simple-route batch; see :meth:`_PrimaryFluenceFan.sample_weighted_batch`."""
+        return self._fan.sample_weighted_batch(self._spectrum, 0, seed, history_offset, n)
+
+
+class PrimaryFluenceBeamletSource(BeamletSource):
+    """The beamlet-resolved primary-fluence source (one plane rectangle per bixel).
+
+    Beamlet ``j`` emits on the rectangle centred at ``centers[j]``, all of which
+    must lie on the one plane the fluence is defined against. The draw stream
+    never sees the beamlet, so correlated Dij sampling replays the same energy,
+    in-rectangle offset and spot point in every column; the **weights** do differ
+    between columns, which is the point — each bixel sits at its own off-axis
+    radius and therefore its own primary fluence. See
+    :class:`PrimaryFluenceBeamSource` for the geometry and the stated
+    approximation.
+    """
+
+    def __init__(
+        self,
+        spectrum: Spectrum,
+        fluence: RadialFluence,
+        focal_point: tuple[float, float, float],
+        centers: Sequence[tuple[float, float, float]],
+        width_u: float,
+        width_v: float,
+        sigma_u: float,
+        sigma_v: float,
+        u_axis: tuple[float, float, float] = (1.0, 0.0, 0.0),
+        v_axis: tuple[float, float, float] = (0.0, 1.0, 0.0),
+    ) -> None:
+        self._spectrum = spectrum
+        self._fan = _PrimaryFluenceFan(
+            _GaussianSpotFan(
+                _DivergentFan(focal_point, tuple(centers), width_u, width_v, u_axis, v_axis),
+                sigma_u,
+                sigma_v,
+            ),
+            fluence,
+        )
+
+    @property
+    def max_energy(self) -> float:
+        """The spectrum's top bin edge, for cross-section table sizing."""
+        return self._spectrum.max_energy
+
+    @property
+    def n_beamlets(self) -> int:
+        """One beamlet per plane rectangle centre."""
+        return len(self._fan.spot.fan.centers)
+
+    @property
+    def fluence(self) -> RadialFluence:
+        """The measured radial primary fluence weighting each history."""
+        return self._fan.fluence
+
+    def weight_at(self, point: tuple[float, float, float]) -> float:
+        """Report the weight a primary born at ``point`` on the emission plane carries."""
+        return self._fan.weight_at(point)
+
+    def emit(self, beamlet: int, rng_state: RNGState) -> Primary:
+        """Emit one weighted primary for ``beamlet``; consumes exactly six uniforms."""
+        if not 0 <= beamlet < self.n_beamlets:
+            raise IndexError(f"beamlet {beamlet} outside fan of {self.n_beamlets}")
+        return self._fan.emit_weighted(self._spectrum, beamlet, rng_state)
+
+    def sample_beamlet_batch(
+        self, seed: int, history_offset: int, n: int, beamlet: int
+    ) -> dict[str, npt.NDArray[Any]]:
+        """Vectorized per-beamlet batch; the draws are beamlet-blind, the weights are not."""
+        if not 0 <= beamlet < self.n_beamlets:
+            raise IndexError(f"beamlet {beamlet} outside fan of {self.n_beamlets}")
+        return self._fan.sample_weighted_batch(self._spectrum, beamlet, seed, history_offset, n)
