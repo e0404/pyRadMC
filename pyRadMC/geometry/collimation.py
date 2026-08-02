@@ -29,8 +29,10 @@ Stated v1 approximations (each also noted where it bites):
   collapses). MLC leaf ends are already focused via their rounded tips.
 - MLC leaves have rounded tips (exact circular chords) but **no tongue-and-groove
   step and no interleaf gap**: adjacent leaves tile the ``v`` axis exactly, so
-  interleaf leakage is absent by construction. Divergent (focused) leaf *sides*
-  are likewise deferred; the ``v`` strips are parallel-sided.
+  interleaf leakage is absent by construction. Leaf *sides* are parallel-sided by
+  default; :class:`MLC` also offers ``focused_sides=True``, the trapezoid
+  cross-section of a real single-focusing MLC, which a jaw-bounded field needs
+  (see the class docstring for what parallel sides cost).
 - Banks are laterally unbounded: jaws extend to infinity away from their edge and
   across the field, the outer MLC leaf edges end the bank. The orthogonal device
   provides the physical lateral bound, as it does in a real head.
@@ -404,6 +406,7 @@ def mlc_path_length(
     leaf_edges_v: Table1D,
     tips_neg: Table1D,
     tips_pos: Table1D,
+    focused_sides: int,
     from_origin: int,
 ) -> float:
     """Scalar chord length of one local-frame ray through both MLC banks (cm).
@@ -411,6 +414,7 @@ def mlc_path_length(
     Twin of :meth:`MLC.path_lengths`. Leaf data is addressed through flat array
     handles so several MLCs can share the device buffers: pair ``i`` reads
     ``leaf_edges_v[edges_off+i : edges_off+i+2]`` and ``tips_{neg,pos}[tips_off+i]``.
+    ``focused_sides`` and ``from_origin`` are 0/1 flags.
     """
     if d_w == 0.0:
         if p_w < z_top or p_w > z_bottom:
@@ -429,18 +433,49 @@ def mlc_path_length(
     for i in range(n_pairs):
         edge_lo = leaf_edges_v[edges_off + i]
         edge_hi = leaf_edges_v[edges_off + i + 1]
-        if d_v == 0.0:
-            if p_v < edge_lo or p_v > edge_hi:
-                st_lo = math.inf
-                st_hi = -math.inf
-            else:
-                st_lo = -math.inf
-                st_hi = math.inf
+        # Both side planes as affine functions of t. Parallel sides are the
+        # degenerate case (k, w_p, w_d) = (1, 1, 0) of the focused plane
+        # z_mid * v == edge * w, so one code path serves both exactly.
+        if focused_sides != 0:
+            k = z_mid
+            w_p = p_w
+            w_d = d_w
         else:
-            v_a = (edge_lo - p_v) / d_v
-            v_b = (edge_hi - p_v) / d_v
-            st_lo = min(v_a, v_b)
-            st_hi = max(v_a, v_b)
+            k = 1.0
+            w_p = 1.0
+            w_d = 0.0
+        a_lo = k * p_v - edge_lo * w_p
+        b_lo = k * d_v - edge_lo * w_d
+        a_hi = k * p_v - edge_hi * w_p
+        b_hi = k * d_v - edge_hi * w_d
+        if b_lo == 0.0:  # {a_lo + t * b_lo >= 0}
+            if a_lo >= 0.0:
+                g_lo = -math.inf
+                g_hi = math.inf
+            else:
+                g_lo = math.inf
+                g_hi = -math.inf
+        elif b_lo > 0.0:
+            g_lo = -a_lo / b_lo
+            g_hi = math.inf
+        else:
+            g_lo = -math.inf
+            g_hi = -a_lo / b_lo
+        if b_hi == 0.0:  # {a_hi + t * b_hi <= 0}
+            if a_hi <= 0.0:
+                h_lo = -math.inf
+                h_hi = math.inf
+            else:
+                h_lo = math.inf
+                h_hi = -math.inf
+        elif b_hi < 0.0:
+            h_lo = -a_hi / b_hi
+            h_hi = math.inf
+        else:
+            h_lo = -math.inf
+            h_hi = -a_hi / b_hi
+        st_lo = max(g_lo, h_lo)
+        st_hi = min(g_hi, h_hi)
         is_lo = max(s_lo, st_lo)
         is_hi = min(s_hi, st_hi)
         tip_pos = tips_pos[tips_off + i]
@@ -578,10 +613,26 @@ class MLC:
     calibration offset a vendor states is the caller's to apply before
     construction (:func:`project_between_planes` converts isocenter-plane plans).
 
-    Deferred, stated: no tongue-and-groove step, no interleaf gap (adjacent
-    strips tile ``v`` exactly — interleaf leakage is absent by construction), and
-    parallel (unfocused) leaf sides. The bank ends at the outer strip edges; the
-    orthogonal jaws provide the lateral bound beyond them.
+    **Leaf sides.** ``focused_sides`` selects how a strip boundary runs through
+    the slab, exactly as ``focused`` does for a :class:`JawPair` edge.
+
+    - ``focused_sides=False`` (default): sides parallel to the beam axis. A strip
+      edge at mid-plane ``v`` then clears the *whole* slab only for rays under
+      ``v / z_bottom``, and partially shadows everything between there and its
+      nominal edge ``v / z_mid``. Where a bank's outer strip sits at the field
+      edge that shadowing narrows the radiation field — proportionally, so it
+      grows with field size.
+    - ``focused_sides=True``: each side is the plane through the focal spot and
+      the mid-plane strip edge, so the leaf cross-section is the trapezoid of a
+      real single-focusing MLC and a focal-spot ray lies wholly in one strip or
+      the next. Real designs tilt that focus slightly off the spot to leave a
+      triangular overlap between neighbours; that refinement only changes
+      interleaf leakage, which this geometry does not model either way.
+
+    Deferred, stated: no tongue-and-groove step and no interleaf gap (adjacent
+    strips tile ``v`` exactly — interleaf leakage is absent by construction). The
+    bank ends at the outer strip edges; the orthogonal jaws provide the lateral
+    bound beyond them.
     """
 
     z_top: float
@@ -592,6 +643,7 @@ class MLC:
     tip_radius: float
     material: int
     density: float
+    focused_sides: bool = False
 
     def __post_init__(self) -> None:
         """Validate slab extents, tip-arc coverage, leaf tiling, and material data."""
@@ -647,7 +699,21 @@ class MLC:
             slab = np.maximum(slab[0], 0.0), slab[1]
         total = np.zeros(p.shape[0], dtype=np.float64)
         for i in range(self.n_pairs):
-            strip = _slab_interval(p_v, d_v, self.leaf_edges_v[i], self.leaf_edges_v[i + 1])
+            edge_lo, edge_hi = self.leaf_edges_v[i], self.leaf_edges_v[i + 1]
+            if self.focused_sides:
+                # Each side is the plane z_mid * v == edge * w through the focal
+                # spot, so the strip condition stays affine in t (the JawPair
+                # focused-edge algebra, applied to both boundaries at once).
+                strip = _intersect(
+                    _focused_halfspace_interval(
+                        z_mid * p_v - edge_lo * p_w, z_mid * d_v - edge_lo * d_w, above=True
+                    ),
+                    _focused_halfspace_interval(
+                        z_mid * p_v - edge_hi * p_w, z_mid * d_v - edge_hi * d_w, above=False
+                    ),
+                )
+            else:
+                strip = _slab_interval(p_v, d_v, edge_lo, edge_hi)
             in_strip = _intersect(slab, strip)
             for tip, sign in ((self.tips_pos[i], 1.0), (self.tips_neg[i], -1.0)):
                 center_u = tip + sign * self.tip_radius
@@ -748,6 +814,7 @@ class BeamLimitingStack:
         jaw_edge_pos = np.zeros(n, dtype=np.float64)
         jaw_focused = np.zeros(n, dtype=np.int32)
         mlc_tip_radius = np.zeros(n, dtype=np.float64)
+        mlc_focused_sides = np.zeros(n, dtype=np.int32)
         mlc_n_pairs = np.zeros(n, dtype=np.int32)
         mlc_edges_off = np.zeros(n, dtype=np.int32)
         mlc_tips_off = np.zeros(n, dtype=np.int32)
@@ -766,6 +833,7 @@ class BeamLimitingStack:
             else:
                 kind[j] = 1
                 mlc_tip_radius[j] = device.tip_radius
+                mlc_focused_sides[j] = 1 if device.focused_sides else 0
                 mlc_n_pairs[j] = device.n_pairs
                 mlc_edges_off[j] = len(leaf_edges)
                 mlc_tips_off[j] = len(tips_pos)
@@ -789,6 +857,7 @@ class BeamLimitingStack:
             jaw_edge_pos=jaw_edge_pos,
             jaw_focused=jaw_focused,
             mlc_tip_radius=mlc_tip_radius,
+            mlc_focused_sides=mlc_focused_sides,
             mlc_n_pairs=mlc_n_pairs,
             mlc_edges_off=mlc_edges_off,
             mlc_tips_off=mlc_tips_off,
@@ -824,6 +893,7 @@ class CompiledStack:
     jaw_edge_pos: _F64
     jaw_focused: NDArray[np.int32]
     mlc_tip_radius: _F64
+    mlc_focused_sides: NDArray[np.int32]
     mlc_n_pairs: NDArray[np.int32]
     mlc_edges_off: NDArray[np.int32]
     mlc_tips_off: NDArray[np.int32]

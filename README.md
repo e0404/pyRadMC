@@ -130,6 +130,20 @@ independently simulated open field (middle — columns partition the field exact
 plan as `Dij @ weights`, no re-simulation (right), which is the loop a treatment-plan optimizer
 runs thousands of times.
 
+![Central-axis depth doses and the total scatter factor curve for a sweep of square fields](https://raw.githubusercontent.com/e0404/pyRadMC/main/examples/commissioning_demo.png)
+
+`commissioning_demo.py` runs a beam-data measurement session: a water phantom at a stated SSD,
+square fields set on the jaws and/or a rounded-tip MLC, and the outputs commissioning reports —
+depth doses with dmax/PDD(10)/D20-D10, tissue-phantom ratios both from genuine SAD-setup runs
+and as full curves converted from the depth doses (each checking the other), total scatter
+factors, field widths and penumbrae, and a deterministic ray-traced primary fluence in the
+measurement plane along both axes and both diagonals (`_tpr.png`, `_profiles.png` and
+`_fluence.png` beside it). Every error bar is the spread of independent replicates, so the nonlinear
+quantities carry one too. It is a [jupytext](https://jupytext.readthedocs.io/) percent
+notebook — open it as a notebook or run it as a script; the whole configuration is the
+parameters cell at the top. Read the opening cells before quoting a number: there is no
+flattening filter in the analytic source, which is exactly what the flatness column measures.
+
 The rest: `tabulated_demo.py` (EPDL/EEDL cross-sections), `materials_demo.py` (bone/lung
 heterogeneity), `ct_demo.py` (dose on a CT), `dose_grid_demo.py` (decoupled scoring grid and
 dose-to-water), `spectral_source_demo.py` (6 MV polyenergetic fan), `collimation_demo.py`

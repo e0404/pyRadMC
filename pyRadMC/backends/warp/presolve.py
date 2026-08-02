@@ -80,6 +80,7 @@ class StackArrays:
     jaw_edge_pos: wp.array(dtype=float)
     jaw_focused: wp.array(dtype=wp.int32)
     mlc_tip_radius: wp.array(dtype=float)
+    mlc_focused_sides: wp.array(dtype=wp.int32)
     mlc_n_pairs: wp.array(dtype=wp.int32)
     mlc_edges_off: wp.array(dtype=wp.int32)
     mlc_tips_off: wp.array(dtype=wp.int32)
@@ -111,6 +112,7 @@ def upload_stack(compiled: CompiledStack, device: str) -> StackArrays:
     stack.jaw_edge_pos = farr(compiled.jaw_edge_pos)
     stack.jaw_focused = iarr(compiled.jaw_focused)
     stack.mlc_tip_radius = farr(compiled.mlc_tip_radius)
+    stack.mlc_focused_sides = iarr(compiled.mlc_focused_sides)
     stack.mlc_n_pairs = iarr(compiled.mlc_n_pairs)
     stack.mlc_edges_off = iarr(compiled.mlc_edges_off)
     stack.mlc_tips_off = iarr(compiled.mlc_tips_off)
@@ -179,6 +181,7 @@ def device_path_length(
         stack.leaf_edges_v,
         stack.tips_neg,
         stack.tips_pos,
+        stack.mlc_focused_sides[j],
         from_origin,
     )
 

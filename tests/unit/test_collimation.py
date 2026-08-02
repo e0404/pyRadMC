@@ -290,6 +290,46 @@ class TestMLC:
         """The outer leaf edges end the bank; the orthogonal jaws bound the field."""
         np.testing.assert_array_equal(self.mlc().path_lengths(*self.axial(5.0, 10.0)), [0.0])
 
+    def test_sides_are_straight_by_default(self) -> None:
+        """Existing configurations are unchanged; focusing is opt-in (the JawPair rule)."""
+        assert self.mlc().focused_sides is False
+
+    def test_focused_sides_hold_a_divergent_ray_in_its_strip(self) -> None:
+        """A focal-spot ray just inside the bank edge crosses the *whole* slab.
+
+        With parallel sides the same ray leaves the outer strip partway down the
+        leaf and sees only part of it. That partial shadowing is what narrows a
+        jaw-bounded field: it starts biting well inside the nominal edge, because
+        a strip at mid-plane ``v`` only clears the slab for rays under
+        ``v / z_bottom``. Aimed at ``(u, v) = (15, 2.97)`` on the mid-plane: deep
+        in the leaf body, just inside the bank's outer edge at ``v = 3``.
+        """
+        origins, directions = _rays(((0.0, 0.0, 0.0), (15.0, 2.97, 50.0)))
+        slab = self.HEIGHT / float(directions[0, 2])
+        focused = self.mlc(focused_sides=True).path_lengths(origins, directions)
+        straight = self.mlc().path_lengths(origins, directions)
+        np.testing.assert_allclose(focused, [slab], rtol=1e-12)
+        assert straight[0] < 0.7 * slab
+
+    def test_focused_sides_exclude_a_ray_outside_the_bank(self) -> None:
+        """Just outside the focused outer edge the chord is exactly zero.
+
+        The parallel-sided bank still catches it over the upper part of the slab,
+        which is the same effect seen from the other side of the edge.
+        """
+        origins, directions = _rays(((0.0, 0.0, 0.0), (15.0, 3.03, 50.0)))
+        np.testing.assert_array_equal(
+            self.mlc(focused_sides=True).path_lengths(origins, directions), [0.0]
+        )
+        assert self.mlc().path_lengths(origins, directions)[0] > 0.0
+
+    def test_focused_sides_leave_an_on_axis_ray_alone(self) -> None:
+        """The focal spot's own ray is in every side plane; the open gap stays open."""
+        origins, directions = _rays(((0.0, 0.0, 0.0), (0.0, 0.0, 1.0)))
+        np.testing.assert_array_equal(
+            self.mlc(focused_sides=True).path_lengths(origins, directions), [0.0]
+        )
+
     def test_axial_ray_deep_in_a_leaf_sees_the_slab_thickness(self) -> None:
         """Past the tip arc the leaf is slab-thick, on both sides of the disc center."""
         for u in (5.0, 15.0, -5.0, -15.0):
@@ -549,8 +589,9 @@ class TestScalarGeometryTwins:
         # Open field at u = 0, same direction: never in a block.
         assert jaw_path_length(0.0, 0.0, 43.0, 0.0, 40.0, 47.0, -2.0, 2.0, 0, 0) == 0.0
 
+    @pytest.mark.parametrize("focused_sides", [False, True])
     @pytest.mark.parametrize("from_origin", [0, 1])
-    def test_mlc_twin_matches_vectorized(self, from_origin: int) -> None:
+    def test_mlc_twin_matches_vectorized(self, from_origin: int, focused_sides: bool) -> None:
         mlc = MLC(
             z_top=48.0,
             z_bottom=52.0,
@@ -560,6 +601,7 @@ class TestScalarGeometryTwins:
             tip_radius=10.0,
             material=TUNGSTEN,
             density=18.0,
+            focused_sides=focused_sides,
         )
         origins, directions = self._random_rays(4000, seed=22)
         vector = mlc.path_lengths(origins, directions, from_origin=bool(from_origin))
@@ -583,6 +625,7 @@ class TestScalarGeometryTwins:
                 edges,
                 tips_neg,
                 tips_pos,
+                int(focused_sides),
                 from_origin,
             )
             for k in range(origins.shape[0])
@@ -624,6 +667,7 @@ class TestScalarGeometryTwins:
                 edges,
                 tips_neg,
                 tips_pos,
+                0,
                 0,
             )
             for k in range(origins.shape[0])

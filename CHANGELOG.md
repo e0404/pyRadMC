@@ -42,6 +42,32 @@ must be able to find out from this file whether the numbers should have moved.
   derived for a 5 mm penumbra measured 6.2 mm, with the transport-only control at 3.6 mm
   against the 3.5 mm the derivation assumed.
 
+- **Commissioning example** (`examples/commissioning_demo.py`, a jupytext percent notebook
+  that also runs as a plain script). Drives the existing
+  collimation, head pre-solve, spectral-source and scoring pieces through a beam-data
+  measurement session: a water phantom at a stated SSD, a sweep of square fields set on
+  jaws and/or a rounded-tip MLC, and the resulting depth doses, tissue-phantom ratios both
+  from real SAD-setup runs and as full curves converted from the depth doses (inverse-square
+  plus a phantom-scatter correction; each route checks the other), total scatter factors,
+  field widths and penumbrae, plus a
+  deterministic ray-traced primary fluence in the measurement plane along both axes and
+  both diagonals. Uncertainties come from independent replicates, so nonlinear quantities
+  (dmax, field width, penumbra) carry error bars too. No engine behaviour changes.
+
+  It is driven by a **two-component virtual source model** against one machine's measured
+  data (a Siemens Artiste): a `PrimaryFluenceBeamSource` carrying the measured radial
+  primary fluence, plus a wide Gaussian **extra-focal source** at the flattening-filter
+  plane for head scatter, transported separately and combined linearly. The extra-focal
+  geometry is taken from the machine files (plane from `params.dat`; width from the
+  primary-collimator opening the fluence curve implies) and only its weight is fitted.
+  Together they take the total-scatter-factor residual against measured output factors
+  from **3.4 % to 0.58 % RMS over 20 to 400 mm**, and the depth-dose-to-TPR consistency
+  check from +1.6 % to +0.32 %. Two findings recorded in the notebook: the focal spot and
+  the extra-focal weight must be fitted **jointly**, because the spot governs source
+  occlusion and therefore moves output factors as well as penumbra; and the notebook's
+  penumbra column is **not grid-converged** — at 2.5 mm voxels it reads up to 0.9 mm wider
+  than the same physics at 1.25 mm, so it is comparative only.
+
 - **Concurrent forward batches on CUDA.** `WarpEngine.run(...,
   concurrent_batches=N)` can overlap independent statistical batches on private CUDA
   streams while preserving the same-device result bit for bit by folding batch dose maps

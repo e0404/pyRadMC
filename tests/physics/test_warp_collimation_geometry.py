@@ -125,7 +125,8 @@ def test_jaw_twin_matches_host_on_device(device: str, focused: int) -> None:
 
 
 @pytest.mark.parametrize("device", DEVICES)
-def test_mlc_twin_matches_host_on_device(device: str) -> None:
+@pytest.mark.parametrize("focused_sides", [0, 1])
+def test_mlc_twin_matches_host_on_device(device: str, focused_sides: int) -> None:
     _require_device(device)
     from pyRadMC.backends.warp.physics import warp_physics
 
@@ -144,6 +145,7 @@ def test_mlc_twin_matches_host_on_device(device: str) -> None:
         tips_neg: wp.array(dtype=float),
         tips_pos: wp.array(dtype=float),
         pairs: int,
+        focused_flag: int,
         out: wp.array(dtype=float),
     ) -> None:
         tid = wp.tid()
@@ -163,6 +165,7 @@ def test_mlc_twin_matches_host_on_device(device: str) -> None:
             edges,
             tips_neg,
             tips_pos,
+            focused_flag,
             0,
         )
 
@@ -185,6 +188,7 @@ def test_mlc_twin_matches_host_on_device(device: str) -> None:
                 LEAF_EDGES,
                 TIPS_NEG,
                 TIPS_POS,
+                focused_sides,
                 0,
             )
             for k in range(N)
@@ -205,7 +209,7 @@ def test_mlc_twin_matches_host_on_device(device: str) -> None:
     wp.launch(
         probe,
         dim=N,
-        inputs=[*cols, edges, tips_neg, tips_pos, n_pairs],
+        inputs=[*cols, edges, tips_neg, tips_pos, n_pairs, focused_sides],
         outputs=[out],
         device=device,
     )
