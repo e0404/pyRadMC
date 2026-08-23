@@ -144,6 +144,30 @@ notebook — open it as a notebook or run it as a script; the whole configuratio
 parameters cell at the top. Read the opening cells before quoting a number: there is no
 flattening filter in the analytic source, which is exactly what the flatness column measures.
 
+`halcyon_commissioning_demo.py` runs the same session against a very different head: **jawless**,
+with two stacked, staggered MLC layers (29 and 28 leaf pairs of 1 cm projected pitch, offset by
+half of it) doing all of the collimation in both directions, and an unflattened 6 MV FFF beam.
+Leaf ends make the inplane edge; leaf *sides* make the crossplane one, so a symmetric field
+steps in 1 cm even though each edge lands on a 0.5 cm lattice. It produces depth doses and
+lateral profiles at five depths for a sweep of square fields, diagonals of the largest, and a
+full **rectangular x-by-y output-factor matrix**. Two things it demonstrates beyond the
+flattened notebook: field widths reproduce to within 0.1 mm at the isocentre with **no fitted
+leaf-position offset**, from the rounded-end tangent geometry plus a solved radiation-edge
+correction (the tangent ray grazes the tip, so it marks full transmission rather than the 50 %
+edge — a distinction worth under 0.02 mm below a 10 x 10 field and 0.84 mm at 28 x 28); and the
+field edge
+must be taken at the profile's **inflection point** rather than at 50 % of the axis, because on
+an unflattened 28 x 28 field the classical construction reports a 40 mm penumbra that describes
+the cone rather than the collimator. Most of this machine's geometry is not published, so the
+opening cell is an explicit inventory of what is stated, what has been fitted against vendor
+beam data, and what remains a placeholder. The fitted constants ship in the configuration —
+an elliptical focal spot and a stepwise off-axis spectral-softening table, each with its
+provenance and its stated limits beside it — but the fitted off-axis *fluence* table does
+not, because it is derived from the vendor's measured profiles: the shipped default is the
+invented analytic cone, and `PRIMARY_FLUENCE_FILE` is the hook for the table you fit against
+your own beam data (worth ~3 % at mid radius and more at the corner; the numbers both ways
+are in the changelog).
+
 The rest: `tabulated_demo.py` (EPDL/EEDL cross-sections), `materials_demo.py` (bone/lung
 heterogeneity), `ct_demo.py` (dose on a CT), `dose_grid_demo.py` (decoupled scoring grid and
 dose-to-water), `spectral_source_demo.py` (6 MV polyenergetic fan), `collimation_demo.py`

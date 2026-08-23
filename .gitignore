@@ -19,3 +19,25 @@ dist/
 examples/phasespace_demo.png
 examples/phasespace_demo.csv
 site/
+
+# Vendor beam data and anything fitted from it. The workbook a head is commissioned
+# against is licensed to its owner, not to this repository, and at ~500 KB it slips
+# under the check-added-large-files gate rather than being caught by it. The fitted
+# radial-fluence table is derived from those measured profiles, so it travels with
+# them: the shipped default is the analytic cone, and PRIMARY_FLUENCE_FILE is the hook
+# for the table you fit against your own data.
+*.xlsx
+examples/halcyon_primary_fluence.dat
+
+# Long-format curve dumps from the commissioning examples: ~0.5-1 MB each, derived
+# from the committed notebooks, and read by local comparison scripts rather than by a
+# reader of the repository. The summary and output-factor tables beside them do ship.
+examples/*_curves.csv
+examples/commissioning_demo.csv
+
+# Local scratch: comparison scripts, sweeps and figures that need the vendor workbook,
+# plus the run logs they were driven from. Not reproducible here, so not tracked.
+local_*
+*.log
+
+.vscode/

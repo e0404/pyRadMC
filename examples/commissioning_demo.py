@@ -221,17 +221,41 @@ MLC_TIP_RADIUS = 11.5  # rounded leaf end; must cover the leaf half-height
 # independent check on the model. Penumbra, output factors and the TPR conversion still
 # are -- none of them was used here.
 #
-# Beyond 10 cm the last value is held (`np.interp` clamps). The 300 and 400 mm fields want
-# +0.23 and +0.47, far off the trend the smaller fields sit on, and that excess is not
-# understood -- see the width discussion below. Clamping leaves those two essentially
-# uncorrected, which is deliberate: it cannot fix them, and it cannot bury an unexplained
-# centimetre inside something labelled "calibration" either.
 # Two passes. The first took the width residual at face value, which assumes the edge
 # follows the tip 1:1; it does not, because a retracting rounded end presents a different
 # chord of its arc, and the measured gain is ~1.3 in the middle of the range, 1.08 at
 # 2.5 mm off axis and 0.81 at 10 cm. The second pass divides each residual by the gain
 # measured at that position. Iterating further is not worth it: what is left is at the
 # 0.1 mm level, which is where the grid dependence above already sits.
+#
+# The last two nodes are not fitted. Subtracting the analytic tangent offset -- the ray
+# from the spot that grazes the tip cylinder, at radius `MLC_TIP_RADIUS` and the mid-plane
+# below, projected to the isocentre:
+#
+#     t = half * z_mid / SAD, c = t + R
+#     u = (c * z_mid - R * sqrt(z_mid^2 + c^2 - R^2)) / (z_mid^2 - R^2)
+#     delta_tangent(half) = half - u * SAD
+#
+# leaves a residual of -0.0569 +- 0.0081 cm over a 40x span of tip positions, 0.25 to
+# 10 cm. That is flat: the fitted table *is* the tangent geometry plus one constant, and
+# the constant is an ordinary light-field/radiation-field offset of the kind a vendor
+# quotes. So the 300 and 400 mm entries are `delta_tangent + (-0.0569)` evaluated, not
+# measured, and they land on what the sweep independently wanted (+0.2298 and +0.4702)
+# to 0.14 mm and 0.01 mm. This is why they are here at all: their excess over the trend
+# the small fields sit on used to be unexplained, and clamping was the honest response.
+# It is now predicted by geometry that was never fitted to them, so extrapolating on it
+# is no longer burying a centimetre inside something labelled "calibration".
+#
+# Simulated back, the two nodes deliver: `width_x` goes 297.54 -> 300.20 mm at 300 and
+# 392.30 -> 399.02 mm at 400, so residuals of -2.46 and -7.70 mm become +0.20 and
+# -0.98 mm and both fields join the +-0.35 mm band the rest of the sweep sits in. The
+# 400 mm field is still the worst in the sweep and is left that way: its last 0.5 mm per
+# side would have to come from fitting the node, and a fitted node here would forfeit the
+# only reason to trust it out there, which is that nothing was fitted.
+#
+# The smaller nodes are left fitted rather than replaced by the same formula. Their
+# 0.08 cm scatter about it is at the grid-dependence level and re-deriving them
+# analytically would trade a measured agreement for a modelled one at no gain.
 MLC_TIP_CALIBRATION = (
     (0.25, -0.0788),
     (0.50, -0.0556),
@@ -244,6 +268,8 @@ MLC_TIP_CALIBRATION = (
     (5.00, -0.0237),
     (7.50, +0.0282),
     (10.00, +0.0781),
+    (15.00, +0.2438),  # analytic; see above
+    (20.00, +0.4688),  # analytic; see above
 )
 # The radius and the offset are fitted *together*, against this machine's measured 10 x 10
 # penumbra (4.4-4.5 mm) and its nominal field width, on a converged 1.25 mm grid. They must
@@ -259,9 +285,11 @@ MLC_TIP_CALIBRATION = (
 # correctly, not a defect -- a divergent ray meets the tip cylinder more obliquely the
 # further off axis the leaf sits, so the effective edge shifts with leaf position (Boyer &
 # Li, Med. Phys. 24 (1997) 757). It is exactly why vendors calibrate leaf position with a
-# position-dependent table rather than one number. Fitting such a table here would be
-# fitting a curve to our own residual, so the demo keeps one honest constant and reports
-# the slope. Note this is *not* a primary-fluence effect: `primflu.dat` horns up to 1.082
+# position-dependent table rather than one number, and why `MLC_TIP_CALIBRATION` above is
+# one: that residual slope is what it was fitted to. The numbers in this paragraph are the
+# *pre-calibration* state, kept because they are how the slope was found and because they
+# are what a reader gets by emptying the table.
+# Note this is *not* a primary-fluence effect: `primflu.dat` horns up to 1.082
 # at 14 cm radius and is still 1.062 at the 200 mm field edge, which pushes that edge out
 # by ~0.3 mm, so the geometric deficit there is larger than the residual shows.
 MLC_PITCH = 0.5  # leaf width projected to the isocentre plane
@@ -641,8 +669,8 @@ print(XS.provenance)
 def tip_calibration(position: float) -> float:
     """Leaf-position calibration at a tip's own off-axis position (cm at the isocentre).
 
-    Linear between the tabulated positions and held flat outside them; see
-    `MLC_TIP_CALIBRATION` for where the table comes from and what the clamp costs.
+    Linear between the tabulated positions and held flat outside them, which the swept
+    fields never reach; see `MLC_TIP_CALIBRATION` for where the table comes from.
     """
     positions = [entry[0] for entry in MLC_TIP_CALIBRATION]
     deltas = [entry[1] for entry in MLC_TIP_CALIBRATION]
@@ -746,8 +774,23 @@ for device in beam_limiting_stack(REFERENCE_FIELD).devices:
 STACK_EXIT = beam_limiting_stack(REFERENCE_FIELD).exit_z
 SHALLOWEST_SSD = min([SSD, *(SAD - depth for depth in TPR_DEPTHS)])
 AIR_PATH = SHALLOWEST_SSD - STACK_EXIT
-TRANSPORTED_AIR = min(AIR_GAP, AIR_PATH)
+# Quantized *down* to the voxel grid, and that matters: the phantoms lay out their air as
+# `round(TRANSPORTED_AIR / SPACING)` voxels, so a value that is not a multiple of SPACING
+# can round up, put the grid ceiling above the device exit, and fail the pre-solve with
+# "exit_z is above the stack exit". It only bites when the air path is both short enough to
+# be transported whole and not a multiple of the voxel -- a deep SAD-setup depth does it,
+# since that is what makes SHALLOWEST_SSD small. Flooring here and giving the remainder to
+# the pre-solved column keeps the total air path exactly `AIR_PATH` either way.
+TRANSPORTED_AIR = (int(min(AIR_GAP, AIR_PATH) / SPACING)) * SPACING
 PRESOLVE_AIR = AIR_PATH - TRANSPORTED_AIR
+# Asserted rather than left implicit. This flooring has been silently dropped once already
+# and the symptom surfaces far away, inside the pre-solve, only for TPR_DEPTHS deep enough
+# to make the air path short -- which no default run exercises.
+if abs(TRANSPORTED_AIR / SPACING - round(TRANSPORTED_AIR / SPACING)) > 1.0e-9:
+    raise ValueError(
+        f"transported air {TRANSPORTED_AIR} cm is not a multiple of the {SPACING} cm voxel;"
+        " the phantom grid will round up past the device exit"
+    )
 
 if AIR_PATH <= 0.0:
     raise ValueError(
@@ -1467,6 +1510,41 @@ if not math.isnan(TPR_20_10):
 # equal-area circle (`a / sqrt(pi)`) preserves the geometric field size, the
 # equal-A/P circle (`a / 2`) preserves Sterling's scatter equivalence, which is the
 # one that reproduces output factors.
+#
+# **Below ~15 mm this stops being a check on the model.** Against `of.dat` the sweep sits
+# within ±0.94 % from 20 to 400 mm — eleven fields, RMS 0.48 %, none over 1.2 sigma — and
+# then the 10 mm field runs +4.5 % at 11 sigma. Simulating `of.dat`'s own field sizes, so
+# that nothing is interpolated:
+#
+#     of.dat mm     5.7433   10.1112   12.0144   19.8299
+#     simulated    +19.47     +4.78     +2.12     +1.08   %
+#     n sigma        46.7      10.2       5.9       1.5
+#
+# That is not the interpolation (10 mm was the only swept field landing in a gap of
+# `of.dat`, which was worth checking and is worth 0.7 points of the 4.5). It is a steep,
+# monotonic rise as the field shrinks, flat above ~15 mm.
+#
+# It is the shape of a measuring-volume effect, and the sweep's own profiles say how big
+# one would have to be. Differentiating the reading with respect to the diameter of the
+# averaging volume gives -6.7 %/mm at 5 mm, -1.3 %/mm at 10 mm, and |0.19| %/mm or less at
+# every field from 20 mm up — the same collapse, at the same place. Closing the residuals
+# above takes 2.9 mm of extra averaging at 5.7 mm and 3.8 mm at 10.1: *one* number, near
+# 3 mm, for residuals that differ by a factor of four. `roi_dose` already averages over a
+# 2.5 mm voxel at these fields, so that puts the measurement's effective diameter near
+# 5-6 mm — a small ion chamber, and exactly the case TRS-483's output correction factors
+# exist for, being worth 5-10 % at 1 x 1 cm^2 for chambers of that size.
+#
+# What that does *not* establish is that the model is right here. `of.dat` states no
+# detector and no small-field correction, so this is a consistent account and not a
+# demonstration; the alternative — that the transport over-predicts small-field output —
+# is not excluded by anything above. Four candidate mechanisms on the model side have been
+# eliminated by measurement (leaf-end transmission, the extra-focal weight, source
+# occlusion, and the field width, which is now within 0.07 mm at 10 mm), which is what
+# leaves detector response as the leading explanation rather than the only one considered.
+#
+# The practical reading: treat 20 mm and above as the commissioning check, and treat 15 mm
+# and below as agreeing to a few per cent at best until someone supplies the detector and
+# its corrections. Do not tune the model to close it.
 
 # %%
 reference = runs[REFERENCE_FIELD]
@@ -1591,7 +1669,7 @@ for row in table:
 # through them.
 #
 # **The converted curves drift high at small fields, and the drift grows with depth.** At
-# 10 mm the converted curve runs +1.6 % beyond dmax on average and reaches **+8 % by 30 cm**;
+# 10 mm the converted curve runs +2.0 % beyond dmax on average and reaches **+9 % by 30 cm**;
 # 20 to 40 mm show a weaker version of the same; everything at 60 mm and above is flat to
 # ±1 %. It reproduces across independent sweeps, so it is not noise.
 #
@@ -1617,14 +1695,48 @@ for row in table:
 # almost nothing, which is why only the small fields show it.
 #
 # An earlier revision dismissed this on the `TPR(20,10)` table below, where converted and
-# simulated agree to about +1 % with no trend in field size. That was a bad test and the
-# table cannot do better: `TPR(20,10)` is a *ratio* of two depths that both sit inside
-# 10-20 cm, where the drift above is still 1-5 %, and most of it cancels in the ratio.
-# It never probes where the drift lives. The six-depth run does.
+# simulated agreed to about +1 % with no trend in field size. That dismissal was wrong, and
+# so is the obvious explanation for it. The ratio does *not* cancel the drift: at 10 mm the
+# converted curve is +0.85 % high at 10 cm and +4.83 % at 20 cm, so `TPR(20,10)` keeps
+# about +3.9 % of it. The table has plenty of power. It was simply being read off a sweep
+# whose *simulated* arm carried ~1 % error bars, which is the same size as the effect at
+# every field except the smallest.
+#
+# Re-run with the simulated arm at 0.2-0.6 %, it shows the drift plainly -- against
+# `tpr.dat`, the conversion-free column runs +0.21 % at 10 mm while the converted one runs
+# +3.93 %, and every field from 20 mm up sits inside +-0.8 % on both. So `TPR(20,10)` is a
+# fine test after all, provided the SAD runs are not the noisy half of it. The six-depth
+# run is still the better one, because it shows the drift growing with depth rather than
+# only that it is there.
 #
 # What this costs the reader: below ~60 mm, treat the converted curve past ~20 cm depth as
-# biased high by a known mechanism rather than as beam data. `TPR_DEPTHS` is the fix for
-# any field you need to be right -- one run per depth, no conversion in it at all.
+# biased high by a known mechanism rather than as beam data.
+#
+# **`TPR_DEPTHS` is the fix for small fields only.** An earlier revision of this cell said
+# it was the fix for any field, which a control falsified. Running 10, 20, 30, 40 and
+# 100 mm at six depths each, against `tpr.dat`, mean and RMS of the residual beyond the
+# anchor depth:
+#
+#     field/mm       10        20        30        40       100
+#     direct     +0.01/1.05  -0.80/1.23  -0.51/0.69  -0.33/0.99  -2.52/2.94
+#     converted  +3.61/4.79  +0.86/1.14  +0.88/1.34  +0.62/0.93  +0.25/0.49
+#
+# At 10 mm the direct runs are right and the conversion drifts to +9 % by 30 cm. At 100 mm
+# it reverses: the conversion sits at 0.49 % RMS while the direct runs go -4.8 % at 25 cm.
+# Somewhere between 40 and 100 mm they cross, and where is not known.
+#
+# The 100 mm behaviour is not an artefact of that study. The `TPR(20,10)` table below shows
+# the same sign in the shipped sweep -- the directly simulated column runs -0.4 to -2.1 %
+# against measurement at every field *except* 10 mm, while the converted one holds inside
+# +-0.8 %. So the SAD-setup runs carry a systematic deficit at depth that the fixed-SSD
+# runs do not, and it is unexplained. A second candidate is that `tpr.dat` was itself
+# produced by this same conversion rather than measured at SAD, which would make the
+# converted curve agree with it by construction -- but that cannot be the whole story,
+# because 10 mm goes the other way.
+#
+# Practically: below ~40 mm, add the depths you need to `TPR_DEPTHS` and trust those over
+# the converted curve. At 100 mm and above, trust the converted curve. In between, they
+# agree to about 1 % and the choice does not matter much.
 #
 # Watch the reference field when reading any of this. `Scp` is normalized at
 # `REFERENCE_FIELD`, so one ~1 sigma excursion there shifts every other field together and
