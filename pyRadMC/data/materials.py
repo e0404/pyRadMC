@@ -35,6 +35,7 @@ __all__ = [
     "MATERIALS",
     "STANDARD_ATOMIC_WEIGHT",
     "TUNGSTEN",
+    "TUNGSTEN_ALLOY",
     "WATER",
     "MaterialData",
     "SternheimerParameters",
@@ -164,8 +165,18 @@ TUNGSTEN: int = 5
 
 Real jaws and leaves are often 90-97 percent W heavy alloys with Ni/Cu/Fe binders;
 v1 of the collimation module models them as pure tungsten at a caller-supplied
-density, which moves mu/rho by ~1-2 percent at MV energies. An alloy entry later
-is a pure data change (the binder atomic weights are already in the table).
+density, which moves mu/rho by ~1-2 percent at MV energies. :data:`TUNGSTEN_ALLOY`
+is that anticipated alloy entry; this pure entry remains for callers that want
+elemental tungsten.
+"""
+
+TUNGSTEN_ALLOY: int = 6
+"""Material index of W95/Ni3.5/Cu1.5 heavy alloy at 18.0 g/cm^3 (MLC leaves).
+
+The composition and density are the published surrogate for Halcyon-class dual-layer
+MLC leaves (nominal; real machines vary by a few percent and transmission
+commissioning may adjust the density). Retires the pure-W-at-alloy-density
+approximation recorded on :data:`TUNGSTEN`.
 """
 
 # H2O: 10 electrons per molecule, M = 18.01528 g/mol (molecular standard); the
@@ -305,6 +316,30 @@ MATERIALS: tuple[MaterialData, ...] = (
             a=0.1551, m=2.8447, x0=0.2167, x1=3.4960, cbar=5.4059, delta0=0.14
         ),
         radiative_anchors=((1.0, 1.159e-1), (10.0, 1.132), (20.0, 2.406)),
+    ),
+    # Tungsten heavy alloy W95/Ni3.5/Cu1.5 (Halcyon commissioning workstream,
+    # 2026-08-11): the published composition/density surrogate for dual-layer MLC
+    # leaves. I = 692.5 eV and the radiative anchors are NIST ESTAR's *user-defined
+    # material* output for exactly this composition and density (ESTAR applies the
+    # ICRU-37 Bragg-additivity rule; doi:10.18434/T4NC7P). The Sternheimer row is not
+    # in SBS-1984: cbar is the exact plasma-energy relation 2 ln(I/hw_p) + 1 (which
+    # reproduces the published tungsten row's 5.4059 from tungsten's own I and
+    # density), a/m/x0/x1 are least-squares fitted to ESTAR's exact density-effect
+    # column over its full 0.01-1000 MeV grid (max |delta error| 0.028), and
+    # delta0 = 0.14 is carried from the tungsten row (metallic conduction term).
+    # Gates and provenance: tests/unit/test_tungsten_alloy.py.
+    MaterialData(
+        name="tungsten_alloy",
+        density=18.0,
+        electrons_per_gram=electrons_per_gram_from_composition(
+            ((28, 0.035), (29, 0.015), (74, 0.95))
+        ),
+        composition=((28, 0.035), (29, 0.015), (74, 0.95)),
+        mean_excitation_mev=692.5e-6,
+        sternheimer=SternheimerParameters(
+            a=0.1564, m=2.8413, x0=0.2323, x1=3.4878, cbar=5.3699, delta0=0.14
+        ),
+        radiative_anchors=((1.0, 1.124e-1), (10.0, 1.104), (20.0, 2.348)),
     ),
 )
 """Material registry, indexed by the ``WATER``-style integer constants."""

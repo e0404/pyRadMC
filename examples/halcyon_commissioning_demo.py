@@ -52,8 +52,9 @@
 # | leaf pitch, projected | 1.0 cm per layer, 0.5 cm effective | stated |
 # | leaf pairs | 29 proximal, 28 distal | stated |
 # | maximum field | 28 x 28 cm^2 | stated |
-# | proximal layer top | 69 cm SID | inferred from a published pre-MLC phase space at 69.4 cm |
-# | distal layer top | 60 cm SID | estimated (7.7 cm leaves, ~1.3 cm of interlayer shielding) |
+# | proximal layer top | 68.8 cm SID | literature surrogate (pre-MLC phase space at 69.4 cm) |
+# | distal layer top | 60.8 cm SID | literature surrogate (3 mm interlayer gap) |
+# | leaf material | W95/Ni3.5/Cu1.5, 18.0 g/cm^3 | published heavy-alloy surrogate |
 # | | | |
 # | spectrum | 6 MV **FFF** | see `BEAM` — *derived, not fitted* |
 # | off-axis cone | Gaussian, sigma 19.5 cm | *invented*; `PRIMARY_FLUENCE_FILE` takes a fit |
@@ -219,6 +220,20 @@ SPOT_SIGMA_V: float | None = 0.09  # along leaf sides; None keeps the spot circu
 # argued an FFF beam barely softens off axis and that the target's angular *hardening*
 # was "the opposite sign and smaller"; the vendor data refuted both claims -- see the
 # shell comment.
+#
+# **The fluence is radial on measurement, not assumption** (2026-08-11). A non-radial
+# "fixed-collimator envelope" C(x,y) was the one degree of freedom the literature
+# suggests adding if diagonals demand it, and the measured data does show the diagonal
+# reading above the crossline at equal radius (+0.2 to +1.0 per cent over r = 7-11 cm).
+# But that differential is *flat in measurement-plane coordinates and grows with depth
+# at fixed fan angle* -- the opposite of a fan-fixed fluence structure, which would
+# scale with divergence and dilute with depth -- and the simulation, whose fluence is
+# radial by construction, already reproduces it (4.0 vs 4.3 per cent at the strongest
+# bin): it is phantom scatter asymmetry near the crossline's field edge, transported
+# for free in both channels. The model-minus-measurement azimuthal residual is not
+# coherent above its ~1 per cent noise floor, so there is no C(x,y) to fit. The
+# diagnostic is worth keeping: plane-coordinate flatness plus depth growth reads
+# "scatter", fan-coordinate constancy would read "fluence".
 PRIMARY_FLUENCE_FILE: str | None = None  # "radius_mm value", at iso; see the note below
 CONE_SIGMA = 19.5  # cm at the isocentre; only used when PRIMARY_FLUENCE_FILE is None
 PRIMARY_COLLIMATOR_RADIUS = 21.0  # cm at iso; must clear the 28 x 28 corner at 19.8 cm
@@ -361,20 +376,87 @@ EXTRAFOCAL_FIELD = 44.0  # emitting square at the isocentre, cm: field-independe
 EXTRAFOCAL_HISTORY_SCALE = 0.005
 EXTRAFOCAL_HISTORY_MAX = 1.0
 
+# --- the contaminant-electron source ---------------------------------------------------
+# The third linear component: electrons reaching the phantom with the beam. The evidence
+# is the vendor's own build-up columns, which nothing above uses -- inverting
+# M = (S + e)/max(S + e) per field leaves an implied component e(d) that is electron-like
+# on three independent counts: it is spent by ~1.2 cm depth with no deep tail (practical
+# range of ~2 MeV electrons), it is 1-2 % of the photon peak at 0.5 cm for small fields
+# rising to 4.4 % at 28 x 28 (the published range for 6 MV FFF contamination), and its
+# field-size scaling splits into a *floor* present already at 2 x 2 plus a *saturating*
+# rise -- the signature of two populations. Hence two sources, both mono-energetic at
+# `CONTAMINANT_ENERGY` and both re-badged photons-to-electrons over existing geometry:
+#
+#   beam: emitted from the primary's own fan rectangle, aimed from the focal spot --
+#         electrons travelling with the beam, aperture-proportional, the floor term.
+#   head: emitted from the extra-focal source's wide plane at `EXTRAFOCAL_Z` --
+#         electrons born around the primary collimator, progressively uncovered by the
+#         aperture, the saturating term. Reuses that source's geometry deliberately:
+#         one fewer invented knob, and the same physical region of the head.
+#
+# Both are clipped by the collimator through the attenuation route, never the photon
+# pre-solve. Stated approximations: the clip weights by *photon* attenuation, so a
+# millimetre of grazing tungsten transmits ~90 per cent where an electron would stop --
+# wrong at the aperture edge, irrelevant to the bulk build-up dose this exists for; air
+# scatter between the head and the phantom's transported air column is not modelled and
+# the fitted energy partly stands in for it; and one mono-energy serves every field,
+# which the derivation's marginal collapse test (large fields reach slightly deeper)
+# already strains -- if the fit fails, it fails there first.
+#
+# The head also carries a carbon-fibre bore cover (~50 cm SID) that this model omits
+# entirely, and the literature's ordering rule -- model the cover before fitting
+# electron contamination, or the fitted source absorbs the cover's own electrons -- is
+# knowingly violated (maintainer decision, 2026-08-11). The fitted head term is
+# therefore an *effective* source that includes whatever the cover generates; the
+# cover's photon attenuation is field-independent and vanishes into the per-fluence
+# normalization. This beam data cannot separate the two (both are shallow, aperture-
+# scaled electron fluxes), so an explicit cover would add an invented thickness and a
+# forced refit with nothing to constrain them. Revisit only with surface-dose or
+# electron-range data that can actually see the cover.
+#
+# The weights combine linearly on top of the photon components, so like the extra-focal
+# weight they are refittable from the saved component columns without re-running; only
+# the energy needs a re-run to change.
+CONTAMINANT_ENERGY = 2.2  # MeV; fitted on a 1.5/2.2/3.0 grid, 2.2 wins on depth shape
+CONTAMINANT_WEIGHTS: tuple[float, float] | None = (0.0, 0.00043)  # (beam, head) on-axis
+#                     emitted electron fluence per unit on-axis photon fluence; None = off.
+#
+# **The beam term was built, fitted, and came out zero** -- keep it zero. Two independent
+# reasons, both measured. Its basis is not the flat floor the two-population argument
+# assumed: per unit weight it contributes 4.3x more at 8 x 8 than at 2 x 2 (the clip
+# survival and the per-history normalization do not cancel the way the back-of-envelope
+# said), so any weight large enough to matter at 2 x 2 wrecks the large fields. And the
+# residual it was invented to carry *decreases* with field size (+1.5 % of peak at
+# 2 x 2, +0.7 at 4 x 4, ~0 by 8 x 8 at 0.5 cm depth), which no contamination mechanism
+# of any geometry does -- electrons only grow with aperture. That leftover is a
+# small-field shallow-depth deficit of the model or the measurement (lateral electron
+# disequilibrium, or the chamber at its build-up worst), and it stays on the open list
+# rather than being laundered through a fitted source.
+CONTAMINANT_HISTORY_SCALE = 0.003  # per unit dilution ratio, like the extra-focal rule
+CONTAMINANT_HISTORY_MAX = 0.02  # electrons deposit locally: a build-up column smooth to
+#                                 ~1 % costs a few per cent of the photon count, not more
+
 # --- the treatment head -------------------------------------------------------------
 # Device slabs in the beam frame: cm downstream of the focal spot. The frame origin is
 # the focal spot, beam-frame w == engine z, and the isocentre sits at (0, 0, SAD).
 # Machine data is quoted as SID (cm from the isocentre), so it is converted below.
 SAD = 100.0
 LEAF_HEIGHT = 7.7  # stated, both layers
-MLC_PROXIMAL_TOP_SID = 69.0  # upstream face of the upper bank, cm from iso. A published
+MLC_PROXIMAL_TOP_SID = 68.8  # upstream face of the upper bank, cm from iso. A published
 #                              model of this head scored a phase space at 69.4 cm, after
 #                              the secondary collimator and before the leaves, so the
-#                              first tungsten cannot be far below that.
-MLC_DISTAL_TOP_SID = 60.0  # upstream face of the lower bank. Estimated: 69.0 - 7.7 puts
-#                            the proximal exit at 61.3, and ~1.3 cm of interlayer
-#                            shielding lands the distal entrance at 60. The bore is 50 cm
-#                            across, so both banks fit above it comfortably.
+#                              first tungsten cannot be far below that. 68.8-61.1 is the
+#                              literature-informed surrogate (2026-08-11, replacing this
+#                              notebook's earlier 69.0 estimate); still a surrogate, not
+#                              vendor geometry.
+MLC_DISTAL_TOP_SID = 60.8  # upstream face of the lower bank: the same surrogate's
+#                            60.8-53.1, a 3 mm interlayer gap where the earlier estimate
+#                            guessed ~1.3 cm of interlayer shielding (60.0). Both banks
+#                            still clear the 50 cm bore comfortably. The distal bank
+#                            moved 8 mm upstream, which slightly changes each tip's
+#                            tangent retraction and the leaf-side occlusion response --
+#                            the traced widths and the nine-pair sigma_v read are the
+#                            re-verification, and every full matrix run repeats it.
 MLC_PROXIMAL_PAIRS = 29  # stated. Odd -> a leaf is centred on the axis.
 MLC_DISTAL_PAIRS = 28  # stated. Even -> a strip *boundary* is on the axis.
 MLC_PITCH = 1.0  # leaf width projected to the isocentre, per layer. 29 and 28 leaves of
@@ -388,8 +470,11 @@ MLC_TIP_RADIUS = 23.4  # stated. Large next to the 7.7 cm leaf height, so the ro
 # The geometric part is the tangent offset: a rounded end does not put its edge under the
 # tip's nominal position, the edge follows the ray from the focal spot that grazes the
 # arc. It is computed per layer from that layer's own mid-plane (see `tangent_offset`),
-# so the two banks get slightly different retractions for the same field -- 0.67 mm
-# proximal against 0.70 mm distal at a 10 x 10 -- and nothing about it is fitted.
+# so the two banks get slightly different retractions for the same field -- with the
+# spectral radiation-edge solve included, 0.76 mm proximal against 0.62 mm distal at a
+# 10 x 10, the nearer bank retracting more -- and nothing about it is fitted. (An
+# earlier revision of this comment quoted 0.67/0.70 mm; re-measured 2026-08-11, those
+# numbers matched neither the values nor the ordering of the shipped functions.)
 #
 # The free part is one constant: the light-field/radiation-field offset every vendor
 # quotes and calibrates out. It is **unknown for this machine and left at zero**, which
@@ -506,7 +591,15 @@ HISTORY_SCALE_FLOOR = 0.20
 HISTORY_SCALE_MAX = 6.0
 # Every output factor is a ratio against the reference field, so its error lands on all
 # hundred at once and cancels nowhere. It gets a boost the others do not.
-REFERENCE_HISTORY_BOOST = 3.0
+#
+# Raised 3 -> 12 (2026-08-13) after the effect was seen at full size: two regenerations
+# whose raw doses agreed to 0.04 +/- 0.2 per cent still differed by 1.3 per cent in
+# every output factor at once, because each run's block mean inherits its own
+# reference draw (~0.6-0.9 per cent at boost 3, and the quoted per-entry sigma cannot
+# warn about a shift it shares). At 12 the common mode drops to ~0.3 per cent for
+# about an hour more on a ten-hour matrix -- the block-mean quote was
+# reference-limited, nothing else was.
+REFERENCE_HISTORY_BOOST = 12.0
 # (2) The pre-solved phase space is resampled by the transport, so a small one puts a
 # floor under the error that no amount of transport can lift — and the floor is *also* a
 # density: a fixed head-history count spread over a larger fan leaves fewer distinct
@@ -538,7 +631,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 
 from pyRadMC.backends.ref.engine import ReferenceEngine  # noqa: E402
-from pyRadMC.data.materials import AIR, TUNGSTEN, WATER  # noqa: E402
+from pyRadMC.data.materials import AIR, TUNGSTEN_ALLOY, WATER  # noqa: E402
 from pyRadMC.geometry.collimation import (  # noqa: E402
     MLC,
     BeamFrame,
@@ -698,6 +791,34 @@ class ShellSpectrumSource(Source):
         return columns
 
 
+class ElectronSource(Source):
+    """Re-badge a beam source's emissions as electrons; geometry and weights untouched.
+
+    The engine's host-sampling route seeds its transport queues from each record's own
+    particle kind (the phase-space convention), and the plain beam sources stamp their
+    batches as photons unconditionally -- so an electron component is the same geometry
+    with the kind column rewritten, which is all this does. IAEA code 2 is an electron.
+    """
+
+    def __init__(self, inner: Source) -> None:
+        self._inner = inner
+
+    @property
+    def max_energy(self) -> float:
+        """The wrapped source's top energy; kind does not change table sizing."""
+        return self._inner.max_energy
+
+    def emit(self, rng_state: RNGState) -> Primary:
+        """Emit from the wrapped source, stamped as an electron."""
+        return self._inner.emit(rng_state)._replace(kind="electron")
+
+    def sample_batch(self, seed: int, history_offset: int, n: int) -> dict[str, Any]:
+        """Sample the wrapped batch with every record's particle type set to electron."""
+        columns = dict(self._inner.sample_batch(seed, history_offset, n))
+        columns["particle_type"] = np.full(n, 2, dtype=np.int32)
+        return columns
+
+
 def cone_fluence() -> RadialFluence:
     """Analytic unflattened cone psi(r), tabulated as a `RadialFluence` at the isocentre.
 
@@ -811,7 +932,11 @@ else:
 # ## Materials and cross-sections
 #
 # `tungsten` is the real thing and needs the compiled EPICS tables (cached after the
-# first download). `water` is the dependency-free stand-in: water at *tungsten's*
+# first download): the leaves are `tungsten_alloy`, the published W95/Ni3.5/Cu1.5
+# heavy-alloy surrogate at 18.0 g/cm^3, which is what actual dual-layer leaves are
+# made of (pure W at 19.30 was this notebook's earlier stand-in; the alloy transmits
+# roughly half again as much through a single bank, which is why the transmission
+# check below exists). `water` is the dependency-free stand-in: water at the leaf
 # density, plus water at air's density above the phantom. Its low-energy behaviour is
 # not tungsten's, so leakage and the deep transmission tail are indicative only — and
 # on a jawless head, where every edge is tungsten, that caveat is worth more than it
@@ -823,7 +948,7 @@ if DEVICES == "tungsten":
     from pyRadMC.data.tabulated.precompile import compile_materials
     from pyRadMC.data.tabulated.source import TabulatedCrossSections
 
-    DEVICE_MATERIAL, DEVICE_DENSITY = TUNGSTEN, 19.30
+    DEVICE_MATERIAL, DEVICE_DENSITY = TUNGSTEN_ALLOY, 18.0
     AIR_MATERIAL, AIR_DENSITY = AIR, 1.205e-3
     print("compiling the tabulated table (EPICS cache/download) ...")
     _tables = compile_materials(
@@ -835,11 +960,49 @@ if DEVICES == "tungsten":
 else:
     from pyRadMC.data.analytic import AnalyticCrossSections
 
-    DEVICE_MATERIAL, DEVICE_DENSITY = WATER, 19.30
+    # 18.0, not pure tungsten's 19.30: the stand-in exists to reproduce the shipped
+    # geometry's areal density, and transmission is exponential in rho t.
+    DEVICE_MATERIAL, DEVICE_DENSITY = WATER, 18.0
     AIR_MATERIAL, AIR_DENSITY = WATER, 1.205e-3
     XS = AnalyticCrossSections(geometry_densities=((WATER, 1.0),))
 
 print(XS.provenance)
+
+# %% [markdown]
+# ## Leaf transmission against the published values
+#
+# The one direct constraint on the leaf material this head offers: published Halcyon
+# transmission is ~0.4-0.5 per cent through a single layer and ~0.01 per cent (i.e.
+# effectively nothing) through both. The check below is the *narrow-beam spectral*
+# transmission — the axis spectrum attenuated through the full leaf height at the leaf
+# density, number- and energy-fluence weighted — which is the material-data part of
+# that measurement. It is not the measured quantity itself: a chamber under a closed
+# bank also collects in-leaf build-up and hardened scatter plus phantom scatter, and
+# the published figure averages over *interleaf leakage*, which this model does not
+# have at all (no interleaf gaps; see `CLOSED_PAIR_PARK`). All of those raise the
+# measured number, so the spectral value should land *below* the published range --
+# it reads about half of it (0.19 vs 0.4-0.5 per cent single-layer with the alloy;
+# pure W at 19.30 would halve it again, which is the measurable content of the alloy
+# switch). Order-of-magnitude disagreement would mean the material or the leaf height
+# is wrong; landing under the band by a factor consistent with the unmodelled
+# contributions is as much as this check can claim. With `DEVICES = "water"` the
+# numbers are the stand-in's, not tungsten's, and say nothing about the machine.
+
+# %%
+_edges = SPECTRUM.edges
+_e_mid = 0.5 * (_edges[:-1] + _edges[1:])
+_mu = np.array([XS.mu_over_rho_total(float(e), DEVICE_MATERIAL) for e in _e_mid])
+for _layers, _published in ((1, "0.4-0.5 %"), (2, "~0.01 %")):
+    _path = np.exp(-_mu * DEVICE_DENSITY * (_layers * LEAF_HEIGHT))
+    _by_number = float(np.sum(SPECTRUM.bin_probabilities * _path))
+    _by_energy = float(np.sum(SPECTRUM.bin_probabilities * _e_mid * _path)) / float(
+        np.sum(SPECTRUM.bin_probabilities * _e_mid)
+    )
+    print(
+        f"narrow-beam transmission, {_layers} layer(s) ({_layers * LEAF_HEIGHT:g} cm at "
+        f"{DEVICE_DENSITY:g} g/cm^3): {100.0 * _by_number:.3f} % by number, "
+        f"{100.0 * _by_energy:.3f} % by energy fluence (published dose: {_published})"
+    )
 
 # %% [markdown]
 # ## The beam-limiting stack: two banks, and no field-defining jaws
@@ -1359,6 +1522,69 @@ else:
         f"{EXTRAFOCAL_AREA:.0f} cm^2 at the isocentre plane per history"
     )
 
+
+def contaminant_spectrum() -> Spectrum:
+    """One narrow bin at `CONTAMINANT_ENERGY`: the mono-energetic electron line."""
+    return Spectrum(edges=(CONTAMINANT_ENERGY - 0.025, CONTAMINANT_ENERGY + 0.025), weights=(1.0,))
+
+
+def contaminant_beam_source(field_x: float, field_y: float) -> tuple[Any, float]:
+    """Electrons on the primary's own fan: the aperture-proportional floor term.
+
+    A flat rectangle aimed from the focal spot -- no fluence cone and no spectral
+    shells, which belong to the photons -- so its analytic isocentre area is exact.
+    """
+    width_x_iso = field_x + 2.0 * fan_margin(field_x)
+    width_y_iso = field_y + 2.0 * fan_margin(field_y)
+    source = ElectronSource(
+        GaussianSpotBeamSource(
+            spectrum=contaminant_spectrum(),
+            focal_point=(0.0, 0.0, 0.0),
+            center=(0.0, 0.0, EMISSION_Z),
+            width_u=float(project_between_planes(width_x_iso, SAD, EMISSION_Z)),
+            width_v=float(project_between_planes(width_y_iso, SAD, EMISSION_Z)),
+            sigma_u=SPOT_SIGMA,
+            sigma_v=SPOT_SIGMA if SPOT_SIGMA_V is None else SPOT_SIGMA_V,
+        )
+    )
+    return source, width_x_iso * width_y_iso
+
+
+def contaminant_head_source() -> tuple[Any, float]:
+    """Electrons from the extra-focal plane: the saturating wide term."""
+    width_plane = float(project_between_planes(EXTRAFOCAL_FIELD, SAD, EMISSION_Z))
+    source = ElectronSource(
+        GaussianSpotBeamSource(
+            spectrum=contaminant_spectrum(),
+            focal_point=(0.0, 0.0, EXTRAFOCAL_Z),
+            center=(0.0, 0.0, EMISSION_Z),
+            width_u=width_plane,
+            width_v=width_plane,
+            sigma_u=EXTRAFOCAL_SIGMA,
+            sigma_v=EXTRAFOCAL_SIGMA,
+        )
+    )
+    return source, on_axis_emitted_area(source)
+
+
+def contaminant_histories(ratio: float, primary: int) -> int:
+    """Electron histories for one replicate; the extra-focal dilution rule, own scale."""
+    wanted = int(CONTAMINANT_HISTORY_SCALE * ratio * primary)
+    return max(1, min(wanted, int(CONTAMINANT_HISTORY_MAX * primary)))
+
+
+CONTAMINANT_HEAD_RAW, CONTAMINANT_HEAD_AREA = (
+    (None, 0.0) if CONTAMINANT_WEIGHTS is None else contaminant_head_source()
+)
+if CONTAMINANT_WEIGHTS is None:
+    print("contaminant electrons: off (and the refit columns will not be written)")
+else:
+    print(
+        f"contaminant electrons: {CONTAMINANT_ENERGY:g} MeV, w = "
+        f"({CONTAMINANT_WEIGHTS[0]:.4f} beam, {CONTAMINANT_WEIGHTS[1]:.4f} head), "
+        f"head plane effective {CONTAMINANT_HEAD_AREA:.0f} cm^2 at iso per history"
+    )
+
 # %% [markdown]
 # ## The phantom
 #
@@ -1777,16 +2003,19 @@ def transport_component(
     n: int,
     reuse: float,
     seed: int,
+    model: str | None = None,
 ) -> tuple[np.ndarray, float]:
     """Run the head model and transport for one source component and one replicate.
 
     Returns the dose per emitted history of *that component* and the seconds spent in the
-    head model. Both components go through this identical path, which is what makes their
-    doses linearly combinable further down. `reuse` is how many transport histories each
-    pre-solved head history is resampled by; see `phase_space_reuse`.
+    head model. Every component goes through this identical path, which is what makes
+    their doses linearly combinable further down. `reuse` is how many transport histories
+    each pre-solved head history is resampled by; see `phase_space_reuse`. `model`
+    overrides `HEAD_MODEL` for this component: the electron components pass
+    "attenuation", because the pre-solve is photon physics and must never see them.
     """
     mark = time.perf_counter()
-    if HEAD_MODEL == "attenuation":
+    if (model or HEAD_MODEL) == "attenuation":
         source: Any = CollimatedSource(raw, stack, XS)
     else:
         exit_z = float(grid.origin[2])
@@ -1883,19 +2112,58 @@ def simulate(
     reuse = phase_space_reuse(diluted)
     extra_reuse = phase_space_reuse(dilution(EXTRAFOCAL_AREA, voxels))
 
+    electron_parts: list[tuple[Any, float, float, float, int, int, str]] = []
+    if CONTAMINANT_WEIGHTS is not None:
+        beam_raw, beam_area = contaminant_beam_source(field_x, field_y)
+        candidates = [
+            # (source, area, ratio to the primary footing, weight, histories, seed offset, tag)
+            (
+                beam_raw,
+                beam_area,
+                beam_area / area_iso,
+                CONTAMINANT_WEIGHTS[0],
+                contaminant_histories(beam_area / area_iso, per_replicate),
+                700_003,
+                "contaminant_beam",
+            ),
+            (
+                CONTAMINANT_HEAD_RAW,
+                CONTAMINANT_HEAD_AREA,
+                CONTAMINANT_HEAD_AREA / area_iso,
+                CONTAMINANT_WEIGHTS[1],
+                contaminant_histories(CONTAMINANT_HEAD_AREA / area_iso, per_replicate),
+                900_007,
+                "contaminant_head",
+            ),
+        ]
+        # A weight fitted to zero stays configured (the record above says why) but is
+        # not transported: its column reads 0 by decision, not by accident.
+        electron_parts = [part for part in candidates if part[3] > 0.0]
+
     if announce:
         voxels = int(np.prod(grid.shape))
         extra_note = f" + {extra_n:,} extra-focal" if weight > 0.0 else ""
+        electron_note = (
+            " + " + "/".join(f"{n_e:,}" for *_, n_e, _, _ in electron_parts) + " e-"
+            if electron_parts
+            else ""
+        )
         print(
             f"  {field_x * 10:5.0f} x {field_y * 10:<5.0f} mm: {grid.shape} "
             f"({voxels / 1e6:.1f} M voxels)"
             + (f", scoring {read_on.shape}" if scoring is not None else "")
-            + f", {replicates} x {per_replicate:,}{extra_note} histories, {reuse:.0f}x reuse"
+            + f", {replicates} x {per_replicate:,}{extra_note}{electron_note} histories, "
+            f"{reuse:.0f}x reuse"
         )
     shape = read_on.shape
     pooled = np.zeros(shape, dtype=np.float64)
     per_replicate_metrics: list[dict[str, float]] = []
-    component_totals = {"primary": 0.0, "extrafocal": 0.0}
+    component_totals = {
+        "primary": 0.0,
+        "extrafocal": 0.0,
+        "contaminant_beam": 0.0,
+        "contaminant_head": 0.0,
+    }
     head_seconds = 0.0
     start = time.perf_counter()
     for index in range(replicates):
@@ -1918,6 +2186,16 @@ def simulate(
             component_totals["extrafocal"] += (
                 roi_dose(Scan(field_x, field_y, ssd, depth, read_on, extra_dose), depth)
                 * EXTRAFOCAL_AREA
+            )
+        for raw_e, area_e, ratio_e, weight_e, n_e, offset, tag in electron_parts:
+            # Never through the photon pre-solve: clipped by the collimator instead.
+            electron_dose, spent = transport_component(
+                engine, raw_e, stack, grid, scoring, n_e, 1.0, seed + offset, model="attenuation"
+            )
+            head_seconds += spent
+            combined += weight_e * ratio_e * electron_dose
+            component_totals[tag] += (
+                roi_dose(Scan(field_x, field_y, ssd, depth, read_on, electron_dose), depth) * area_e
             )
         pooled += combined
         scan = Scan(field_x, field_y, ssd, depth, read_on, combined)
@@ -2101,6 +2379,8 @@ for (field_x, field_y), run in output_runs.items():
             "output_factor_sigma": factor * math.hypot(relative, reference_rel),
             "dose_per_fluence_primary": run.component_roi["primary"],
             "dose_per_fluence_extrafocal": run.component_roi["extrafocal"],
+            "dose_per_fluence_contaminant_beam": run.component_roi["contaminant_beam"],
+            "dose_per_fluence_contaminant_head": run.component_roi["contaminant_head"],
             "seconds": run.seconds,
         }
     )

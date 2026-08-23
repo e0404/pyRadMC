@@ -75,8 +75,9 @@ collected in the repository's `NOTICE` file.
 ## Materials
 
 The registry carries water, air, lung, adipose tissue, cortical bone (the ICRP/ICRU
-reference formulations, so every number is independently checkable) and tungsten. Each
-entry has elemental mass fractions, an ICRU-37 I-value, exact Sternheimer density-effect
+reference formulations, so every number is independently checkable), tungsten, and the
+W95/Ni3.5/Cu1.5 heavy alloy that MLC leaves are actually made of. Each entry has
+elemental mass fractions, an ICRU-37 I-value, exact Sternheimer density-effect
 coefficients, and per-material ESTAR radiative anchors.
 
 ```python

@@ -161,12 +161,15 @@ an unflattened 28 x 28 field the classical construction reports a 40 mm penumbra
 the cone rather than the collimator. Most of this machine's geometry is not published, so the
 opening cell is an explicit inventory of what is stated, what has been fitted against vendor
 beam data, and what remains a placeholder. The fitted constants ship in the configuration —
-an elliptical focal spot and a stepwise off-axis spectral-softening table, each with its
+an elliptical focal spot, a stepwise off-axis spectral-softening table, and a
+contaminant-electron source extracted from the vendor's build-up columns, each with its
 provenance and its stated limits beside it — but the fitted off-axis *fluence* table does
 not, because it is derived from the vendor's measured profiles: the shipped default is the
 invented analytic cone, and `PRIMARY_FLUENCE_FILE` is the hook for the table you fit against
 your own beam data (worth ~3 % at mid radius and more at the corner; the numbers both ways
-are in the changelog).
+are in the changelog). The leaves are the W95/Ni3.5/Cu1.5 heavy alloy from the material
+registry, and a transmission check cell reads the narrow-beam single- and dual-layer
+transmission against the published figures.
 
 The rest: `tabulated_demo.py` (EPDL/EEDL cross-sections), `materials_demo.py` (bone/lung
 heterogeneity), `ct_demo.py` (dose on a CT), `dose_grid_demo.py` (decoupled scoring grid and

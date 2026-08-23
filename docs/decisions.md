@@ -115,6 +115,19 @@ exploits denoising bias too, and that bias is spatially correlated and therefore
 reduction factor ≈ 1.0 over 48 seeds. Per-voxel Dij dose is transport-dominated counting,
 which source-side QMC cannot help.
 
+**A non-radial primary fluence envelope: measured negative.** A fixed-collimator term
+C(x, y) on top of the radial fluence is the one extra degree of freedom the virtual-source
+literature suggests when diagonals disagree, and the Halcyon beam data does show its
+diagonal reading 0.2 to 1.0 per cent above the crossline at equal radius over r = 7-11 cm.
+It is not a fluence structure. The differential is flat in measurement-plane coordinates
+and grows with depth at fixed fan angle, where anything fixed in the collimator would
+scale with divergence and dilute with depth; and the simulation, whose fluence is radial
+by construction, already reproduces it (4.0 against 4.3 per cent at the strongest bin). It
+is phantom scatter asymmetry near the crossline's field edge, transported for free in both
+channels. The model-minus-measurement azimuthal residual is not coherent above its ~1 per
+cent noise floor, so there is nothing to fit. Keep the diagnostic: plane-coordinate
+flatness plus depth growth reads "scatter"; fan-coordinate constancy would read "fluence".
+
 **Single-GPU micro-optimization is exhausted.** Persistent threads, register and occupancy
 tuning, texture-memory reads and step-fraction changes all measured neutral or negative.
 The kernel is divergence- and latency-bound. What remains is multi-GPU or algorithmic.

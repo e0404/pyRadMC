@@ -13,6 +13,20 @@ must be able to find out from this file whether the numbers should have moved.
 
 ### Added
 
+- **Tungsten heavy-alloy material** (`TUNGSTEN_ALLOY`: W 0.95 / Ni 0.035 / Cu 0.015 by
+  mass at 18.0 g/cm^3), the published composition surrogate for Halcyon-class dual-layer
+  MLC leaves. This is the alloy entry the `TUNGSTEN` docstring anticipated, retiring the
+  pure-W-at-caller-density approximation (~1-2 % in mu/rho at MV energies, and about a
+  factor two in single-bank transmission, which is exponential in rho t) for callers that
+  use it. Provenance: I = 692.5 eV and the radiative anchors are NIST ESTAR's
+  user-defined-material output for exactly this composition and density; the Sternheimer
+  density-effect row is not in SBS-1984, so cbar comes from the exact plasma-energy
+  relation (which reproduces the published tungsten row) and a/m/x0/x1 are fitted to
+  ESTAR's exact delta column over its full grid (max |delta error| 0.028). Gated against
+  ESTAR like the ICRP media in `tests/unit/test_tungsten_alloy.py`, with an extra
+  absolute pin on the fitted density-effect parameterization. No engine behaviour changes
+  and no shipped dose moves; nothing used the entry before it existed.
+
 - **Measured-primary-fluence virtual source model** (`PrimaryFluenceBeamSource`,
   `PrimaryFluenceBeamletSource`, and the `RadialFluence` table they read), after Tacke et
   al., *Med. Phys.* **33** (2006) 1125-1132, doi:10.1118/1.2181298. Photons are sampled on a
@@ -187,16 +201,18 @@ must be able to find out from this file whether the numbers should have moved.
   already in place, the correction must multiply *that* table, not the analytic cone,
   which is what the fit script's `--base` argument is for.)
 
-  **What the shipped default gives, so nobody is surprised**: on the analytic cone —
-  everything else identical, shells and elliptical spot included — the depth doses still
-  pass gamma 2 %/2 mm at 100 % on all seven fields, the trusted output-factor block reads
-  mean +0.33 %, RMS 1.33 % (on-axis ratios barely see the radial shape), and the
-  transposed-pair asymmetry holds at 1.020 ± 0.006 against the machine's 1.032. What the
-  invented cone costs is the large-field *shapes*: the 28 x 28 crossline runs −1 to −1.9 %
-  in-field (gamma 61–71 %) and the diagonals −3.3 to −4.7 % (gamma 26–44 %), against
+  **What the shipped default gives, so nobody is surprised** (numbers from the shipped
+  artifacts' own regeneration, contaminant electrons, alloy leaves and surrogate bank
+  geometry included): on the analytic cone — everything else identical, shells and
+  elliptical spot included — the depth doses pass gamma 2 %/2 mm at 100 % on all seven
+  fields, the trusted output-factor block reads mean +0.06 %, RMS 1.40 %, median 0.7
+  simulated sigma (on-axis ratios barely see the radial shape; the boosted reference
+  keeps the block mean's common-mode term near 0.3 %), and the transposed-pair asymmetry
+  holds at 1.035 ± 0.006 against the machine's 1.032. What the invented cone costs is
+  the large-field *shapes*: the 28 x 28 crossline runs −1 to −1.7 % in-field (gamma
+  60–71 %) and the diagonals −3.0 to −4.5 % (gamma 28–45 %), against
   88–93 % on the diagonals with a fitted table. That gap **is** the fluence commissioning,
   and reproducing the fitted numbers on another machine's data is a one-script step.
-
 - **Commissioning example** (`examples/commissioning_demo.py`, a jupytext percent notebook
   that also runs as a plain script). Drives the existing
   collimation, head pre-solve, spectral-source and scoring pieces through a beam-data
@@ -241,6 +257,64 @@ must be able to find out from this file whether the numbers should have moved.
   parameterizations against EPICS 2023.
 
 ### Changed
+
+- **The Halcyon example carries a contaminant-electron source** (`CONTAMINANT_ENERGY`,
+  `CONTAMINANT_WEIGHTS`; the example's shallow doses move, the engine does not change —
+  the component re-badges an existing photon source's emissions as electrons and rides
+  the attenuation route). Derived from the vendor's own 1 mm build-up columns by
+  inverting the depth-dose normalization per field: the implied component is
+  electron-like on range (spent by ~1.2 cm), magnitude (1-4 % of peak at 0.5 cm) and
+  field-size scaling. Mono-energetic 2.2 MeV (fitted on a 1.5/2.2/3.0 grid), emitted
+  from the extra-focal source's plane with weight 4.3e-4 per unit on-axis photon
+  fluence. **The companion beam-fan term was built, fitted, and came out zero** — its
+  basis is 4.3x steeper in field size than the two-population argument assumed, and the
+  residual it was invented for *decreases* with field size, which no contamination
+  mechanism does; that small-field shallow deficit (+1.5 % of peak at 2 x 2, gone by
+  8 x 8) stays an open item rather than being absorbed into a fitted source. Validated
+  against pre-committed targets on the fitted-fluence configuration: the large-field
+  dmax trend turns over and moves toward the measured curve (28 x 28 error 2.6 mm ->
+  0.9 mm), the 0.4-2.5 cm build-up residual at 20/28 cm collapses (4.2/4.4 % -> 0.2/
+  0.9 % of peak), and the 1.3 cm-depth profiles and diagonal — which no part of the fit
+  ever saw — improved or held (diagonal gamma 88.2 -> 93.2 %). Output factors are
+  immune by construction (electrons are spent centimetres above the 5 cm scoring
+  depth). Stated approximations recorded at the definition, including that the fitted
+  head term is an *effective* source absorbing the unmodelled carbon-fibre bore cover's
+  electrons.
+
+- **The Halcyon example's leaves are now `tungsten_alloy`, on the literature-surrogate
+  bank positions** (`examples/halcyon_commissioning_demo.py`; the example's numbers move,
+  the engine's do not). Three coupled updates from checking the model against a
+  literature-informed geometry specification: the leaf material changes from pure W at
+  19.30 to the alloy at 18.0 (single-bank narrow-beam transmission roughly doubles to
+  0.19 % by energy fluence; in-field dose is unaffected), the bank positions move to the
+  surrogate 68.8-61.1 / 60.8-53.1 cm SID with a 3 mm interlayer gap (was 69.0/60.0 with
+  ~1.3 cm; traced radiation edges move by at most 0.011 mm at the isocentre, so widths
+  and penumbrae are preserved by construction), and a new transmission check cell prints
+  the narrow-beam single- and dual-layer transmission against the published ~0.4-0.5 % /
+  ~0.01 % dose figures, with the unmodelled contributions (interleaf leakage, in-leaf
+  build-up, phantom scatter) stated. The dependency-free `DEVICES = "water"` stand-in
+  follows the leaves to 18.0, so it keeps reproducing the shipped geometry's areal
+  density rather than pure tungsten's. A stale tip-retraction comment (0.67/0.70 mm) was
+  corrected to the measured 0.76/0.62 mm — the values this file's own 0.16 mm
+  differential always implied.
+
+- **The Halcyon example's reference field gets twelve times the histories, not three**
+  (`REFERENCE_HISTORY_BOOST`; the example's quoted output-factor errors move, the engine
+  does not). Every output factor is a ratio against the one reference field, so that
+  field's own draw lands on all hundred entries at once and cancels nowhere. Two full
+  regenerations whose raw doses agreed to 0.04 ± 0.2 per cent still differed by 1.3 per
+  cent in *every* output factor simultaneously, because the block mean inherits the
+  reference draw (~0.6-0.9 per cent at boost 3) and the per-entry sigmas share the shift
+  rather than flagging it. At 12 the common mode falls to ~0.3 per cent, for about an
+  hour more on a ten-hour matrix.
+
+- **The Halcyon example's figures and tables are regenerated** from the shipped
+  configuration with the alloy leaves, the surrogate bank geometry, the contaminant
+  electrons and the boosted reference in place, and the "what the shipped default gives"
+  baseline above quotes that run rather than the previous one. The run also re-verified
+  the nine-pair transposed-field asymmetry on the new geometry: 1.035 ± 0.006 simulated
+  against the machine's 1.032, the third consistent read of the fitted
+  `SPOT_SIGMA_V = 0.09`.
 
 - Warp's general host-pre-sampled source route no longer seeds exactly-zero-weight
   primaries into transport queues. The attempted-history denominator and global history
