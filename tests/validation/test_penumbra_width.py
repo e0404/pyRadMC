@@ -8,7 +8,13 @@ jaw values. A straight edge of height ``H`` at distance ``z_mid`` throws a
 partial-transmission band whose projection at measurement distance ``D`` is
 ``u_edge * D * (1/z_top - 1/z_bottom)`` — here ~8.9 mm — on top of which sit the
 spot size (~1.7 mm projected) and the in-phantom transport blur (~4-6 mm at
-depth for 6 MV). Measured 2026-07-15: 15.8 mm, consistent with that stack-up.
+depth for 6 MV). An 80-20 width spans only the middle of that falloff rather than the whole
+band, so it lands below it, which is what the gate's lower bound is for.
+Re-measured 2026-08-31: 5.4 mm here, and 6.6 mm before the Ali-Rogers
+annihilation-line fix hardened the beam. The 15.8 mm recorded here until
+then was not a measurement of this beam at all -- it came from the crossing
+search described in ``crossing`` below, which reported an in-field noise dip
+as the field edge.
 
 ``JawPair(focused=True)`` (shipped 2026-07-16) collapses the geometric band —
 every focal-spot ray is then full-thickness-or-nothing, so the penumbra falls to
@@ -123,8 +129,33 @@ def test_80_20_penumbra_width_is_physical() -> None:
     relative = profile / plateau
     right = x > center_x
     x_right, p_right = x[right], relative[right]
-    x80 = float(np.interp(0.8, p_right[::-1], x_right[::-1]))
-    x20 = float(np.interp(0.2, p_right[::-1], x_right[::-1]))
+
+    def crossing(level: float) -> float:
+        """Outermost place the profile falls through ``level``, interpolated.
+
+        The *outermost* one, and that is the whole point. A 2 M-history profile is
+        not monotone in field, and this beam's is not even flat — it peaks some 60
+        to 80 per cent above the plateau it is normalized to — so a search that
+        takes the first crossing going outward finds whichever in-field voxel
+        happens to dip through the level and calls that the field edge. It put the
+        80 per cent crossing 5 cm inside the field and reported a 54 mm penumbra on
+        a profile that is genuinely 5 mm wide. The field edge is the last place the
+        dose leaves the level, not the first.
+
+        (``np.interp`` on the reversed profile, which this used to do, is doubly
+        wrong: it needs an increasing ``xp`` and a noisy profile does not give it
+        one, so it returns a silently arbitrary position rather than a crossing.)
+        """
+        above = p_right >= level
+        falling = np.flatnonzero(above[:-1] & ~above[1:])
+        if falling.size == 0:
+            return float(x_right[-1])
+        i = int(falling[-1])
+        y0, y1 = float(p_right[i]), float(p_right[i + 1])
+        x0, x1 = float(x_right[i]), float(x_right[i + 1])
+        return x0 if y1 == y0 else x0 + (level - y0) * (x1 - x0) / (y1 - y0)
+
+    x80, x20 = crossing(0.8), crossing(0.2)
     width_mm = 10.0 * (x20 - x80)
 
     # The straight-edge model: the edge face's partial-transmission band projected

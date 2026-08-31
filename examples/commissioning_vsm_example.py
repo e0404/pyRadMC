@@ -16,25 +16,42 @@
 # `python examples/halcyon_commissioning_demo.py` runs it top to bottom.)
 
 # %% [markdown]
-# # Commissioning a jawless dual-layer head (Halcyon-like)
+# # Commissioning a virtual source model against beam data
 #
-# A second commissioning session, derived from `commissioning_demo.py`, against a very
-# different head: **no jaws at all**, and two **stacked, staggered** multi-leaf
-# collimators doing all of the collimation in both directions. Leaf ends define the
-# x (inplane) edge; leaf *sides* define the y (crossplane) edge, which is therefore
-# quantized to leaf boundaries.
+# A full commissioning session: build a head, transport it, and produce the data sets you
+# would put beside a water-tank scan. It is written to be read as a worked example of
+# *how* a source model is commissioned, not as a model of one particular machine.
 #
-# It produces exactly the four data sets a comparison against measured beam data needs:
+# **The geometry is a jawless dual-layer head, built from published data about the Varian
+# Halcyon**: no jaws at all, and two stacked, staggered multi-leaf collimators doing all
+# of the collimation in both directions. Leaf ends define the x (inplane) edge; leaf
+# *sides* define the y (crossplane) edge, which is therefore quantized to leaf
+# boundaries. That machine was chosen because it makes the collimator do everything, so
+# nothing important hides behind a jaw — but every number describing it is inventoried
+# below as stated, derived, fitted, bounded or invented, and several are surrogates.
+#
+# **The source comes one of two ways**, and switching between them is the point of the
+# example:
+#
+# * the **analytic model built here** — a spectrum, a focal spot, a radial fluence, an
+#   extra-focal term and a contaminant-electron term, each fitted or stated in the cell
+#   below. This is the default and needs no external data.
+# * an **IAEA phase space**, set through `PHASESPACE`. Then the whole source model arrives
+#   already sampled into the particles and this notebook supplies only the collimator —
+#   which is the interesting comparison, because a virtual source model fitted through
+#   some other code's simplified collimator can then be pushed through an explicit one.
+#
+# Either way it produces the four data sets a comparison against measured beam data needs:
 #
 # * **Percentage depth doses** at SSD 90 cm for every square field.
 # * **Lateral profiles** in both principal directions at 1.3, 5, 10, 20 and 30 cm depth,
 #   SSD 90 cm, for every square field. The *leaf-travel* direction is `profile_x`.
 # * **Diagonal profiles** of the largest field at the same depths and SSD.
 # * **Output factors** at SSD 95 cm (point at the isocentre, 5 cm deep) over the full
-#   **x-by-y rectangular field matrix**.
-#
-# TPRs, the in-air `Sc` runs and the `Sp`/TPR conversion of the original notebook are all
-# gone: nothing here needs them.
+#   **x-by-y rectangular field matrix**. Neither route models **monitor backscatter** —
+#   a field-size-dependent scaling of the monitor response, i.e. a per-beam MU factor
+#   rather than a property of any particle — so an output factor here is a dose ratio and
+#   a machine's would carry that factor on top.
 #
 # ## Read this before quoting a number: what is measured and what is guessed
 #
@@ -140,7 +157,28 @@ BEAM = AliRogersMV(
     c3=_FLATTENED.c3,
     c4=_FLATTENED.c4,
 )
-PHASESPACE = None  # or a path to an IAEA header, which then replaces the spectrum
+# --- driving the head from a phase space instead of the model below --------------------
+# Leave `PHASESPACE` None and the source is the analytic model built further down: a
+# spectrum, a focal spot, a radial fluence, an extra-focal term and a contaminant-electron
+# term, each fitted or stated here. Name an IAEA pair instead (either extension, or the
+# bare stem) and all of that arrives in the particles, already sampled; the only thing this
+# notebook still supplies is the collimator. That is the interesting comparison: a source
+# model fitted through some other code's collimator, pushed through an explicit one.
+#
+# `HALCYON_VSM_PHASESPACE` in the environment is read when this is None, so the example can
+# be pointed at a file without being edited.
+PHASESPACE: str | None = None
+PHASESPACE_PLANE_Z = 31.0  # cm from the target: where the records sit, checked against them
+CLAMP_RADIUS = 20.0  # cm at the isocentre; the aiming boundary baked into the file
+# Electron histories per replicate, as a fraction of the photon count, for the electrons
+# carried by the file. They are a fraction of a per cent of its records and at most a few
+# per cent of the dose, and they take the deterministic attenuation route (which re-traces
+# every leaf pair on the host), so oversampling them is what makes a sweep CPU-bound.
+ELECTRON_HISTORY_FRACTION = 0.005
+# The spectrum the file's own documentation claims, used only to check the file against it
+# before transporting anything -- see the guard below. None skips the check.
+VSM_BEAM: AliRogersMV | None = AliRogersMV(e_e=5.76, c1=1.66276, c2=3.25, c3=-1.186, c4=0.0)
+VSM_GRID = (0.25, 60)  # (e_min, n_bins) of that stated spectrum; both ends are EDGES
 SPOT_SIGMA = 0.05  # focal spot sigma (0.5 mm); this is what makes the geometric penumbra.
 #                    Carried over from the other notebook, where it was fitted against a
 #                    different machine's penumbra. Refit it here jointly with
@@ -623,6 +661,8 @@ SHOW_PLOTS = False
 import csv  # noqa: E402
 import itertools  # noqa: E402
 import math  # noqa: E402
+import mmap  # noqa: E402
+import os  # noqa: E402
 import time  # noqa: E402
 from pathlib import Path  # noqa: E402
 from typing import Any, NamedTuple  # noqa: E402
@@ -643,6 +683,19 @@ from pyRadMC.geometry.collimation import (  # noqa: E402
 from pyRadMC.geometry.fluence import RadialFluence  # noqa: E402
 from pyRadMC.geometry.grid import VoxelGrid  # noqa: E402
 from pyRadMC.geometry.head import AirColumn, presolve_head  # noqa: E402
+from pyRadMC.geometry.phasespace import (  # noqa: E402
+    IAEA_ELECTRON,
+    IAEA_PHOTON,
+    IAEAHeader,
+    InMemoryPhaseSpaceSource,
+    _build_struct,
+    _decode_record,
+    _iaea_path,
+    _n_particles,
+    _parse_sections,
+    _record_dtype,
+    _sample_indices,
+)
 from pyRadMC.geometry.source import (  # noqa: E402
     GaussianSpotBeamSource,
     Primary,
@@ -650,7 +703,7 @@ from pyRadMC.geometry.source import (  # noqa: E402
     Source,
 )
 from pyRadMC.geometry.spectrum import Spectrum, ali_rogers_mv  # noqa: E402
-from pyRadMC.rng import RNGState  # noqa: E402
+from pyRadMC.rng import RNGState, uniform  # noqa: E402
 from pyRadMC.rng.host import HostRNG  # noqa: E402
 from pyRadMC.scoring.grid import ScoringGrid  # noqa: E402
 
@@ -677,8 +730,13 @@ PROFILE_FIELDS = tuple(mm / 10.0 for mm in PROFILE_FIELDS_MM)
 DIAGONAL_FIELD = DIAGONAL_FIELD_MM / 10.0
 OUTPUT_FACTOR_SIDES = tuple(mm / 10.0 for mm in OUTPUT_FACTOR_SIDES_MM)
 REFERENCE_FIELD = REFERENCE_FIELD_MM / 10.0
-HEAD_MODEL = "attenuation" if PHASESPACE is not None else HEAD
+# The phase-space route splits the file by particle kind before transport, so its
+# photons are kind-pure and can go through the pre-solve like the analytic ones. An
+# earlier revision forced "attenuation" here because a mixed-kind source cannot enter
+# the photon pre-solve; `fan_clip` removes that constraint.
+HEAD_MODEL = HEAD
 PER_REPLICATE = max(1, HISTORIES // REPLICATES)
+PHASESPACE_PATH = PHASESPACE or os.environ.get("HALCYON_VSM_PHASESPACE")
 OUTPUT_FACTOR_PER_REPLICATE = max(1, OUTPUT_FACTOR_HISTORIES // OUTPUT_FACTOR_REPLICATES)
 
 # Beam-frame slab extents, converted from the quoted SIDs.
@@ -929,6 +987,303 @@ else:
     )
 
 # %% [markdown]
+# ## The phase space, when one is configured
+#
+# Everything in this cell is inert unless `PHASESPACE` names a file. With one, the head's
+# whole source model — spectrum, focal spot, off-axis fluence and softening, head scatter
+# and contamination — arrives in the particles instead of being built below, and the only
+# thing this notebook still supplies is the collimator.
+#
+# The file is memory-mapped and scanned once: every record's ray is projected to the
+# isocentre plane and that aim point kept, so each field can select the records aimed into
+# its own fan by index and sample them straight from the map. Nothing is copied out until a
+# batch is drawn.
+#
+# Two file-format notes, both handled here rather than in the library. Some exporters write
+# the IAEA `W` flag as 0 with a "constant" of 0.0 — the sign of `w` rides on the particle
+# type, which is a *stored*-flag convention — so the header is parsed with that flag read
+# as 1 and its record length checked against the file size. And `z` is taken from the
+# records rather than from any accompanying document, because the two have been known to
+# disagree.
+
+
+# %%
+def vsm_header(path: str) -> IAEAHeader:
+    """Parse the pyvsm header, reading its off-spec `W` flag as the standard 1."""
+    header_path, _ = _iaea_path(path)
+    sections = _parse_sections(header_path.read_text())
+    flags = [int(token) for token in sections["RECORD_CONTENTS"][:7]]
+    flags[5] = 1
+    stored = tuple(bool(flags[i]) for i in (0, 1, 2, 3, 4, 6))
+    if not all(stored):
+        raise ValueError("this notebook expects x, y, z, u, v and weight stored per record")
+    n_extra_floats, n_extra_ints = (
+        int(sections["RECORD_CONTENTS"][7]),
+        int(sections["RECORD_CONTENTS"][8]),
+    )
+    record_length = 1 + 4 + 4 * sum(stored) + 4 * n_extra_floats + 4 * n_extra_ints
+    if int(sections["RECORD_LENGTH"][0]) != record_length:
+        raise ValueError(
+            f"RECORD_LENGTH {sections['RECORD_LENGTH'][0]} disagrees with the "
+            f"{record_length} bytes implied by RECORD_CONTENTS"
+        )
+    return IAEAHeader(
+        byte_order="<" if sections["BYTE_ORDER"][0] == "1234" else ">",
+        record_length=record_length,
+        n_particles=_n_particles(sections, header_path, record_length),
+        n_extra_floats=n_extra_floats,
+        n_extra_ints=n_extra_ints,
+        stored=stored,
+        constants={},
+    )
+
+
+class VSMPhaseSpace:
+    """The whole file, memory-mapped, with every record's isocentre aim point scanned."""
+
+    def __init__(self, path: str, *, chunk: int = 8_000_000) -> None:
+        self.header = vsm_header(path)
+        _, self._phsp_path = _iaea_path(path)
+        self.dtype = _record_dtype(self.header)
+        self.struct = _build_struct(self.header)
+        self._file = self._phsp_path.open("rb")
+        self.mmap = mmap.mmap(self._file.fileno(), 0, access=mmap.ACCESS_READ)
+        n = self.header.n_particles
+        self.kind = np.empty(n, dtype=np.int8)
+        self.energy = np.empty(n, dtype=np.float32)
+        self.x_iso = np.empty(n, dtype=np.float32)
+        self.y_iso = np.empty(n, dtype=np.float32)
+        self.weight_sum = 0.0
+        z_seen: list[float] = []
+        records = self.records()
+        for start in range(0, n, chunk):
+            block = records[start : start + chunk]
+            u = block["u"].astype(np.float64)
+            v = block["v"].astype(np.float64)
+            w = np.sign(block["typ"].astype(np.float64)) * np.sqrt(
+                np.clip(1.0 - u * u - v * v, 0.0, None)
+            )
+            if np.any(w <= 0.0):
+                raise ValueError("the phase space carries backward-going particles")
+            z = block["z"].astype(np.float64)
+            z_seen += [float(z.min()), float(z.max())]
+            t = (SAD - z) / w
+            stop = start + block.size
+            self.x_iso[start:stop] = block["x"] + t * u
+            self.y_iso[start:stop] = block["y"] + t * v
+            self.kind[start:stop] = np.abs(block["typ"])
+            self.energy[start:stop] = np.abs(block["e"])
+            self.weight_sum += float(block["weight"].astype(np.float64).sum())
+            del block, u, v, w, z, t
+        del records
+        if max(abs(min(z_seen) - PHASESPACE_PLANE_Z), abs(max(z_seen) - PHASESPACE_PLANE_Z)) > 1e-3:
+            raise ValueError(
+                f"the records sit at z = {min(z_seen):g}..{max(z_seen):g}, not at the stated "
+                f"plane {PHASESPACE_PLANE_Z:g} cm from the target; check the frame"
+            )
+
+    def records(self) -> np.ndarray:
+        """Return a structured view of every record on the map (no copy)."""
+        return np.frombuffer(self.mmap, dtype=self.dtype, count=self.header.n_particles)
+
+    def __len__(self) -> int:
+        """Return the number of records in the file."""
+        return int(self.header.n_particles)
+
+    def close(self) -> None:
+        """Release the map; every source built from it must be dead first."""
+        self.mmap.close()
+        self._file.close()
+
+
+class ClippedPhaseSpaceSource(Source):
+    """The file's records at a given index set, sampled with replacement.
+
+    The same contract as the library's `PhaseSpaceSource` (one uniform per `emit`;
+    chunk-invariant `sample_batch` on its own PCG64 stream; per-record kind and
+    weight), restricted to a subset of the file by index -- here the photons aimed
+    into one field's fan. Records are gathered from the memory map only when drawn.
+    """
+
+    def __init__(self, phsp: VSMPhaseSpace, indices: np.ndarray) -> None:
+        if indices.size == 0:
+            raise ValueError("no records selected")
+        self._phsp = phsp
+        self._indices = np.ascontiguousarray(indices, dtype=np.int64)
+        self._max_energy = float(phsp.energy[self._indices].max())
+
+    def __len__(self) -> int:
+        """Return the number of records available to sample."""
+        return int(self._indices.size)
+
+    @property
+    def max_energy(self) -> float:
+        """Highest energy in the selection, in MeV (for table sizing)."""
+        return self._max_energy
+
+    def emit(self, rng_state: RNGState) -> Primary:
+        """Emit one selected record, uniformly; consumes one uniform."""
+        k = min(int(uniform(rng_state) * len(self)), len(self) - 1)
+        offset = int(self._indices[k]) * self._phsp.header.record_length
+        raw = self._phsp.mmap[offset : offset + self._phsp.header.record_length]
+        record = _decode_record(raw, self._phsp.header, self._phsp.struct)
+        return Primary(
+            energy=record.energy,
+            x=record.x,
+            y=record.y,
+            z=record.z,
+            ux=record.u,
+            uy=record.v,
+            uz=record.w,
+            kind={IAEA_PHOTON: "photon", IAEA_ELECTRON: "electron"}.get(
+                record.particle_type, "positron"
+            ),
+            weight=record.weight,
+        )
+
+    def sample_batch(self, seed: int, history_offset: int, n: int) -> dict[str, np.ndarray]:
+        """Column arrays for histories ``[history_offset, history_offset + n)``."""
+        k = _sample_indices(seed, history_offset, n, len(self))
+        return gather_columns(self._phsp, self._indices[k])
+
+
+def gather_columns(phsp: VSMPhaseSpace, indices: np.ndarray) -> dict[str, np.ndarray]:
+    """Decode the records at `indices` into the engine's upload columns (float32)."""
+    recs = phsp.records()[indices]
+    typ = recs["typ"].astype(np.int32)
+    u = np.asarray(recs["u"], dtype=np.float32)
+    v = np.asarray(recs["v"], dtype=np.float32)
+    tmp = u.astype(np.float64) ** 2 + v.astype(np.float64) ** 2
+    sign_w = np.where(typ < 0, -1.0, 1.0)
+    w = np.where(tmp <= 1.0, sign_w * np.sqrt(np.maximum(0.0, 1.0 - tmp)), 0.0).astype(np.float32)
+    over = tmp > 1.0
+    if over.any():
+        scale = np.sqrt(tmp[over]).astype(np.float32)
+        u, v = u.copy(), v.copy()
+        u[over] /= scale
+        v[over] /= scale
+    return {
+        "particle_type": np.abs(typ),
+        "energy": np.abs(np.asarray(recs["e"], dtype=np.float32)),
+        "x": np.asarray(recs["x"], dtype=np.float32),
+        "y": np.asarray(recs["y"], dtype=np.float32),
+        "z": np.asarray(recs["z"], dtype=np.float32),
+        "ux": u,
+        "uy": v,
+        "uz": w,
+        "weight": np.asarray(recs["weight"], dtype=np.float32),
+    }
+
+
+if PHASESPACE_PATH is None:
+    PHSP: Any = None
+    AXIS_SPECTRUM: Any = None
+    R_ISO: Any = None
+else:
+    scan_start = time.perf_counter()
+    PHSP = VSMPhaseSpace(PHASESPACE_PATH)
+    N_PHOTONS = int(np.count_nonzero(PHSP.kind == IAEA_PHOTON))
+    N_ELECTRONS = int(np.count_nonzero(PHSP.kind == IAEA_ELECTRON))
+    if len(PHSP) != N_PHOTONS + N_ELECTRONS:
+        raise ValueError("the file carries particles other than photons and electrons")
+    R_ISO = np.hypot(PHSP.x_iso.astype(np.float64), PHSP.y_iso.astype(np.float64))
+    print(
+        f"phase space: {len(PHSP):,} records ({N_PHOTONS:,} photons, {N_ELECTRONS:,} electrons, "
+        f"{100.0 * N_ELECTRONS / len(PHSP):.2f} %), scanned in "
+        f"{time.perf_counter() - scan_start:.0f} s"
+    )
+    print(
+        f"  photon aim points reach r = {R_ISO[PHSP.kind == IAEA_PHOTON].max():.2f} cm at the "
+        f"isocentre (clamp {CLAMP_RADIUS:g} cm), electrons "
+        f"{R_ISO[PHSP.kind == IAEA_ELECTRON].max():.1f} cm; "
+        f"mean weight {PHSP.weight_sum / len(PHSP):.3f}; photon energies to "
+        f"{PHSP.energy[PHSP.kind == IAEA_PHOTON].max():.2f} MeV, electrons to "
+        f"{PHSP.energy[PHSP.kind == IAEA_ELECTRON].max():.2f} MeV"
+    )
+    # The readme's verification table, reproduced from the records: mean weight tracks the
+    # fitted I(r) and the mean energy falls off axis. Weight bands read from the file.
+    _weights_all = PHSP.records()["weight"]
+    print(f"  {'r at iso':>10} {'mean weight':>12} {'<E>/MeV':>9}   (readme: I(r) and <E>)")
+    for lo, hi in ((0.0, 2.0), (8.0, 10.0), (16.0, 18.0), (18.0, 20.0)):
+        band = (lo <= R_ISO) & (hi > R_ISO) & (PHSP.kind == IAEA_PHOTON)
+        print(
+            f"  {lo:4.0f}-{hi:<5.0f} {float(_weights_all[band].mean()):12.4f} "
+            f"{float(PHSP.energy[band].mean()):9.3f}"
+        )
+    del _weights_all
+
+    # The on-axis photon spectrum, read back from the particles (r < 2 cm at the isocentre,
+    # which is the other notebook's unsoftened reference shell): what the tip radiation-edge
+    # solve and the transmission check attenuate.
+    _axis = (R_ISO < 2.0) & (PHSP.kind == IAEA_PHOTON)
+    _edges = np.linspace(0.0, float(PHSP.energy[_axis].max()) + 1e-3, 61)[1:]
+    _edges = np.concatenate([[0.01], _edges])
+    _counts, _ = np.histogram(PHSP.energy[_axis], bins=_edges)
+    AXIS_SPECTRUM = Spectrum(edges=_edges, weights=_counts.astype(np.float64))
+    # The stated form, on its own grid, against what the records actually carry. Both
+    # numbers are photon-number-weighted means over the same population; the records also
+    # carry the ~4 % extra-focal component, which is slightly softer, so the file is
+    # expected to sit a shade below the primary-only model rather than exactly on it.
+    _STATED = (
+        None if VSM_BEAM is None else ali_rogers_mv(VSM_BEAM, e_min=VSM_GRID[0], n_bins=VSM_GRID[1])
+    )
+    _axis_energies = PHSP.energy[_axis].astype(np.float64)
+    print(
+        f"  on-axis (r < 2 cm) photon mean energy: {_axis_energies.mean():.4f} MeV from the "
+        f"records"
+        + ("" if _STATED is None else f", {_STATED.mean_energy:.4f} MeV from the stated form")
+    )
+    print(
+        f"  highest photon energy in the file: {PHSP.energy[PHSP.kind == IAEA_PHOTON].max():.4f} "
+        f"MeV against the stated {VSM_BEAM.e_e:g} MeV endpoint"
+    )
+    if _STATED is not None and abs(_axis_energies.mean() - _STATED.mean_energy) > 0.05:
+        raise ValueError(
+            f"the file's on-axis mean energy ({_axis_energies.mean():.4f} MeV) disagrees with "
+            f"its own stated spectrum ({_STATED.mean_energy:.4f} MeV) by more than 50 keV; "
+            "the export and its documentation describe different beams -- do not "
+            "transport this file"
+        )
+
+
+class FanClip(NamedTuple):
+    """One field's slice of the file: the photon source, the electron source, counts."""
+
+    photons: ClippedPhaseSpaceSource
+    electrons: InMemoryPhaseSpaceSource | None
+    n_photons: int
+    n_electrons: int
+    area_iso: float
+
+
+def fan_clip(field_x: float, field_y: float) -> FanClip:
+    """Select the file's records aimed into this field's fan, by kind."""
+    half_x = 0.5 * field_x + fan_margin(field_x)
+    half_y = 0.5 * field_y + fan_margin(field_y)
+    inside = (np.abs(PHSP.x_iso) <= half_x) & (np.abs(PHSP.y_iso) <= half_y)
+    photon_index = np.flatnonzero(inside & (PHSP.kind == IAEA_PHOTON))
+    electron_index = np.flatnonzero(inside & (PHSP.kind == IAEA_ELECTRON))
+    electrons = None
+    if electron_index.size:
+        columns = gather_columns(PHSP, electron_index)
+        electrons = InMemoryPhaseSpaceSource(**columns)
+    return FanClip(
+        photons=ClippedPhaseSpaceSource(PHSP, photon_index),
+        electrons=electrons,
+        n_photons=int(photon_index.size),
+        n_electrons=int(electron_index.size),
+        area_iso=4.0 * half_x * half_y,
+    )
+
+
+# The spectrum the geometry checks below attenuate: the file's own on-axis photons when a
+# phase space is driving the head, the analytic model otherwise. Only the deterministic
+# checks use it -- the tip radiation-edge solve, the leaf-transmission table and the
+# aperture trace. Transport always uses each history's own energy.
+EDGE_SPECTRUM = SPECTRUM if AXIS_SPECTRUM is None else AXIS_SPECTRUM
+MAX_ENERGY = SPECTRUM.max_energy if PHSP is None else float(PHSP.energy.max())
+
+# %% [markdown]
 # ## Materials and cross-sections
 #
 # `tungsten` is the real thing and needs the compiled EPICS tables (cached after the
@@ -954,7 +1309,7 @@ if DEVICES == "tungsten":
     _tables = compile_materials(
         download_library("epdl").read_text(encoding="latin-1"),
         download_library("eedl").read_text(encoding="latin-1"),
-        e_max=max(7.0, SPECTRUM.max_energy + 1.0),
+        e_max=max(7.0, MAX_ENERGY + 1.0),
     )
     XS: Any = TabulatedCrossSections(_tables, geometry_densities=((WATER, 1.0), (AIR, AIR_DENSITY)))
 else:
@@ -989,14 +1344,14 @@ print(XS.provenance)
 # numbers are the stand-in's, not tungsten's, and say nothing about the machine.
 
 # %%
-_edges = SPECTRUM.edges
+_edges = EDGE_SPECTRUM.edges
 _e_mid = 0.5 * (_edges[:-1] + _edges[1:])
 _mu = np.array([XS.mu_over_rho_total(float(e), DEVICE_MATERIAL) for e in _e_mid])
 for _layers, _published in ((1, "0.4-0.5 %"), (2, "~0.01 %")):
     _path = np.exp(-_mu * DEVICE_DENSITY * (_layers * LEAF_HEIGHT))
-    _by_number = float(np.sum(SPECTRUM.bin_probabilities * _path))
-    _by_energy = float(np.sum(SPECTRUM.bin_probabilities * _e_mid * _path)) / float(
-        np.sum(SPECTRUM.bin_probabilities * _e_mid)
+    _by_number = float(np.sum(EDGE_SPECTRUM.bin_probabilities * _path))
+    _by_energy = float(np.sum(EDGE_SPECTRUM.bin_probabilities * _e_mid * _path)) / float(
+        np.sum(EDGE_SPECTRUM.bin_probabilities * _e_mid)
     )
     print(
         f"narrow-beam transmission, {_layers} layer(s) ({_layers * LEAF_HEIGHT:g} cm at "
@@ -1124,9 +1479,9 @@ def _traced_edge(reach_iso: float, z_range: tuple[float, float]) -> float:
     directions = points / np.linalg.norm(points, axis=1)[:, None]
     chord = stack.path_lengths(np.zeros_like(points), directions)[:, 0]
 
-    energies = 0.5 * (SPECTRUM.edges[:-1] + SPECTRUM.edges[1:])
+    energies = 0.5 * (EDGE_SPECTRUM.edges[:-1] + EDGE_SPECTRUM.edges[1:])
     total = np.zeros(probe.size)
-    for energy, weight in zip(energies, SPECTRUM.bin_probabilities, strict=True):
+    for energy, weight in zip(energies, EDGE_SPECTRUM.bin_probabilities, strict=True):
         if weight <= 0.0:
             continue
         mu = DEVICE_DENSITY * XS.mu_over_rho_total(float(energy), DEVICE_MATERIAL)
@@ -1404,13 +1759,17 @@ print(
 
 
 # %%
-def head_input_source(field_x: float, field_y: float) -> tuple[Any, float]:
-    """Give the raw source for one field and its aperture area at the isocentre."""
-    if PHASESPACE is not None:
-        from pyRadMC.geometry.phasespace import PhaseSpaceSource
+def head_input_source(field_x: float, field_y: float, clip: Any = None) -> tuple[Any, float]:
+    """Give the raw source for one field and its aperture area at the isocentre.
 
-        # The file defines the fluence; there is no aperture to normalize by.
-        return PhaseSpaceSource(PHASESPACE), 1.0
+    With a phase space driving the head the source is that file restricted to the records
+    aimed into this field's fan, and the area is the fan rectangle -- the same quantity the
+    analytic route reports, so the history allocation below is identical either way.
+    """
+    if PHSP is not None:
+        if clip is None:
+            raise ValueError("the phase-space route needs the field's fan clip")
+        return clip.photons, clip.area_iso
     # Per axis, not from the larger side: a 1 x 28 field wants a 1 cm field's margin in x
     # and a 28 cm field's in y, and taking the larger for both would put three quarters of
     # its histories where nothing can pass.
@@ -1438,7 +1797,11 @@ def head_input_source(field_x: float, field_y: float) -> tuple[Any, float]:
 
 
 # Both allocation rules above are quoted relative to the reference square field.
-REFERENCE_AREA = head_input_source(REFERENCE_FIELD, REFERENCE_FIELD)[1]
+REFERENCE_AREA = (
+    4.0 * (0.5 * REFERENCE_FIELD + fan_margin(REFERENCE_FIELD)) ** 2
+    if PHSP is not None
+    else head_input_source(REFERENCE_FIELD, REFERENCE_FIELD)[1]
+)
 REFERENCE_DILUTION = REFERENCE_AREA / measuring_voxels(REFERENCE_FIELD, REFERENCE_FIELD)
 
 
@@ -1512,7 +1875,9 @@ def extrafocal_histories(ratio: float, primary: int) -> int:
     return max(1, min(wanted, int(EXTRAFOCAL_HISTORY_MAX * primary)))
 
 
-EXTRAFOCAL_RAW, EXTRAFOCAL_AREA = (None, 0.0) if EXTRAFOCAL_WEIGHT is None else extrafocal_source()
+EXTRAFOCAL_RAW, EXTRAFOCAL_AREA = (
+    (None, 0.0) if (EXTRAFOCAL_WEIGHT is None or PHSP is not None) else extrafocal_source()
+)
 if EXTRAFOCAL_WEIGHT is None:
     print("extra-focal source: off (and the refit column will not be written)")
 else:
@@ -1574,7 +1939,7 @@ def contaminant_histories(ratio: float, primary: int) -> int:
 
 
 CONTAMINANT_HEAD_RAW, CONTAMINANT_HEAD_AREA = (
-    (None, 0.0) if CONTAMINANT_WEIGHTS is None else contaminant_head_source()
+    (None, 0.0) if (CONTAMINANT_WEIGHTS is None or PHSP is not None) else contaminant_head_source()
 )
 if CONTAMINANT_WEIGHTS is None:
     print("contaminant electrons: off (and the refit columns will not be written)")
@@ -2083,13 +2448,16 @@ def simulate(
     scoring = None if scoring_half is None else point_scoring_grid(grid, ssd, depth, scoring_half)
     read_on = grid if scoring is None else scoring
     stack = beam_limiting_stack(field_x, field_y)
-    raw, area_iso = head_input_source(field_x, field_y)
+    clip = None if PHSP is None else fan_clip(field_x, field_y)
+    raw, area_iso = head_input_source(field_x, field_y, clip)
     if WARP_DEVICE is not None:
         engine: Any = WarpEngine(grid=grid, cross_sections=XS, device=WARP_DEVICE)
     else:
         engine = ReferenceEngine(grid=grid, cross_sections=XS, rng=HostRNG())
 
-    weight = 0.0 if EXTRAFOCAL_WEIGHT is None else float(EXTRAFOCAL_WEIGHT)
+    # With a phase space the head scatter is already in the particles, so the analytic
+    # extra-focal term is off whatever it is configured to.
+    weight = 0.0 if (EXTRAFOCAL_WEIGHT is None or PHSP is not None) else float(EXTRAFOCAL_WEIGHT)
     # Ratio that puts the extra-focal dose on the primary's per-history footing; the
     # (1 - w) and w factors then make the sum a dose per unit *total* on-axis fluence.
     # It is also exactly the factor by which the extra-focal fan is more dilute at the
@@ -2110,10 +2478,27 @@ def simulate(
     per_replicate = histories_per_replicate(diluted, base_histories, boost=history_boost)
     extra_n = extrafocal_histories(ratio, per_replicate)
     reuse = phase_space_reuse(diluted)
-    extra_reuse = phase_space_reuse(dilution(EXTRAFOCAL_AREA, voxels))
+    extra_reuse = (
+        phase_space_reuse(dilution(EXTRAFOCAL_AREA, voxels)) if EXTRAFOCAL_AREA > 0.0 else 1.0
+    )
 
     electron_parts: list[tuple[Any, float, float, float, int, int, str]] = []
-    if CONTAMINANT_WEIGHTS is not None:
+    if clip is not None:
+        # The file's own electrons, on the file's own footing: their share of the dose is
+        # the ratio of the two clipped populations, not a fitted weight.
+        if clip.electrons is not None:
+            electron_parts = [
+                (
+                    clip.electrons,
+                    1.0,
+                    clip.n_electrons / clip.n_photons,
+                    1.0,
+                    max(1, int(ELECTRON_HISTORY_FRACTION * per_replicate)),
+                    700_003,
+                    "contaminant_head",
+                )
+            ]
+    elif CONTAMINANT_WEIGHTS is not None:
         beam_raw, beam_area = contaminant_beam_source(field_x, field_y)
         candidates = [
             # (source, area, ratio to the primary footing, weight, histories, seed offset, tag)
@@ -2603,9 +2988,9 @@ def primary_fluence(
     air_length = (ssd - stack.exit_z) / directions[:, 2]
     water_length = depth / directions[:, 2] if through_phantom else 0.0
 
-    edges = SPECTRUM.edges
+    edges = EDGE_SPECTRUM.edges
     midpoints = 0.5 * (edges[:-1] + edges[1:])
-    weights = SPECTRUM.bin_probabilities
+    weights = EDGE_SPECTRUM.bin_probabilities
     total = np.zeros(points.shape[0], dtype=np.float64)
     for energy, weight in zip(midpoints, weights, strict=True):
         if weight <= 0.0:

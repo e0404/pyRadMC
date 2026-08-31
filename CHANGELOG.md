@@ -56,7 +56,61 @@ must be able to find out from this file whether the numbers should have moved.
   derived for a 5 mm penumbra measured 6.2 mm, with the transport-only control at 3.6 mm
   against the 3.5 mm the derivation assumed.
 
-- **Jawless dual-layer MLC commissioning example** (`examples/halcyon_commissioning_demo.py`,
+- **Jawless dual-layer head fed from a fitted virtual-source phase space**
+  (now the phase-space route of `examples/commissioning_vsm_example.py`). The commissioning example's collimator with its own source model removed: photons
+  and contaminant electrons come from an uncollimated IAEA phase space sampled from a virtual
+  source model fitted elsewhere against the same vendor beam data, scored 2 mm above the
+  proximal bank, so spectrum, focal spot, off-axis fluence and softening, head scatter and
+  contamination are all in the particles and nothing about the beam is fitted here. The file
+  is memory-mapped and scanned once (78 M records in ~6 s); each field samples only the
+  records aimed into its fan (0.98 M for a 2 x 2, 67 M for a 28 x 28), photons through the
+  head pre-solve and electrons through the attenuation route, combined by the file's own
+  counts. Same summary/curve tables as the commissioning example; the output-factor matrix is
+  deferred (the source model's monitor-backscatter term is a per-field MU factor no phase
+  space carries). No engine behaviour changes and no shipped dose moves.
+
+  Measured against the vendor workbook at the shipped statistics (40 replicates x 50 M
+  histories per field at the reference size, 3.4 h on an RTX 4070 laptop; the phase space
+  does not ship): **PDD gamma 2 %/2 mm 100 % on all seven fields**, mean |residual| over
+  3-30 cm depth 0.12 points and PDD10 within 0.35 points; crossline in-field RMS
+  0.3-1.1 % for fields >= 4 cm (1.8-2.8 % at 2 x 2, where the vendor scan is point dose);
+  widths within 1.3 mm at every field and depth with no fitted leaf offset; diagonals
+  in-field RMS 0.6-1.4 %, gamma 84-100 %. Achieved on-axis error 0.29-0.53 % per field.
+  The phase space's own contaminant electrons carry 0.06 % (2 x 2) to 4.64 % (28 x 28) of
+  the dose at 0.5 cm depth. Those figures and the tables beside them were produced at
+  `ELECTRON_HISTORY_FRACTION = 0.02`, since lowered to 0.005: the electron component's
+  own error doubles, which is under 0.1 % of the total dose and moves nothing reported
+  here, while the sweep gets most of its wall clock back (electrons take the host-side
+  attenuation route, and it was making the run CPU-bound with the GPU idle).
+
+  The statistics were raised fourfold (`REPLICATES` 10 -> 40 with `HISTORIES` scaled in
+  step) and the error fell as 1/sqrt(N) on every channel -- median improvement 2.34x on the
+  on-axis sigma, 2.16x on depth-dose noise, 2.14x on profile-core noise, against the ideal
+  2.0x. **The run is therefore transport-limited, not limited by re-use of the stored phase
+  space**, which was the open question: at 8-40x re-use of the pre-solved head, more
+  histories still buy accuracy at the full rate.
+
+  Two residuals survive that increase and are therefore the source model's, not noise.
+  The **build-up deficit is systematic**: mean |residual| over 0.4-1.0 cm is 1.09 points at
+  4x statistics against 1.11 at 1x, i.e. unmoved. And **`dmax` does not shift with field
+  size**: the simulated peak sits within 0.04 cm of one depth for every field from 2 to
+  28 cm, while the measured one shallows steadily as the aperture opens, so the model is
+  exact at 6 x 6 and 1.1 mm too deep at the largest field. Both point the same way -- shallow dose
+  that should grow with aperture and does not -- and both corroborate the source model's own
+  stated health warning, that its contamination component sits pinned at its upper bound and
+  "always wants more surface dose than it is allowed". Everything from the peak downward is
+  unaffected: the deep residual of 0.12 points is the best channel in the comparison.
+
+  Two data-handling notes recorded in the notebook, neither fixed in the library. The pyvsm
+  export writes the IAEA ``W`` flag as 0 with a ``RECORD_CONSTANT``, which
+  :func:`read_iaea_header` rejects (correctly -- ``w``'s sign rides on the particle type,
+  which is a stored-flag convention), so the notebook builds the header itself. And the
+  notebook now **refuses to transport a phase space that disagrees with its own stated
+  spectrum** by more than 50 keV in on-axis mean energy: the v46 export was 0.17 MeV from
+  its readme and truncated 0.9 MeV below its own endpoint, and that guard is what would
+  have caught it before a two-hour run rather than after.
+
+- **Jawless dual-layer MLC commissioning example** (`examples/commissioning_vsm_example.py`,
   a jupytext percent notebook that also runs as a plain script). The same beam-data session as
   `commissioning_demo.py` against a Halcyon-like head: no jaws, two stacked MLC layers of 29
   and 28 leaf pairs at 1 cm projected pitch — the leaf counts *are* the half-pitch stagger, and
@@ -258,6 +312,29 @@ must be able to find out from this file whether the numbers should have moved.
 
 ### Changed
 
+- **The commissioning examples are one example.** `examples/commissioning_demo.py` (a
+  flattened head with jaws) and `examples/halcyon_vsm_phasespace_demo.py` (a phase-space
+  variant of the jawless head) are removed, and
+  `examples/commissioning_vsm_example.py` becomes
+  **`examples/commissioning_vsm_example.py`**, which now carries both source routes: the
+  analytic model it always had, and — through `PHASESPACE`, or the
+  `HALCYON_VSM_PHASESPACE` environment variable — an IAEA phase space that replaces the
+  whole source model with already-sampled particles.
+
+  The phase-space route is the one the deleted variant contributed, and it arrives intact
+  rather than as the crude hook that stood there before: the file is memory-mapped and
+  scanned once for every record's isocentre aim point, each field draws only the records
+  aimed into its own fan, photons and electrons are separated by kind, and the stated
+  spectrum is checked against the records before anything is transported. Because the
+  photons are now kind-pure they go through the head pre-solve like the analytic ones,
+  where the old hook had to fall back to deterministic attenuation.
+
+  Nothing is lost from the surviving example and no shipped dose moves: the default route
+  is byte-for-byte the configuration that produced the previous figures. What goes is the
+  flattened-head session — jaws, TPRs and the `Sc`/`Sp` conversion — which was a second
+  worked example of the same exercise on a machine whose geometry the collimation tests
+  already cover.
+
 - **The Halcyon example carries a contaminant-electron source** (`CONTAMINANT_ENERGY`,
   `CONTAMINANT_WEIGHTS`; the example's shallow doses move, the engine does not change —
   the component re-badges an existing photon source's emissions as electrons and rides
@@ -282,7 +359,7 @@ must be able to find out from this file whether the numbers should have moved.
   electrons.
 
 - **The Halcyon example's leaves are now `tungsten_alloy`, on the literature-surrogate
-  bank positions** (`examples/halcyon_commissioning_demo.py`; the example's numbers move,
+  bank positions** (`examples/commissioning_vsm_example.py`; the example's numbers move,
   the engine's do not). Three coupled updates from checking the model against a
   literature-informed geometry specification: the leaf material changes from pure W at
   19.30 to the alloy at 18.0 (single-bank narrow-beam transmission roughly doubles to

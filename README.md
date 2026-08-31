@@ -103,26 +103,26 @@ Each script under [`examples/`](https://github.com/e0404/pyRadMC/blob/main/examp
 saves a figure beside itself that a physicist can sanity-check at a glance. They need the
 `examples` extra (matplotlib) and each runs in well under a minute.
 
-![Depth-dose curves and dose maps for a broad beam and a pencil beam](https://raw.githubusercontent.com/e0404/pyRadMC/main/examples/reference_engine_demo.png)
+![Depth-dose curves and dose maps for a broad beam and a pencil beam](https://raw.githubusercontent.com/e0404/pyRadMC/main/docs/assets/reference_engine_demo.png)
 
 `reference_engine_demo.py` transports 2 MeV photons in water on the reference backend. The broad
 beam (top) pulls away from the primary-only exponential with depth — scatter buildup — while the
 pencil beam's narrow axis (bottom) hugs the same exponential, its scatter visible instead as the
 halo in the log-scale map.
 
-![Electron buildup vs the KERMA approximation, and electron-beam depth doses](https://raw.githubusercontent.com/e0404/pyRadMC/main/examples/electron_transport_demo.png)
+![Electron buildup vs the KERMA approximation, and electron-beam depth doses](https://raw.githubusercontent.com/e0404/pyRadMC/main/docs/assets/electron_transport_demo.png)
 
 `electron_transport_demo.py` contrasts a 6 MeV photon beam with the same beam under the KERMA
 approximation — the buildup region is the difference — and shows electron-beam depth doses whose
 R50 tracks the CSDA range.
 
-![One physics source compiled three ways, and the throughput gap](https://raw.githubusercontent.com/e0404/pyRadMC/main/examples/warp_backend_demo.png)
+![One physics source compiled three ways, and the throughput gap](https://raw.githubusercontent.com/e0404/pyRadMC/main/docs/assets/warp_backend_demo.png)
 
 `warp_backend_demo.py` computes the same 6 MeV beam with the reference interpreter and with the
 Warp compilation of the *identical* physics source on CPU and CUDA. The depth-dose curves agree
 within their error bands; the bars show why the backend exists.
 
-![One Dij column, the fluence-sum identity, and a wedge plan recombined from the matrix](https://raw.githubusercontent.com/e0404/pyRadMC/main/examples/dij_demo.png)
+![One Dij column, the fluence-sum identity, and a wedge plan recombined from the matrix](https://raw.githubusercontent.com/e0404/pyRadMC/main/docs/assets/dij_demo.png)
 
 `dij_demo.py` is the point of the whole exercise: one beamlet's dose column with the truncated
 tail visible (left); the open field recombined from the columns at unit weights against an
@@ -130,46 +130,43 @@ independently simulated open field (middle — columns partition the field exact
 plan as `Dij @ weights`, no re-simulation (right), which is the loop a treatment-plan optimizer
 runs thousands of times.
 
-![Central-axis depth doses and the total scatter factor curve for a sweep of square fields](https://raw.githubusercontent.com/e0404/pyRadMC/main/examples/commissioning_demo.png)
+![Central-axis depth doses for a sweep of square fields, and the rectangular output-factor matrix](https://raw.githubusercontent.com/e0404/pyRadMC/main/docs/assets/commissioning_vsm_example.png)
 
-`commissioning_demo.py` runs a beam-data measurement session: a water phantom at a stated SSD,
-square fields set on the jaws and/or a rounded-tip MLC, and the outputs commissioning reports —
-depth doses with dmax/PDD(10)/D20-D10, tissue-phantom ratios both from genuine SAD-setup runs
-and as full curves converted from the depth doses (each checking the other), total scatter
-factors, field widths and penumbrae, and a deterministic ray-traced primary fluence in the
-measurement plane along both axes and both diagonals (`_tpr.png`, `_profiles.png` and
-`_fluence.png` beside it). Every error bar is the spread of independent replicates, so the nonlinear
-quantities carry one too. It is a [jupytext](https://jupytext.readthedocs.io/) percent
-notebook — open it as a notebook or run it as a script; the whole configuration is the
-parameters cell at the top. Read the opening cells before quoting a number: there is no
-flattening filter in the analytic source, which is exactly what the flatness column measures.
+`commissioning_vsm_example.py` runs a full beam-data commissioning session: a water phantom
+at a stated SSD, square fields, and the outputs a commissioning report carries — depth doses
+with dmax and PDD(10), lateral profiles in both principal directions at five depths, diagonals
+of the largest field, field widths and penumbrae, and a rectangular x-by-y output-factor
+matrix. Every error bar is the spread of independent replicates, so the nonlinear quantities
+carry one too. It is a [jupytext](https://jupytext.readthedocs.io/) percent notebook — open it
+as a notebook or run it as a script; the whole configuration is the parameters cell at the top.
 
-`halcyon_commissioning_demo.py` runs the same session against a very different head: **jawless**,
-with two stacked, staggered MLC layers (29 and 28 leaf pairs of 1 cm projected pitch, offset by
-half of it) doing all of the collimation in both directions, and an unflattened 6 MV FFF beam.
-Leaf ends make the inplane edge; leaf *sides* make the crossplane one, so a symmetric field
-steps in 1 cm even though each edge lands on a 0.5 cm lattice. It produces depth doses and
-lateral profiles at five depths for a sweep of square fields, diagonals of the largest, and a
-full **rectangular x-by-y output-factor matrix**. Two things it demonstrates beyond the
-flattened notebook: field widths reproduce to within 0.1 mm at the isocentre with **no fitted
-leaf-position offset**, from the rounded-end tangent geometry plus a solved radiation-edge
-correction (the tangent ray grazes the tip, so it marks full transmission rather than the 50 %
-edge — a distinction worth under 0.02 mm below a 10 x 10 field and 0.84 mm at 28 x 28); and the
-field edge
-must be taken at the profile's **inflection point** rather than at 50 % of the axis, because on
-an unflattened 28 x 28 field the classical construction reports a 40 mm penumbra that describes
-the cone rather than the collimator. Most of this machine's geometry is not published, so the
-opening cell is an explicit inventory of what is stated, what has been fitted against vendor
-beam data, and what remains a placeholder. The fitted constants ship in the configuration —
-an elliptical focal spot, a stepwise off-axis spectral-softening table, and a
-contaminant-electron source extracted from the vendor's build-up columns, each with its
-provenance and its stated limits beside it — but the fitted off-axis *fluence* table does
-not, because it is derived from the vendor's measured profiles: the shipped default is the
-invented analytic cone, and `PRIMARY_FLUENCE_FILE` is the hook for the table you fit against
-your own beam data (worth ~3 % at mid radius and more at the corner; the numbers both ways
-are in the changelog). The leaves are the W95/Ni3.5/Cu1.5 heavy alloy from the material
-registry, and a transmission check cell reads the narrow-beam single- and dual-layer
-transmission against the published figures.
+The head is **jawless with two stacked, staggered MLC layers** (29 and 28 leaf pairs of 1 cm
+projected pitch, offset by half of it), built from published data about the Varian Halcyon and
+driven by an unflattened beam. Leaf ends make the inplane edge and leaf *sides* make the
+crossplane one, so a symmetric field steps in 1 cm even though each edge lands on a 0.5 cm
+lattice. That machine was chosen because it leaves the collimator doing everything, with no
+jaw to hide behind. Two results it establishes: field widths reproduce to within 0.1 mm at the
+isocentre with **no fitted leaf-position offset**, from the rounded-end tangent geometry plus a
+solved radiation-edge correction (the tangent ray grazes the tip, so it marks full transmission
+rather than the 50 % edge — worth under 0.02 mm below a 10 x 10 field and 0.84 mm at 28 x 28);
+and on an unflattened beam the field edge must be taken at the profile's **inflection point**
+rather than at 50 % of the axis, because the classical construction reports a 40 mm penumbra
+that describes the cone rather than the collimator.
+
+**The source comes one of two ways.** By default it is the analytic model built in the notebook
+— a spectrum, a focal spot, a radial fluence, an extra-focal term and a contaminant-electron
+term — and needs no external data; most of that machine's geometry is unpublished, so the
+opening cell is an explicit inventory of what is stated, fitted, bounded or invented, and the
+fitted off-axis fluence table does *not* ship because it is derived from vendor measurements
+(`PRIMARY_FLUENCE_FILE` is the hook for one you fit against your own). Point `PHASESPACE` at an
+IAEA pair instead — or set `HALCYON_VSM_PHASESPACE` in the environment and run it unedited —
+and the whole source model arrives already sampled in the particles, leaving the notebook to
+supply only the collimator. That is the interesting comparison: a virtual source model fitted
+through some other code's simplified collimator, pushed through an explicit one. Before
+transporting anything that route rebuilds the model's *stated* spectrum and refuses the file if
+the records disagree by more than 50 keV in on-axis mean energy, because a phase space that
+contradicts its own documentation is a wasted run at best — a check that has already earned its
+place. No phase space ships with the repository.
 
 The rest: `tabulated_demo.py` (EPDL/EEDL cross-sections), `materials_demo.py` (bone/lung
 heterogeneity), `ct_demo.py` (dose on a CT), `dose_grid_demo.py` (decoupled scoring grid and

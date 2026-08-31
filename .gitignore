@@ -29,11 +29,13 @@ site/
 *.xlsx
 examples/halcyon_primary_fluence.dat
 
-# Long-format curve dumps from the commissioning examples: ~0.5-1 MB each, derived
-# from the committed notebooks, and read by local comparison scripts rather than by a
-# reader of the repository. The summary and output-factor tables beside them do ship.
-examples/*_curves.csv
-examples/commissioning_demo.csv
+# Everything the examples render. They are regenerable by definition -- that is what an
+# example is -- and tracking them cost ~5 MB of binaries that no reader of the repository
+# opens from here, churned on every re-run, and went stale against the scripts that write
+# them. The figures the README embeds live in docs/assets/ instead, which is where a
+# documentation asset belongs; an example's own output is not one.
+examples/*.png
+examples/*.csv
 
 # Local scratch: comparison scripts, sweeps and figures that need the vendor workbook,
 # plus the run logs they were driven from. Not reproducible here, so not tracked.
