@@ -11,7 +11,7 @@ dist/
 .benchmarks/
 
 # Compiled tabulated cross-section tables: derived from the (uncommitted, user-side)
-# EPICS libraries by pyRadMC.data.tabulated.build, so not tracked.
+# EPICS libraries by pyradmc.data.tabulated.build, so not tracked.
 *.npz
 
 # Phase-space demo outputs derive from an external (proprietary, machine-local)

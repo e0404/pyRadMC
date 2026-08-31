@@ -13,20 +13,20 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from pyRadMC.data.materials import AVOGADRO
-from pyRadMC.data.tabulated.eedl import (
+from pyradmc.data.materials import AVOGADRO
+from pyradmc.data.tabulated.eedl import (
     element_collision_stopping,
     element_radiative_stopping,
     element_scattering_power,
     material_radiative_stopping,
     material_scattering_power,
 )
-from pyRadMC.data.tabulated.endf import (
+from pyradmc.data.tabulated.endf import (
     read_mf26_angular_distributions,
     read_mf26_energy_transfer,
     read_mf26_spectra,
 )
-from pyRadMC.data.tabulated.epdl import STANDARD_ATOMIC_WEIGHT, mass_fractions_from_formula
+from pyradmc.data.tabulated.epdl import STANDARD_ATOMIC_WEIGHT, mass_fractions_from_formula
 
 
 def _line(fields: list[str], mat: int, mf: int, mt: int, num: int) -> str:

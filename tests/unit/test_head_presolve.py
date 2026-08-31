@@ -12,12 +12,12 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from pyRadMC.data.analytic import AnalyticCrossSections
-from pyRadMC.data.materials import WATER
-from pyRadMC.geometry.collimation import BeamFrame, BeamLimitingStack, JawPair
-from pyRadMC.geometry.head import AirColumn, presolve_head
-from pyRadMC.geometry.source import GaussianSpotBeamSource
-from pyRadMC.geometry.spectrum import Spectrum
+from pyradmc.data.analytic import AnalyticCrossSections
+from pyradmc.data.materials import WATER
+from pyradmc.geometry.collimation import BeamFrame, BeamLimitingStack, JawPair
+from pyradmc.geometry.head import AirColumn, presolve_head
+from pyradmc.geometry.source import GaussianSpotBeamSource
+from pyradmc.geometry.spectrum import Spectrum
 from tests.conftest import SEED
 
 SPECTRUM = Spectrum((0.5, 1.0, 2.0, 4.0, 6.0), (1.0, 3.0, 4.0, 2.0))
@@ -300,7 +300,7 @@ def _stored_columns(result: object) -> dict[str, np.ndarray]:
 class TestWeightFloorRoulette:
     def test_roulette_preserves_expected_weight(self) -> None:
         """Fair game: the summed weight is unchanged in expectation."""
-        from pyRadMC.geometry.head import _roulette_below
+        from pyradmc.geometry.head import _roulette_below
 
         generator = np.random.Generator(np.random.PCG64(SEED))
         weights = np.random.default_rng(1).uniform(0.0, 2.0e-3, 200_000)
@@ -311,7 +311,7 @@ class TestWeightFloorRoulette:
         assert surviving.sum() < weights.size  # some were killed
 
     def test_zero_floor_disables_the_roulette(self) -> None:
-        from pyRadMC.geometry.head import _roulette_below
+        from pyradmc.geometry.head import _roulette_below
 
         generator = np.random.Generator(np.random.PCG64(SEED))
         weights = np.random.default_rng(2).uniform(0.0, 2.0e-3, 1_000)

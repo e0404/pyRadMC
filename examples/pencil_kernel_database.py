@@ -24,7 +24,7 @@ Output
 energy. The scorer divides each bin's energy by that bin's own annulus mass
 ``rho * pi * (r_out^2 - r_in^2) * dz``, so the radial shape is the physical dose
 profile and does not carry the ``2*pi*r*dr`` growth of the shell volume. Multiply by
-``pyRadMC.GY_PER_MEV_PER_G`` for Gy per history.
+``pyradmc.GY_PER_MEV_PER_G`` for Gy per history.
 
 ``r_bounds_cm`` and ``z_bounds_cm`` are bin **edges** (lengths ``nR+1`` and ``nZ+1``),
 not centres.
@@ -53,11 +53,11 @@ from pathlib import Path
 
 import numpy as np
 
-from pyRadMC import __version__
-from pyRadMC.data.analytic import AnalyticCrossSections
-from pyRadMC.geometry.grid import VoxelGrid
-from pyRadMC.geometry.source import PencilBeamSource
-from pyRadMC.scoring.cylinder import CylindricalScoringGrid, geometric_edges, graded_edges
+from pyradmc import __version__
+from pyradmc.data.analytic import AnalyticCrossSections
+from pyradmc.geometry.grid import VoxelGrid
+from pyradmc.geometry.source import PencilBeamSource
+from pyradmc.scoring.cylinder import CylindricalScoringGrid, geometric_edges, graded_edges
 
 logger = logging.getLogger("pencil_kernel_database")
 
@@ -228,7 +228,7 @@ def main() -> None:
         args.histories,
     )
 
-    from pyRadMC.backends.warp.engine import WarpEngine
+    from pyradmc.backends.warp.engine import WarpEngine
 
     engine = WarpEngine(
         grid=grid,
@@ -294,7 +294,7 @@ def main() -> None:
         density_g_cm3=np.asarray(WATER_DENSITY),
         n_histories_per_energy=np.asarray(args.histories),
         provenance=np.asarray(
-            f"pyRadMC {__version__} warp/{args.device} seed={SEED} "
+            f"pyradmc {__version__} warp/{args.device} seed={SEED} "
             f"batches={BATCHES} analytic cross-sections "
             f"deposit_resolution_cm={cylinder.deposit_resolution_cm:.4g}"
         ),

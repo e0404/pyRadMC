@@ -12,9 +12,9 @@ import numpy as np
 import pytest
 from scipy import stats
 
-from pyRadMC.geometry.head import _sample_compton_ratios
-from pyRadMC.physics.compton import compton_cos_theta, sample_compton_energy_ratio
-from pyRadMC.rng.host import HostRNG
+from pyradmc.geometry.head import _sample_compton_ratios
+from pyradmc.physics.compton import compton_cos_theta, sample_compton_energy_ratio
+from pyradmc.rng.host import HostRNG
 from tests.conftest import SEED
 
 
@@ -57,7 +57,7 @@ def test_ratios_respect_the_kinematic_range() -> None:
 
 def test_cos_theta_is_the_scalar_compton_relation() -> None:
     """The vectorized angle mapping equals the scalar oracle value for value."""
-    from pyRadMC.geometry.head import _compton_cos_thetas
+    from pyradmc.geometry.head import _compton_cos_thetas
 
     energies = np.random.default_rng(4).uniform(0.3, 8.0, 512)
     ratios = _sample_compton_ratios(energies, np.random.Generator(np.random.PCG64(SEED)))

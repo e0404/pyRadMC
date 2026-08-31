@@ -21,12 +21,12 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from pyRadMC.data.analytic import AnalyticCrossSections
-from pyRadMC.data.materials import WATER
-from pyRadMC.geometry.collimation import MLC, BeamFrame, BeamLimitingStack, JawPair
-from pyRadMC.geometry.head import AirColumn, presolve_head
-from pyRadMC.geometry.source import GaussianSpotBeamSource
-from pyRadMC.geometry.spectrum import Spectrum
+from pyradmc.data.analytic import AnalyticCrossSections
+from pyradmc.data.materials import WATER
+from pyradmc.geometry.collimation import MLC, BeamFrame, BeamLimitingStack, JawPair
+from pyradmc.geometry.head import AirColumn, presolve_head
+from pyradmc.geometry.source import GaussianSpotBeamSource
+from pyradmc.geometry.spectrum import Spectrum
 from tests.conftest import SEED
 
 wp = pytest.importorskip("warp", reason="warp-lang optional dependency not installed")
@@ -109,7 +109,7 @@ def _totals(phase_space) -> dict[str, float]:
 @pytest.mark.parametrize("device", DEVICES)
 def test_attenuation_mode_matches_host_to_float32(device: str) -> None:
     _require(device)
-    from pyRadMC.backends.warp.presolve import presolve_head_device
+    from pyradmc.backends.warp.presolve import presolve_head_device
 
     kwargs = dict(
         cross_sections=AnalyticCrossSections(),
@@ -131,7 +131,7 @@ def test_attenuation_mode_matches_host_to_float32(device: str) -> None:
 @pytest.mark.parametrize("device", DEVICES)
 def test_first_compton_totals_match_host_statistically(device: str) -> None:
     _require(device)
-    from pyRadMC.backends.warp.presolve import presolve_head_device
+    from pyradmc.backends.warp.presolve import presolve_head_device
 
     kwargs = dict(
         cross_sections=AnalyticCrossSections(),
@@ -155,7 +155,7 @@ def test_first_compton_totals_match_host_statistically(device: str) -> None:
 @pytest.mark.parametrize("device", DEVICES)
 def test_air_column_adds_contaminant_electrons_matching_host(device: str) -> None:
     _require(device)
-    from pyRadMC.backends.warp.presolve import presolve_head_device
+    from pyradmc.backends.warp.presolve import presolve_head_device
 
     kwargs = dict(
         cross_sections=AnalyticCrossSections(),
@@ -184,7 +184,7 @@ def test_return_buffer_exposes_the_same_normalized_population(device: str) -> No
     count, same summed weight and weight-energy — so the two paths are interchangeable.
     """
     _require(device)
-    from pyRadMC.backends.warp.presolve import presolve_head_device
+    from pyradmc.backends.warp.presolve import presolve_head_device
 
     phase_space, buf, count = presolve_head_device(
         _source(),
@@ -212,7 +212,7 @@ def test_return_buffer_exposes_the_same_normalized_population(device: str) -> No
 
 
 def test_device_presolve_requires_a_stack() -> None:
-    from pyRadMC.backends.warp.presolve import presolve_head_device
+    from pyradmc.backends.warp.presolve import presolve_head_device
 
     with pytest.raises(ValueError, match="requires a stack"):
         presolve_head_device(

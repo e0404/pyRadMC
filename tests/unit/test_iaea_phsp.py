@@ -26,7 +26,7 @@ from pathlib import Path
 
 import pytest
 
-from pyRadMC.geometry.phasespace import IAEAPhaseSpace, read_iaea_header
+from pyradmc.geometry.phasespace import IAEAPhaseSpace, read_iaea_header
 
 # IAEA particle codes.
 PHOTON, ELECTRON, POSITRON = 1, 2, 3

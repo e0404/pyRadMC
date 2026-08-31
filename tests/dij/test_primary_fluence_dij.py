@@ -14,13 +14,13 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from pyRadMC.backends.ref.engine import ReferenceEngine
-from pyRadMC.data.analytic import AnalyticCrossSections
-from pyRadMC.geometry.fluence import RadialFluence
-from pyRadMC.geometry.grid import VoxelGrid
-from pyRadMC.geometry.source import GaussianSpotBeamletSource, PrimaryFluenceBeamletSource
-from pyRadMC.geometry.spectrum import Spectrum
-from pyRadMC.rng.host import HostRNG
+from pyradmc.backends.ref.engine import ReferenceEngine
+from pyradmc.data.analytic import AnalyticCrossSections
+from pyradmc.geometry.fluence import RadialFluence
+from pyradmc.geometry.grid import VoxelGrid
+from pyradmc.geometry.source import GaussianSpotBeamletSource, PrimaryFluenceBeamletSource
+from pyradmc.geometry.spectrum import Spectrum
+from pyradmc.rng.host import HostRNG
 from tests.conftest import SEED
 
 SPECTRUM = Spectrum((0.5, 1.0, 2.0, 4.0, 6.0), (1.0, 3.0, 4.0, 2.0))

@@ -2,17 +2,17 @@
 
 The BLD workstream end to end: a Varian-type 6 MV spectrum (Ali & Rogers 2012)
 from a 1 mm Gaussian focal spot is emitted on a plane above the head
-(:class:`~pyRadMC.geometry.source.GaussianSpotBeamSource`), collimated by two jaw
+(:class:`~pyradmc.geometry.source.GaussianSpotBeamSource`), collimated by two jaw
 pairs and a 10-pair rounded-tip MLC set to a staircase field with one fully
 closed pair, and transported into a water phantom two ways:
 
-* the **deterministic wrapper** (:class:`~pyRadMC.geometry.collimation.
+* the **deterministic wrapper** (:class:`~pyradmc.geometry.collimation.
   CollimatedSource`) — Beer-Lambert weights, the Dij-baseline configuration;
 * the **head pre-solve** (``first_compton``) — an exit-plane phase space
   carrying collimator scatter and air-generated contaminant electrons. On a Warp
   engine it runs on the device and is transported with no copy back
-  (:func:`~pyRadMC.backends.warp.presolve.presolve_head_device`); on the reference
-  engine it runs on the host (:func:`~pyRadMC.geometry.head.presolve_head`).
+  (:func:`~pyradmc.backends.warp.presolve.presolve_head_device`); on the reference
+  engine it runs on the host (:func:`~pyradmc.geometry.head.presolve_head`).
 
 The figure reads at a glance: the beam's-eye-view transmission map shows the
 staircase aperture, the rounded tips and the closed-pair stripe; the inline
@@ -39,8 +39,8 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 
-from pyRadMC.data.materials import AIR, TUNGSTEN, WATER
-from pyRadMC.geometry.collimation import (
+from pyradmc.data.materials import AIR, TUNGSTEN, WATER
+from pyradmc.geometry.collimation import (
     MLC,
     BeamFrame,
     BeamLimitingStack,
@@ -48,11 +48,11 @@ from pyRadMC.geometry.collimation import (
     JawPair,
     project_between_planes,
 )
-from pyRadMC.geometry.grid import VoxelGrid
-from pyRadMC.geometry.head import AirColumn, presolve_head
-from pyRadMC.geometry.source import GaussianSpotBeamSource
-from pyRadMC.geometry.spectrum import ali_rogers_mv
-from pyRadMC.rng.host import HostRNG
+from pyradmc.geometry.grid import VoxelGrid
+from pyradmc.geometry.head import AirColumn, presolve_head
+from pyradmc.geometry.source import GaussianSpotBeamSource
+from pyradmc.geometry.spectrum import ali_rogers_mv
+from pyradmc.rng.host import HostRNG
 
 BEAM = "varian-6mv"
 SAD_CM = 100.0
@@ -128,9 +128,9 @@ def make_stack(material: int, density: float) -> BeamLimitingStack:
 def make_cross_sections(material_choice: str, grid: VoxelGrid):
     """Compiled EPICS table for tungsten devices, or the analytic water source."""
     if material_choice == "tungsten":
-        from pyRadMC.data.tabulated.build import download_library
-        from pyRadMC.data.tabulated.precompile import compile_materials
-        from pyRadMC.data.tabulated.source import TabulatedCrossSections
+        from pyradmc.data.tabulated.build import download_library
+        from pyradmc.data.tabulated.precompile import compile_materials
+        from pyradmc.data.tabulated.source import TabulatedCrossSections
 
         print("compiling the tabulated table (EPICS cache/download) ...")
         epdl = download_library("epdl").read_text(encoding="latin-1")
@@ -138,7 +138,7 @@ def make_cross_sections(material_choice: str, grid: VoxelGrid):
         data = compile_materials(epdl, eedl, e_max=7.0)
         xs = TabulatedCrossSections(data, geometry_densities=grid.max_density_by_material())
         return xs, TUNGSTEN, 19.30, AIR
-    from pyRadMC.data.analytic import AnalyticCrossSections
+    from pyradmc.data.analytic import AnalyticCrossSections
 
     xs = AnalyticCrossSections(geometry_densities=grid.max_density_by_material())
     return xs, WATER, 1.0, WATER
@@ -150,14 +150,14 @@ def make_engine(backend: str, grid: VoxelGrid, xs):
         try:
             import warp as wp
 
-            from pyRadMC.backends.warp.engine import WarpEngine
+            from pyradmc.backends.warp.engine import WarpEngine
 
             device = "cuda:0" if wp.is_cuda_available() else "cpu"
             return WarpEngine(grid=grid, cross_sections=xs, device=device), f"warp:{device}"
         except Exception:
             if backend == "warp":
                 raise
-    from pyRadMC.backends.ref.engine import ReferenceEngine
+    from pyradmc.backends.ref.engine import ReferenceEngine
 
     return ReferenceEngine(grid=grid, cross_sections=xs, rng=HostRNG()), "ref"
 
@@ -225,7 +225,7 @@ def main() -> None:
     t0 = time.perf_counter()
     if device is not None:
         # The Warp device pre-solve, transported with no copy back (DevicePhaseSpace).
-        from pyRadMC.backends.warp.presolve import presolve_head_device
+        from pyradmc.backends.warp.presolve import presolve_head_device
 
         phsp = presolve_head_device(
             source, device=device, return_device_source=True, **presolve_kwargs

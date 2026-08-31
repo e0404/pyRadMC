@@ -27,14 +27,14 @@ import typing
 import numpy as np
 import pytest
 
-from pyRadMC import ECUT_MEV, PCUT_MEV
-from pyRadMC.data.analytic import AnalyticCrossSections
-from pyRadMC.data.goudsmit_saunderson import (
+from pyradmc import ECUT_MEV, PCUT_MEV
+from pyradmc.data.analytic import AnalyticCrossSections
+from pyradmc.data.goudsmit_saunderson import (
     build_gs_grid,
     gs_scaled_deflection_table,
     gs_window_from_tables,
 )
-from pyRadMC.data.materials import WATER
+from pyradmc.data.materials import WATER
 
 E_MAX = 21.0
 
@@ -131,7 +131,7 @@ class TestGridConstruction:
         knob rather than a reproducibility hazard (AGENTS.md 2.3: within one
         host build, bit-equality is the right oracle).
         """
-        import pyRadMC.data.goudsmit_saunderson as gs
+        import pyradmc.data.goudsmit_saunderson as gs
 
         serial = build_gs_grid(LOG_ETA, LOG_ETA, THETA2_MAX, theta2_min=THETA2_MIN, max_workers=1)
         gs._grid_cache.clear()
@@ -159,7 +159,7 @@ class TestGridConstruction:
         builder's defaults or the reference sampler's constants breaks here: the
         two must move together or the backends stop sampling the same tables.
         """
-        from pyRadMC.data.interface import _GS_BINS_PER_LOG, _GS_TABLE_NODES, _GS_THETA2_MIN
+        from pyradmc.data.interface import _GS_BINS_PER_LOG, _GS_TABLE_NODES, _GS_THETA2_MIN
 
         assert small_grid.bins_per_log == _GS_BINS_PER_LOG == 4.0
         assert small_grid.n_u == _GS_TABLE_NODES == 512
@@ -186,13 +186,13 @@ class TestDiskCache:
 
     @staticmethod
     def _fresh(monkeypatch, tmp_path, **kwargs):
-        import pyRadMC.data.goudsmit_saunderson as gs
+        import pyradmc.data.goudsmit_saunderson as gs
 
         gs._grid_cache.clear()
         return build_gs_grid(cache_dir=tmp_path, **kwargs)
 
     def test_a_second_process_loads_without_building(self, tmp_path, monkeypatch) -> None:
-        import pyRadMC.data.goudsmit_saunderson as gs
+        import pyradmc.data.goudsmit_saunderson as gs
 
         first = self._fresh(monkeypatch, tmp_path, **self.WINDOW)
 
@@ -207,7 +207,7 @@ class TestDiskCache:
 
     def test_a_wider_window_extends_incrementally(self, tmp_path, monkeypatch) -> None:
         """Old nodes are reused bit-for-bit; only genuinely new cells build."""
-        import pyRadMC.data.goudsmit_saunderson as gs
+        import pyradmc.data.goudsmit_saunderson as gs
 
         first = self._fresh(monkeypatch, tmp_path, **self.WINDOW)
 
@@ -237,7 +237,7 @@ class TestDiskCache:
     def test_a_contained_request_returns_the_stored_superset(self, tmp_path, monkeypatch) -> None:
         """A narrower later request must not shrink or rebuild: the superset works
         transparently through the window offsets the samplers carry."""
-        import pyRadMC.data.goudsmit_saunderson as gs
+        import pyradmc.data.goudsmit_saunderson as gs
 
         wide = self._fresh(
             monkeypatch,
@@ -257,7 +257,7 @@ class TestDiskCache:
 
     def test_a_construction_version_bump_invalidates(self, tmp_path, monkeypatch) -> None:
         """The one legitimate rebuild trigger: the construction algorithm moved."""
-        import pyRadMC.data.goudsmit_saunderson as gs
+        import pyradmc.data.goudsmit_saunderson as gs
 
         self._fresh(monkeypatch, tmp_path, **self.WINDOW)
         monkeypatch.setattr(gs, "_GS_GRID_CACHE_VERSION", 999_999)
@@ -267,7 +267,7 @@ class TestDiskCache:
         assert len(list(tmp_path.glob("*.npz"))) == 2, "old and new versions are distinct files"
 
     def test_a_corrupt_cache_file_rebuilds(self, tmp_path, monkeypatch) -> None:
-        import pyRadMC.data.goudsmit_saunderson as gs
+        import pyradmc.data.goudsmit_saunderson as gs
 
         self._fresh(monkeypatch, tmp_path, **self.WINDOW)
         (cache_file,) = tmp_path.glob("*.npz")

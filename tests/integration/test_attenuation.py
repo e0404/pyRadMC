@@ -12,13 +12,13 @@ import math
 import numpy as np
 from scipy import stats
 
-from pyRadMC import PCUT_MEV
-from pyRadMC.data.analytic import AnalyticCrossSections
-from pyRadMC.data.materials import WATER
-from pyRadMC.geometry.grid import VoxelGrid
-from pyRadMC.geometry.source import PencilBeamSource
-from pyRadMC.rng.host import HostRNG
-from pyRadMC.transport.photon import transport_photon
+from pyradmc import PCUT_MEV
+from pyradmc.data.analytic import AnalyticCrossSections
+from pyradmc.data.materials import WATER
+from pyradmc.geometry.grid import VoxelGrid
+from pyradmc.geometry.source import PencilBeamSource
+from pyradmc.rng.host import HostRNG
+from pyradmc.transport.photon import transport_photon
 from tests.conftest import SEED
 
 ENERGY_MEV = 2.0

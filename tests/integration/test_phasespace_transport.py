@@ -13,12 +13,12 @@ from pathlib import Path
 
 import pytest
 
-from pyRadMC import ELECTRON_MASS_MEV
-from pyRadMC.backends.ref.engine import ReferenceEngine
-from pyRadMC.data.analytic import AnalyticCrossSections
-from pyRadMC.geometry.grid import VoxelGrid
-from pyRadMC.geometry.phasespace import PhaseSpaceSource
-from pyRadMC.rng.host import HostRNG
+from pyradmc import ELECTRON_MASS_MEV
+from pyradmc.backends.ref.engine import ReferenceEngine
+from pyradmc.data.analytic import AnalyticCrossSections
+from pyradmc.geometry.grid import VoxelGrid
+from pyradmc.geometry.phasespace import PhaseSpaceSource
+from pyradmc.rng.host import HostRNG
 from tests.conftest import SEED
 from tests.phsp_fixtures import Rec, write_phsp
 

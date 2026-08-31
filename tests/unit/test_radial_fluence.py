@@ -1,7 +1,7 @@
 """The radial primary-fluence table: interpolation, extrapolation, validation.
 
-:class:`~pyRadMC.geometry.fluence.RadialFluence` is source *data* in the same
-sense as :class:`~pyRadMC.geometry.spectrum.Spectrum` — what the machine emits,
+:class:`~pyradmc.geometry.fluence.RadialFluence` is source *data* in the same
+sense as :class:`~pyradmc.geometry.spectrum.Spectrum` — what the machine emits,
 measured once at commissioning — so it is validated at construction and read by
 pure interpolation afterwards.
 
@@ -17,7 +17,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from pyRadMC.geometry.fluence import RadialFluence
+from pyradmc.geometry.fluence import RadialFluence
 
 # A miniature stand-in for a measured curve: flat horn, then a roll-off to zero.
 RADII = (0.0, 1.0, 2.0, 3.0, 4.0)

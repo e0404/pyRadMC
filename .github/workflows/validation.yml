@@ -34,8 +34,8 @@ jobs:
         id: epics-cache
         uses: actions/cache@v4
         with:
-          path: ~/.cache/pyRadMC/epics
-          key: epics-2023-${{ hashFiles('pyRadMC/data/tabulated/build.py') }}
+          path: ~/.cache/pyradmc/epics
+          key: epics-2023-${{ hashFiles('pyradmc/data/tabulated/build.py') }}
 
       # download_library verifies every file against its pinned SHA-256 and fails
       # closed. This is also what exercises the pins themselves in CI: a silent upstream
@@ -43,13 +43,13 @@ jobs:
       - name: fetch and verify EPICS libraries
         run: |
           python -c "
-          from pyRadMC.data.tabulated import build
+          from pyradmc.data.tabulated import build
           for which in ('epdl', 'eedl'):
               print(which, '->', build.download_library(which))
           "
 
       - name: run the validation tier
         env:
-          PYRADMC_EPDL_PATH: ~/.cache/pyRadMC/epics/EPDL2023.ALL
-          PYRADMC_EEDL_PATH: ~/.cache/pyRadMC/epics/EEDL2023.ALL
+          PYRADMC_EPDL_PATH: ~/.cache/pyradmc/epics/EPDL2023.ALL
+          PYRADMC_EEDL_PATH: ~/.cache/pyradmc/epics/EEDL2023.ALL
         run: pytest -m validation -q

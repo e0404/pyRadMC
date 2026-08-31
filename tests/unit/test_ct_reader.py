@@ -4,7 +4,7 @@ The image-reading half: SimpleITK indexes (z, y, x) and works in mm with a physi
 origin at the first voxel's centre, while the engine grid is (x, y, z) in cm with the
 origin at voxel (0,0,0)'s lower corner. These tests pin that translation on synthetic
 in-memory images (no committed CT data), plus a temp-file round trip for ``read_ct``.
-Needs the optional ``pyRadMC[ct]`` extra.
+Needs the optional ``pyradmc[ct]`` extra.
 """
 
 from __future__ import annotations
@@ -14,12 +14,12 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-sitk = pytest.importorskip("SimpleITK", reason="CT adapter needs the pyRadMC[ct] extra")
+sitk = pytest.importorskip("SimpleITK", reason="CT adapter needs the pyradmc[ct] extra")
 
 pytestmark = pytest.mark.ct
 
-from pyRadMC.adapters.ct import grid_from_image, read_ct  # noqa: E402
-from pyRadMC.data.materials import AIR, CORTICAL_BONE, WATER  # noqa: E402
+from pyradmc.adapters.ct import grid_from_image, read_ct  # noqa: E402
+from pyradmc.data.materials import AIR, CORTICAL_BONE, WATER  # noqa: E402
 
 
 def _image_from_hu(

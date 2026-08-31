@@ -27,13 +27,13 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from pyRadMC.data.analytic import AnalyticCrossSections
-from pyRadMC.data.materials import WATER
-from pyRadMC.data.tabulated.eedl import (
+from pyradmc.data.analytic import AnalyticCrossSections
+from pyradmc.data.materials import WATER
+from pyradmc.data.tabulated.eedl import (
     element_scattering_power,
     material_scattering_power,
 )
-from pyRadMC.data.tabulated.epdl import mass_fractions_from_formula
+from pyradmc.data.tabulated.epdl import mass_fractions_from_formula
 
 # Consistency band (EEDL / Highland): wide enough that it certifies convention and
 # magnitude, tight enough that a factor-2 moment error or a wrong mixing fails it.

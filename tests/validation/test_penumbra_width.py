@@ -33,12 +33,12 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from pyRadMC.data.materials import TUNGSTEN
-from pyRadMC.geometry.collimation import BeamFrame, BeamLimitingStack, JawPair
-from pyRadMC.geometry.grid import VoxelGrid
-from pyRadMC.geometry.head import presolve_head
-from pyRadMC.geometry.source import GaussianSpotBeamSource
-from pyRadMC.geometry.spectrum import ali_rogers_mv
+from pyradmc.data.materials import TUNGSTEN
+from pyradmc.geometry.collimation import BeamFrame, BeamLimitingStack, JawPair
+from pyradmc.geometry.grid import VoxelGrid
+from pyradmc.geometry.head import presolve_head
+from pyradmc.geometry.source import GaussianSpotBeamSource
+from pyradmc.geometry.spectrum import ali_rogers_mv
 from tests.conftest import SEED
 
 pytestmark = [
@@ -57,7 +57,7 @@ def _compiled_data():
     eedl = os.environ.get("PYRADMC_EEDL_PATH")
     if not (epdl and Path(epdl).is_file() and eedl and Path(eedl).is_file()):
         pytest.skip("set PYRADMC_EPDL_PATH and PYRADMC_EEDL_PATH to run this validation")
-    from pyRadMC.data.tabulated.precompile import compile_materials
+    from pyradmc.data.tabulated.precompile import compile_materials
 
     return compile_materials(
         Path(epdl).read_text(encoding="latin-1"),
@@ -68,7 +68,7 @@ def _compiled_data():
 
 def test_80_20_penumbra_width_is_physical() -> None:
     pytest.importorskip("warp", reason="warp-lang optional dependency not installed")
-    from pyRadMC.backends.warp.engine import WarpEngine
+    from pyradmc.backends.warp.engine import WarpEngine
 
     # Phantom: 24 cm crossline at 2 mm, 10 cm inline at 1 cm, 16 cm depth at 5 mm;
     # surface at z = 0, beam axis through its center.
@@ -104,7 +104,7 @@ def test_80_20_penumbra_width_is_physical() -> None:
         sigma_u=0.1,  # 1 mm focal spot
         sigma_v=0.1,
     )
-    from pyRadMC.data.tabulated.source import TabulatedCrossSections
+    from pyradmc.data.tabulated.source import TabulatedCrossSections
 
     data = _compiled_data()
     xs = TabulatedCrossSections(data, geometry_densities=grid.max_density_by_material())

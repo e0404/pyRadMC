@@ -15,8 +15,8 @@ import math
 
 import pytest
 
-from pyRadMC.geometry.source import BeamletGridSource, ParallelBeamSource
-from pyRadMC.rng.host import HostRNG
+from pyradmc.geometry.source import BeamletGridSource, ParallelBeamSource
+from pyradmc.rng.host import HostRNG
 from tests.conftest import SEED
 
 ENERGY = 6.0

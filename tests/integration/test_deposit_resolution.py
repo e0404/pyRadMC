@@ -20,12 +20,12 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from pyRadMC.backends.ref.engine import ReferenceEngine
-from pyRadMC.data.analytic import AnalyticCrossSections
-from pyRadMC.geometry.grid import VoxelGrid
-from pyRadMC.geometry.source import PencilBeamSource
-from pyRadMC.rng.host import HostRNG
-from pyRadMC.scoring.cylinder import CylindricalScoringGrid, geometric_edges, graded_edges
+from pyradmc.backends.ref.engine import ReferenceEngine
+from pyradmc.data.analytic import AnalyticCrossSections
+from pyradmc.geometry.grid import VoxelGrid
+from pyradmc.geometry.source import PencilBeamSource
+from pyradmc.rng.host import HostRNG
+from pyradmc.scoring.cylinder import CylindricalScoringGrid, geometric_edges, graded_edges
 from tests.conftest import SEED
 
 VOXEL = 0.25
@@ -167,7 +167,7 @@ def device(request) -> str:
 
 
 def _run_warp(device: str, resolution, n=200_000):
-    from pyRadMC.backends.warp.engine import WarpEngine
+    from pyradmc.backends.warp.engine import WarpEngine
 
     grid = _grid()
     cyl = _cylinder(grid)

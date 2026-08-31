@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import pytest
 
-from pyRadMC.data.materials import (
+from pyradmc.data.materials import (
     MATERIALS,
     STANDARD_ATOMIC_WEIGHT,
     WATER,
@@ -47,7 +47,7 @@ class TestAtomicWeights:
 
     def test_epdl_reexport_is_the_same_table(self) -> None:
         """The EPDL parser's table is this table, not a drifting copy."""
-        from pyRadMC.data.tabulated import epdl
+        from pyradmc.data.tabulated import epdl
 
         assert epdl.STANDARD_ATOMIC_WEIGHT is STANDARD_ATOMIC_WEIGHT
 
@@ -102,7 +102,7 @@ class TestWaterEntry:
 
     def test_composition_matches_h2o_formula(self) -> None:
         """Water's stored composition is exactly the H2O formula mass fractions."""
-        from pyRadMC.data.tabulated.epdl import mass_fractions_from_formula
+        from pyradmc.data.tabulated.epdl import mass_fractions_from_formula
 
         expected = mass_fractions_from_formula({1: 2, 8: 1})
         stored = dict(MATERIALS[WATER].composition)

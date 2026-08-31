@@ -44,8 +44,8 @@ class TestFirstMomentAnchoring:
         fails, the L1 transport comparison stops measuring the angular model and
         starts measuring table resolution.
         """
-        from pyRadMC.data.analytic import AnalyticCrossSections
-        from pyRadMC.data.materials import WATER
+        from pyradmc.data.analytic import AnalyticCrossSections
+        from pyradmc.data.materials import WATER
 
         source = AnalyticCrossSections()
         n = 100_000
@@ -61,8 +61,8 @@ class TestFirstMomentAnchoring:
     def test_deflection_is_forward_for_a_vanishing_step(self) -> None:
         """A zero-length step cannot deflect; the sampler must not consume the
         table (or a uniform) to say so."""
-        from pyRadMC.data.analytic import AnalyticCrossSections
-        from pyRadMC.data.materials import WATER
+        from pyradmc.data.analytic import AnalyticCrossSections
+        from pyradmc.data.materials import WATER
 
         rng = np.random.default_rng(SEED)
         assert AnalyticCrossSections().sample_gs_cos_theta(0.0, 1.0, WATER, rng) == 1.0
@@ -83,9 +83,9 @@ class TestFirstMomentAnchoring:
         bias against the true distribution is the anchor itself,
         ``1 - e^{-theta2/2} <= ~1e-12``, far below every oracle in the suite.
         """
-        from pyRadMC.data.analytic import AnalyticCrossSections
-        from pyRadMC.data.goudsmit_saunderson import gs_scaled_deflection_table
-        from pyRadMC.data.materials import WATER
+        from pyradmc.data.analytic import AnalyticCrossSections
+        from pyradmc.data.goudsmit_saunderson import gs_scaled_deflection_table
+        from pyradmc.data.materials import WATER
 
         source = AnalyticCrossSections()
         eta = source.elastic_screening(1.0, WATER)
@@ -126,10 +126,10 @@ class TestBinningFidelity:
         """
         from scipy import stats
 
-        import pyRadMC.data.goudsmit_saunderson as gs
-        from pyRadMC.data.analytic import AnalyticCrossSections
-        from pyRadMC.data.goudsmit_saunderson import gs_scaled_deflection_table
-        from pyRadMC.data.materials import WATER
+        import pyradmc.data.goudsmit_saunderson as gs
+        from pyradmc.data.analytic import AnalyticCrossSections
+        from pyradmc.data.goudsmit_saunderson import gs_scaled_deflection_table
+        from pyradmc.data.materials import WATER
 
         # Build statistics, not a physics parameter: see the docstring. The
         # default is set for interactive use of the reference backend; tables
@@ -167,7 +167,7 @@ class TestGridSampler:
 
     ``sample_gs_cos_theta_grid`` is the flat-rectangle face of
     ``sample_gs_cos_theta_bilinear``: it selects the four bracketing rows from
-    an eagerly built grid (:func:`pyRadMC.data.goudsmit_saunderson.build_gs_grid`)
+    an eagerly built grid (:func:`pyradmc.data.goudsmit_saunderson.build_gs_grid`)
     and delegates the blend to the very same function. Pinned host-side with
     paired RNG streams and bit-equality — the two are one code path, so any
     difference is an indexing defect — and the device port inherits the
@@ -194,7 +194,7 @@ class TestGridSampler:
         return 1.0 + tilt[..., None] * (u - 0.5)
 
     def test_grid_lookup_equals_the_bilinear_blend_of_bracketing_rows(self) -> None:
-        from pyRadMC.physics.gs import sample_gs_cos_theta_bilinear, sample_gs_cos_theta_grid
+        from pyradmc.physics.gs import sample_gs_cos_theta_bilinear, sample_gs_cos_theta_grid
 
         values = self._grid()
         theta2 = 0.02
@@ -237,7 +237,7 @@ class TestGridSampler:
         must degrade to the nearest edge node, never index out of bounds, and
         the anchor survives because clamping moves only the *shape*.
         """
-        from pyRadMC.physics.gs import sample_gs_cos_theta_bilinear, sample_gs_cos_theta_grid
+        from pyradmc.physics.gs import sample_gs_cos_theta_bilinear, sample_gs_cos_theta_grid
 
         values = self._grid()
         theta2 = 0.05
@@ -297,15 +297,15 @@ class TestStreamParity:
     """
 
     def test_gaussian_hinge_consumes_exactly_one_uniform(self) -> None:
-        from pyRadMC.physics.msc import sample_hinge_cos_theta
+        from pyradmc.physics.msc import sample_hinge_cos_theta
 
         state = _CountingState(SEED)
         sample_hinge_cos_theta(0.02, state)
         assert state.draws == 1
 
     def test_gs_source_sampler_consumes_exactly_one_uniform(self) -> None:
-        from pyRadMC.data.analytic import AnalyticCrossSections
-        from pyRadMC.data.materials import WATER
+        from pyradmc.data.analytic import AnalyticCrossSections
+        from pyradmc.data.materials import WATER
 
         source = AnalyticCrossSections()
         state = _CountingState(SEED)
@@ -313,7 +313,7 @@ class TestStreamParity:
         assert state.draws == 1
 
     def test_gs_grid_sampler_consumes_exactly_one_uniform(self) -> None:
-        from pyRadMC.physics.gs import sample_gs_cos_theta_grid
+        from pyradmc.physics.gs import sample_gs_cos_theta_grid
 
         values = TestGridSampler()._grid()
         state = _CountingState(SEED)
@@ -344,9 +344,9 @@ class TestDepartureFromTheGaussianHinge:
         improvement being bought, and pinning its direction stops a later
         transport difference from being misread as a defect.
         """
-        from pyRadMC.data.analytic import AnalyticCrossSections
-        from pyRadMC.data.materials import WATER
-        from pyRadMC.physics.msc import sample_hinge_cos_theta
+        from pyradmc.data.analytic import AnalyticCrossSections
+        from pyradmc.data.materials import WATER
+        from pyradmc.physics.msc import sample_hinge_cos_theta
 
         source = AnalyticCrossSections()
         theta2, n = 0.05, 200_000
@@ -372,9 +372,9 @@ class TestDepartureFromTheGaussianHinge:
         what makes "the schedule is unchanged, only the angular model moved" a
         true statement at L1.
         """
-        from pyRadMC.data.analytic import AnalyticCrossSections
-        from pyRadMC.data.materials import WATER
-        from pyRadMC.physics.msc import sample_hinge_cos_theta
+        from pyradmc.data.analytic import AnalyticCrossSections
+        from pyradmc.data.materials import WATER
+        from pyradmc.physics.msc import sample_hinge_cos_theta
 
         source = AnalyticCrossSections()
         n = 50_000

@@ -22,8 +22,8 @@ import math
 import numpy as np
 import pytest
 
-from pyRadMC.data.materials import TUNGSTEN
-from pyRadMC.geometry.collimation import (
+from pyradmc.data.materials import TUNGSTEN
+from pyradmc.geometry.collimation import (
     MLC,
     BeamFrame,
     BeamLimitingStack,

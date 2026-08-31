@@ -21,12 +21,12 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from pyRadMC.backends.ref.engine import ReferenceEngine
-from pyRadMC.data.analytic import AnalyticCrossSections
-from pyRadMC.data.tabulated.source import TabulatedCrossSections
-from pyRadMC.geometry.grid import VoxelGrid
-from pyRadMC.geometry.source import BeamletGridSource, ParallelBeamSource
-from pyRadMC.rng.host import HostRNG
+from pyradmc.backends.ref.engine import ReferenceEngine
+from pyradmc.data.analytic import AnalyticCrossSections
+from pyradmc.data.tabulated.source import TabulatedCrossSections
+from pyradmc.geometry.grid import VoxelGrid
+from pyradmc.geometry.source import BeamletGridSource, ParallelBeamSource
+from pyradmc.rng.host import HostRNG
 from tests.conftest import SEED
 from tests.unit.test_dose_to_water_spr import DELTA_CUT, _two_material_tables
 

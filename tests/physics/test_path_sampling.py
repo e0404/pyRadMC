@@ -5,8 +5,8 @@ from __future__ import annotations
 import numpy as np
 from scipy import stats
 
-from pyRadMC.physics.path import sample_path_length
-from pyRadMC.rng.host import HostRNG
+from pyradmc.physics.path import sample_path_length
+from pyradmc.rng.host import HostRNG
 from tests.conftest import SEED
 
 

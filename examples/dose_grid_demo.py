@@ -16,7 +16,7 @@ its far edge land in the *unscored* energy-ledger bucket, never in a clamped
 edge voxel, and the printed three-bucket balance closes.
 
 On first run this **downloads the ~120 MB EPDL/EEDL libraries** into
-``~/.cache/pyRadMC/epics`` (cached thereafter). Needs the ``examples`` extra
+``~/.cache/pyradmc/epics`` (cached thereafter). Needs the ``examples`` extra
 (matplotlib). Defaults to Warp (GPU if present). Run from the repository root::
 
     python examples/dose_grid_demo.py [--histories N] [--backend B]
@@ -34,14 +34,14 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 
-from pyRadMC.data.materials import CORTICAL_BONE, LUNG, WATER
-from pyRadMC.data.tabulated import build
-from pyRadMC.data.tabulated.precompile import compile_materials
-from pyRadMC.data.tabulated.source import TabulatedCrossSections
-from pyRadMC.geometry.grid import VoxelGrid
-from pyRadMC.geometry.source import ParallelBeamSource
-from pyRadMC.rng.host import HostRNG
-from pyRadMC.scoring.grid import ScoringGrid
+from pyradmc.data.materials import CORTICAL_BONE, LUNG, WATER
+from pyradmc.data.tabulated import build
+from pyradmc.data.tabulated.precompile import compile_materials
+from pyradmc.data.tabulated.source import TabulatedCrossSections
+from pyradmc.geometry.grid import VoxelGrid
+from pyradmc.geometry.source import ParallelBeamSource
+from pyradmc.rng.host import HostRNG
+from pyradmc.scoring.grid import ScoringGrid
 
 SPACING_CM = 0.2  # 2 mm transport (CT) grid
 DOSE_SPACING_CM = 0.3  # 3 mm dose grid: non-integer ratio, the pyRadPlan case
@@ -72,14 +72,14 @@ def make_engine(backend: str, grid: VoxelGrid, xs: TabulatedCrossSections):
         try:
             import warp as wp
 
-            from pyRadMC.backends.warp.engine import WarpEngine
+            from pyradmc.backends.warp.engine import WarpEngine
 
             device = "cuda:0" if wp.is_cuda_available() else "cpu"
             return WarpEngine(grid=grid, cross_sections=xs, device=device), f"warp:{device}"
         except Exception:
             if backend == "warp":
                 raise
-    from pyRadMC.backends.ref.engine import ReferenceEngine
+    from pyradmc.backends.ref.engine import ReferenceEngine
 
     return ReferenceEngine(grid=grid, cross_sections=xs, rng=HostRNG()), "ref"
 

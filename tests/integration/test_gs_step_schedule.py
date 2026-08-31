@@ -17,12 +17,12 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-import pyRadMC.transport.electron as electron_module
-from pyRadMC.backends.ref.engine import ReferenceEngine
-from pyRadMC.data.analytic import AnalyticCrossSections
-from pyRadMC.geometry.grid import VoxelGrid
-from pyRadMC.geometry.source import ParallelBeamSource
-from pyRadMC.rng.host import HostRNG
+import pyradmc.transport.electron as electron_module
+from pyradmc.backends.ref.engine import ReferenceEngine
+from pyradmc.data.analytic import AnalyticCrossSections
+from pyradmc.geometry.grid import VoxelGrid
+from pyradmc.geometry.source import ParallelBeamSource
+from pyradmc.rng.host import HostRNG
 from tests.conftest import SEED
 
 N_HISTORIES = 150

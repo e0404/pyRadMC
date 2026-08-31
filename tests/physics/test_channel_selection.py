@@ -9,9 +9,9 @@ from __future__ import annotations
 import numpy as np
 from scipy import stats
 
-from pyRadMC.data.interface import PhotonProcess
-from pyRadMC.physics.channel import select_photon_process
-from pyRadMC.rng.host import HostRNG
+from pyradmc.data.interface import PhotonProcess
+from pyradmc.physics.channel import select_photon_process
+from pyradmc.rng.host import HostRNG
 from tests.conftest import SEED
 
 

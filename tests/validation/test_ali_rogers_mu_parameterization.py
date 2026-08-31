@@ -1,6 +1,6 @@
 """The Ali-Rogers mu(E) parameterizations against EPICS 2023, the independent oracle.
 
-`pyRadMC.geometry.spectrum` carries closed-form fits to the tungsten and aluminium
+`pyradmc.geometry.spectrum` carries closed-form fits to the tungsten and aluminium
 mass attenuation coefficients (Ali and Rogers 2012, table 3) rather than going through
 `CrossSectionSource`. That is deliberate and allowed — a spectrum is the *source's own*
 data, not a material property, and the fits are what define the published C1/C2
@@ -32,9 +32,9 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from pyRadMC.data.tabulated import build
-from pyRadMC.data.tabulated.epdl import element_photon_channels, material_mu_over_rho
-from pyRadMC.geometry.spectrum import (
+from pyradmc.data.tabulated import build
+from pyradmc.data.tabulated.epdl import element_photon_channels, material_mu_over_rho
+from pyradmc.geometry.spectrum import (
     _E_ANNIHILATION_MEV,
     _mu_over_rho_aluminium,
     _mu_over_rho_tungsten,
@@ -67,7 +67,7 @@ def epdl_mu_over_rho():
     """
     epdl = build.library_path("epdl", None)
     if not epdl.is_file():
-        pytest.skip("EPICS libraries not cached; run python -m pyRadMC.data.tabulated.build")
+        pytest.skip("EPICS libraries not cached; run python -m pyradmc.data.tabulated.build")
     elements = element_photon_channels(epdl.read_text(encoding="latin-1"), elements=(13, 74))
     return {z: sum(material_mu_over_rho(elements, {z: 1.0}, GRID_MEV).values()) for z in (13, 74)}
 
@@ -102,7 +102,7 @@ def test_annihilation_line_transmission_matches_epdl() -> None:
     """
     epdl = build.library_path("epdl", None)
     if not epdl.is_file():
-        pytest.skip("EPICS libraries not cached; run python -m pyRadMC.data.tabulated.build")
+        pytest.skip("EPICS libraries not cached; run python -m pyradmc.data.tabulated.build")
     elements = element_photon_channels(epdl.read_text(encoding="latin-1"), elements=(13, 74))
     line = np.array([_E_ANNIHILATION_MEV])
     mu = {

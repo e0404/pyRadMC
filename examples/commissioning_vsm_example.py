@@ -147,7 +147,7 @@
 #
 # **This is the first thing to refit against the measured depth doses.** C2 is a
 # single monotone knob on beam quality: raising it hardens the beam and lifts PDD(10).
-from pyRadMC.geometry.spectrum import ALI_ROGERS_BEAMS, AliRogersMV
+from pyradmc.geometry.spectrum import ALI_ROGERS_BEAMS, AliRogersMV
 
 _FLATTENED = ALI_ROGERS_BEAMS["varian-6mv"]
 BEAM = AliRogersMV(
@@ -670,9 +670,9 @@ from typing import Any, NamedTuple  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 
-from pyRadMC.backends.ref.engine import ReferenceEngine  # noqa: E402
-from pyRadMC.data.materials import AIR, TUNGSTEN_ALLOY, WATER  # noqa: E402
-from pyRadMC.geometry.collimation import (  # noqa: E402
+from pyradmc.backends.ref.engine import ReferenceEngine  # noqa: E402
+from pyradmc.data.materials import AIR, TUNGSTEN_ALLOY, WATER  # noqa: E402
+from pyradmc.geometry.collimation import (  # noqa: E402
     MLC,
     BeamFrame,
     BeamLimitingStack,
@@ -680,10 +680,10 @@ from pyRadMC.geometry.collimation import (  # noqa: E402
     JawPair,
     project_between_planes,
 )
-from pyRadMC.geometry.fluence import RadialFluence  # noqa: E402
-from pyRadMC.geometry.grid import VoxelGrid  # noqa: E402
-from pyRadMC.geometry.head import AirColumn, presolve_head  # noqa: E402
-from pyRadMC.geometry.phasespace import (  # noqa: E402
+from pyradmc.geometry.fluence import RadialFluence  # noqa: E402
+from pyradmc.geometry.grid import VoxelGrid  # noqa: E402
+from pyradmc.geometry.head import AirColumn, presolve_head  # noqa: E402
+from pyradmc.geometry.phasespace import (  # noqa: E402
     IAEA_ELECTRON,
     IAEA_PHOTON,
     IAEAHeader,
@@ -696,22 +696,22 @@ from pyRadMC.geometry.phasespace import (  # noqa: E402
     _record_dtype,
     _sample_indices,
 )
-from pyRadMC.geometry.source import (  # noqa: E402
+from pyradmc.geometry.source import (  # noqa: E402
     GaussianSpotBeamSource,
     Primary,
     PrimaryFluenceBeamSource,
     Source,
 )
-from pyRadMC.geometry.spectrum import Spectrum, ali_rogers_mv  # noqa: E402
-from pyRadMC.rng import RNGState, uniform  # noqa: E402
-from pyRadMC.rng.host import HostRNG  # noqa: E402
-from pyRadMC.scoring.grid import ScoringGrid  # noqa: E402
+from pyradmc.geometry.spectrum import Spectrum, ali_rogers_mv  # noqa: E402
+from pyradmc.rng import RNGState, uniform  # noqa: E402
+from pyradmc.rng.host import HostRNG  # noqa: E402
+from pyradmc.scoring.grid import ScoringGrid  # noqa: E402
 
 try:
     import warp as wp
 
-    from pyRadMC.backends.warp.engine import WarpEngine
-    from pyRadMC.backends.warp.presolve import presolve_head_device
+    from pyradmc.backends.warp.engine import WarpEngine
+    from pyradmc.backends.warp.presolve import presolve_head_device
 
     WARP_DEVICE: str | None = "cuda:0" if wp.is_cuda_available() else "cpu"
 except ImportError:  # pragma: no cover - the example degrades to the oracle
@@ -1299,9 +1299,9 @@ MAX_ENERGY = SPECTRUM.max_energy if PHSP is None else float(PHSP.energy.max())
 
 # %%
 if DEVICES == "tungsten":
-    from pyRadMC.data.tabulated.build import download_library
-    from pyRadMC.data.tabulated.precompile import compile_materials
-    from pyRadMC.data.tabulated.source import TabulatedCrossSections
+    from pyradmc.data.tabulated.build import download_library
+    from pyradmc.data.tabulated.precompile import compile_materials
+    from pyradmc.data.tabulated.source import TabulatedCrossSections
 
     DEVICE_MATERIAL, DEVICE_DENSITY = TUNGSTEN_ALLOY, 18.0
     AIR_MATERIAL, AIR_DENSITY = AIR, 1.205e-3
@@ -1313,7 +1313,7 @@ if DEVICES == "tungsten":
     )
     XS: Any = TabulatedCrossSections(_tables, geometry_densities=((WATER, 1.0), (AIR, AIR_DENSITY)))
 else:
-    from pyRadMC.data.analytic import AnalyticCrossSections
+    from pyradmc.data.analytic import AnalyticCrossSections
 
     # 18.0, not pure tungsten's 19.30: the stand-in exists to reproduce the shipped
     # geometry's areal density, and transmission is exponential in rho t.

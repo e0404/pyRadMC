@@ -19,19 +19,19 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from pyRadMC.backends.ref.engine import ReferenceEngine
-from pyRadMC.data.analytic import AnalyticCrossSections
-from pyRadMC.data.materials import WATER
-from pyRadMC.geometry.collimation import (
+from pyradmc.backends.ref.engine import ReferenceEngine
+from pyradmc.data.analytic import AnalyticCrossSections
+from pyradmc.data.materials import WATER
+from pyradmc.geometry.collimation import (
     BeamFrame,
     BeamLimitingStack,
     CollimatedSource,
     JawPair,
 )
-from pyRadMC.geometry.head import presolve_head
-from pyRadMC.geometry.source import GaussianSpotBeamSource
-from pyRadMC.geometry.spectrum import Spectrum
-from pyRadMC.rng.host import HostRNG
+from pyradmc.geometry.head import presolve_head
+from pyradmc.geometry.source import GaussianSpotBeamSource
+from pyradmc.geometry.spectrum import Spectrum
+from pyradmc.rng.host import HostRNG
 from tests.conftest import SEED, assert_chi2_consistent_batched
 
 pytestmark = pytest.mark.filterwarnings("ignore:.*latent variance:UserWarning")
@@ -74,7 +74,7 @@ def _jaws() -> BeamLimitingStack:
 
 
 def _grid():  # -> VoxelGrid
-    from pyRadMC.geometry.grid import VoxelGrid
+    from pyradmc.geometry.grid import VoxelGrid
 
     return VoxelGrid.uniform_water(shape=(16, 16, 16), spacing=(1.0, 1.0, 1.0))
 

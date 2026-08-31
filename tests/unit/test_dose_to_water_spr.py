@@ -13,12 +13,12 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from pyRadMC import ECUT_MEV
-from pyRadMC.data.analytic import AnalyticCrossSections
-from pyRadMC.data.interface import PhotonProcess
-from pyRadMC.data.materials import CORTICAL_BONE, MATERIALS, WATER
-from pyRadMC.data.tabulated.model import TabulatedData
-from pyRadMC.data.tabulated.source import TabulatedCrossSections
+from pyradmc import ECUT_MEV
+from pyradmc.data.analytic import AnalyticCrossSections
+from pyradmc.data.interface import PhotonProcess
+from pyradmc.data.materials import CORTICAL_BONE, MATERIALS, WATER
+from pyradmc.data.tabulated.model import TabulatedData
+from pyradmc.data.tabulated.source import TabulatedCrossSections
 
 DELTA_CUT = ECUT_MEV  # the compiled cut must match the transport ecut
 
@@ -59,7 +59,7 @@ def _two_material_tables(spr: float = 1.1) -> TabulatedData:
 
 def test_water_medium_weight_is_exactly_one() -> None:
     """SPR of water against itself is the ratio of identical numbers: exactly 1."""
-    from pyRadMC.scoring.dose_to_water import water_spr
+    from pyradmc.scoring.dose_to_water import water_spr
 
     xs = AnalyticCrossSections()
     for e in (0.05, 0.3, 1.0, 6.0):
@@ -67,7 +67,7 @@ def test_water_medium_weight_is_exactly_one() -> None:
 
 
 def test_synthetic_proportional_table_gives_the_exact_constant() -> None:
-    from pyRadMC.scoring.dose_to_water import water_spr
+    from pyradmc.scoring.dose_to_water import water_spr
 
     xs = TabulatedCrossSections(_two_material_tables(spr=1.1))
     for e in (0.25, 1.0, 3.7, 9.0):
@@ -76,7 +76,7 @@ def test_synthetic_proportional_table_gives_the_exact_constant() -> None:
 
 def test_sub_cutoff_deposits_clamp_to_the_cutoff() -> None:
     """Below ecut the electron spectrum is not tracked; the weight freezes at ecut."""
-    from pyRadMC.scoring.dose_to_water import water_spr
+    from pyradmc.scoring.dose_to_water import water_spr
 
     xs = TabulatedCrossSections(_two_material_tables(spr=1.1))
     at_cut = water_spr(DELTA_CUT, 1, cross_sections=xs, ecut=DELTA_CUT)
@@ -92,7 +92,7 @@ def test_bone_spr_sign_and_magnitude_from_berger_seltzer() -> None:
     conversion must *raise* bone dose by roughly 10 percent (Siebers et al.,
     Phys. Med. Biol. 45 (2000) 983, doi:10.1088/0031-9155/45/4/983).
     """
-    from pyRadMC.data.berger_seltzer import restricted_collision_stopping
+    from pyradmc.data.berger_seltzer import restricted_collision_stopping
 
     water = MATERIALS[WATER]
     bone = MATERIALS[CORTICAL_BONE]

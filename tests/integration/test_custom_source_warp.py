@@ -1,6 +1,6 @@
 """A user Source runs on Warp via the pre-sampling route.
 
-A custom :class:`~pyRadMC.geometry.source.Source` with no ``warp_sampler`` reaches the
+A custom :class:`~pyradmc.geometry.source.Source` with no ``warp_sampler`` reaches the
 GPU through the general pre-sampling path (``sample_batch`` -> ``generate_from_upload``),
 the same route the phase-space source uses. Because the default ``sample_batch`` draws
 the same per-history stream as ``emit``, the reference and Warp backends transport the
@@ -13,11 +13,11 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from pyRadMC.backends.ref.engine import ReferenceEngine
-from pyRadMC.data.analytic import AnalyticCrossSections
-from pyRadMC.geometry.grid import VoxelGrid
-from pyRadMC.geometry.source import Primary, Source
-from pyRadMC.rng.host import HostRNG, uniform
+from pyradmc.backends.ref.engine import ReferenceEngine
+from pyradmc.data.analytic import AnalyticCrossSections
+from pyradmc.geometry.grid import VoxelGrid
+from pyradmc.geometry.source import Primary, Source
+from pyradmc.rng.host import HostRNG, uniform
 from tests.conftest import SEED, assert_chi2_consistent_batched
 
 wp = pytest.importorskip("warp", reason="warp-lang optional dependency not installed")
@@ -63,7 +63,7 @@ def _grid() -> VoxelGrid:
 
 def test_custom_source_agrees_across_backends() -> None:
     """Ref and Warp transport of the pre-sampled custom source are consistent."""
-    from pyRadMC.backends.warp.engine import WarpEngine
+    from pyradmc.backends.warp.engine import WarpEngine
 
     grid = _grid()
     xs = AnalyticCrossSections(geometry_densities=grid.max_density_by_material())
@@ -90,7 +90,7 @@ def test_custom_source_agrees_across_backends() -> None:
 
 def test_warp_energy_ledger_closes_for_the_custom_source() -> None:
     """emitted = deposited + escaped on Warp for the pre-sampled source."""
-    from pyRadMC.backends.warp.engine import WarpEngine
+    from pyradmc.backends.warp.engine import WarpEngine
 
     grid = _grid()
     xs = AnalyticCrossSections(geometry_densities=grid.max_density_by_material())
@@ -104,7 +104,7 @@ def test_warp_energy_ledger_closes_for_the_custom_source() -> None:
 
 def test_zero_weight_presampled_primaries_are_not_seeded(monkeypatch: pytest.MonkeyPatch) -> None:
     """Exactly-zero records contribute nothing and must not enter a transport queue."""
-    from pyRadMC.backends.warp.engine import WarpEngine
+    from pyradmc.backends.warp.engine import WarpEngine
 
     seeded_histories: list[int] = []
     original = WarpEngine._seed_queue

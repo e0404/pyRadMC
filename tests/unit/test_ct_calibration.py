@@ -17,8 +17,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from pyRadMC.adapters.ct import DEFAULT_CALIBRATION, HounsfieldCalibration, grid_from_hu
-from pyRadMC.data.materials import ADIPOSE, AIR, CORTICAL_BONE, LUNG, MATERIALS, WATER
+from pyradmc.adapters.ct import DEFAULT_CALIBRATION, HounsfieldCalibration, grid_from_hu
+from pyradmc.data.materials import ADIPOSE, AIR, CORTICAL_BONE, LUNG, MATERIALS, WATER
 
 
 class TestDefaultDensity:

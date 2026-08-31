@@ -11,10 +11,10 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from pyRadMC.data.interface import CrossSectionSource, PhotonProcess
-from pyRadMC.geometry.grid import VoxelGrid
-from pyRadMC.rng.host import HostRNG
-from pyRadMC.transport.photon import transport_photon
+from pyradmc.data.interface import CrossSectionSource, PhotonProcess
+from pyradmc.geometry.grid import VoxelGrid
+from pyradmc.rng.host import HostRNG
+from pyradmc.transport.photon import transport_photon
 from tests.conftest import SEED
 
 

@@ -18,9 +18,9 @@ from __future__ import annotations
 
 import pytest
 
-from pyRadMC.data.analytic import AnalyticCrossSections
-from pyRadMC.geometry.grid import VoxelGrid
-from pyRadMC.geometry.source import BeamletGridSource
+from pyradmc.data.analytic import AnalyticCrossSections
+from pyradmc.geometry.grid import VoxelGrid
+from pyradmc.geometry.source import BeamletGridSource
 from tests.conftest import SEED
 
 wp = pytest.importorskip("warp", reason="warp-lang optional dependency not installed")
@@ -41,7 +41,7 @@ def _engine(device: str):
     nothing that was timed ever ran at the value users got. A benchmark that does
     not exercise the default cannot defend it.
     """
-    from pyRadMC.backends.warp.engine import WarpEngine
+    from pyradmc.backends.warp.engine import WarpEngine
 
     grid = VoxelGrid.uniform_water(shape=(64, 64, 64), spacing=(0.4, 0.4, 0.4))
     xs = AnalyticCrossSections(geometry_densities=grid.max_density_by_material())

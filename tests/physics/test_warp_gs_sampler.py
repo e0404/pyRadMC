@@ -1,7 +1,7 @@
 r"""The Goudsmit-Saunderson grid sampler, compiled under Warp, on each device.
 
 Same pattern as ``test_warp_physics.py``: the single-source sampler
-(:func:`pyRadMC.physics.gs.sample_gs_cos_theta_grid`) is compiled to ``@wp.func``
+(:func:`pyradmc.physics.gs.sample_gs_cos_theta_grid`) is compiled to ``@wp.func``
 by the physics loader and driven from a probe kernel against the same oracles the
 host tier uses — the exact first-moment anchor, the host-drawn distribution
 (statistical, AGENTS.md 2.3), and the one-uniform stream-parity contract that
@@ -24,7 +24,7 @@ from tests.conftest import SEED
 
 wp = pytest.importorskip("warp", reason="warp-lang optional dependency not installed")
 
-from pyRadMC.data.goudsmit_saunderson import build_gs_grid  # noqa: E402
+from pyradmc.data.goudsmit_saunderson import build_gs_grid  # noqa: E402
 
 pytestmark = pytest.mark.warp
 
@@ -52,8 +52,8 @@ def device_draws(request, grid):
     if device.startswith("cuda") and not wp.is_cuda_available():
         pytest.skip("no CUDA device")
 
-    from pyRadMC.backends.warp.physics import warp_physics
-    from pyRadMC.rng.warp_shim import WarpRNGState, init_slot, uniform
+    from pyradmc.backends.warp.physics import warp_physics
+    from pyradmc.rng.warp_shim import WarpRNGState, init_slot, uniform
 
     p = warp_physics()
     gs_grid = p.sample_gs_cos_theta_grid
@@ -161,7 +161,7 @@ class TestDistribution:
     def test_device_distribution_matches_host(
         self, grid, device_draws: np.ndarray, column: int, theta2: float
     ) -> None:
-        from pyRadMC.physics.gs import sample_gs_cos_theta_grid
+        from pyradmc.physics.gs import sample_gs_cos_theta_grid
 
         rng = np.random.default_rng(SEED + 1)
         fx = LOG_ETA * grid.bins_per_log

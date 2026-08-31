@@ -25,14 +25,14 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-import pyRadMC.transport.photon as photon_mod
-from pyRadMC import PCUT_MEV
-from pyRadMC.backends.ref.engine import ReferenceEngine
-from pyRadMC.data.analytic import AnalyticCrossSections
-from pyRadMC.geometry.grid import VoxelGrid
-from pyRadMC.geometry.source import ParallelBeamSource
-from pyRadMC.rng.host import HostRNG
-from pyRadMC.transport.photon import photon_steps
+import pyradmc.transport.photon as photon_mod
+from pyradmc import PCUT_MEV
+from pyradmc.backends.ref.engine import ReferenceEngine
+from pyradmc.data.analytic import AnalyticCrossSections
+from pyradmc.geometry.grid import VoxelGrid
+from pyradmc.geometry.source import ParallelBeamSource
+from pyradmc.rng.host import HostRNG
+from pyradmc.transport.photon import photon_steps
 from tests.conftest import SEED, assert_chi2_consistent_batched
 
 # The instrument multiplicity: these tests turn the dormant split path on to N

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pyRadMC"
-# Single-sourced from pyRadMC/__init__.py: the module is the one place the version
+# Single-sourced from pyradmc/__init__.py: the module is the one place the version
 # lives, so a release tag can never disagree with what the package reports at runtime
 # (and with what every RunProvenance record stamps onto a result).
 dynamic = ["version"]
@@ -59,7 +59,7 @@ docs = [
 # Runnable demonstration scripts under examples/ (AGENTS.md section 7); not needed to use
 # the engine. matplotlib license: BSD-style, permissive.
 examples = ["matplotlib>=3.8"]
-# CT image adapter (pyRadMC.adapters.ct), optional and out of the core. SimpleITK
+# CT image adapter (pyradmc.adapters.ct), optional and out of the core. SimpleITK
 # license: Apache-2.0, permissive. Reads DICOM/NIfTI/MetaImage into a VoxelGrid.
 ct = ["SimpleITK>=2.3"]
 all = ["pyRadMC[warp,dev,docs,examples,ct]"]
@@ -74,7 +74,7 @@ Issues = "https://github.com/e0404/pyRadMC/issues"
 Changelog = "https://github.com/e0404/pyRadMC/blob/main/CHANGELOG.md"
 
 [tool.hatch.version]
-path = "pyRadMC/__init__.py"
+path = "pyradmc/__init__.py"
 
 [tool.hatch.build.targets.sdist]
 # Tests and examples ship: this is scientific software, and a user who wants to verify a
@@ -82,10 +82,10 @@ path = "pyRadMC/__init__.py"
 exclude = [".claude"]
 
 [tool.hatch.build.targets.wheel]
-packages = ["pyRadMC"]
+packages = ["pyradmc"]
 # PEP 561: the package is typed, and consumers (the pyRadPlan adapter first among
 # them) only see that if the marker ships in the wheel.
-artifacts = ["pyRadMC/py.typed"]
+artifacts = ["pyradmc/py.typed"]
 
 # ---------------------------------------------------------------------------
 # Tests
@@ -117,7 +117,7 @@ plugins = []
 
 [[tool.mypy.overrides]]
 # rng.warp_shim is Warp kernel code (AGENTS.md 5: kernels are exempt, marked).
-module = ["pyRadMC.backends.warp.*", "pyRadMC.rng.warp_shim"]
+module = ["pyradmc.backends.warp.*", "pyradmc.rng.warp_shim"]
 ignore_errors = true
 
 [[tool.mypy.overrides]]
@@ -128,7 +128,7 @@ ignore_missing_imports = true
 # SimpleITK is an untyped boundary: its Image methods carry no annotations, so the
 # strict disallow_untyped_calls fires on GetSpacing/GetOrigin/etc. The adapter's own
 # code stays typed; only the calls across that boundary are exempt.
-module = ["pyRadMC.adapters.ct"]
+module = ["pyradmc.adapters.ct"]
 disallow_untyped_calls = false
 
 # ---------------------------------------------------------------------------
@@ -150,14 +150,13 @@ ignore = [
     "D203",  # conflicts with D211
     "D213",  # conflicts with D212
     "E741",  # single-letter names are idiomatic in transport physics (E, Z, A, w)
-    "N999",  # the package is deliberately named pyRadMC, capitals included
 ]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["D", "T20"]
 "examples/*" = ["T20"]  # demos are scripts; print is their interface. The library never prints.
-"pyRadMC/backends/warp/*" = ["N803", "N806"]  # kernel arg naming follows physics notation
-"pyRadMC/adapters/ct.py" = ["N813"]  # `import SimpleITK as sitk` is the library's own convention
+"pyradmc/backends/warp/*" = ["N803", "N806"]  # kernel arg naming follows physics notation
+"pyradmc/adapters/ct.py" = ["N813"]  # `import SimpleITK as sitk` is the library's own convention
 
 [tool.ruff.lint.pydocstyle]
 convention = "numpy"

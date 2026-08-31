@@ -10,7 +10,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from pyRadMC.data.tabulated.endf import parse_endf_float, read_tab1_by_mf
+from pyradmc.data.tabulated.endf import parse_endf_float, read_tab1_by_mf
 
 
 class TestFloatParsing:

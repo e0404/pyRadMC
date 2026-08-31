@@ -4,9 +4,9 @@ The virtual source model of Tacke, Szymanowski, Oelfke et al., Med. Phys. 33
 (2006) 1125-1132 (doi:10.1118/1.2181298): photons are sampled on a plane in the
 treatment head according to the machine's **measured radial primary fluence**,
 then given a direction from a finite Gaussian focal spot and an energy from a
-photon spectrum. In pyRadMC that is
-:class:`~pyRadMC.geometry.source.PrimaryFluenceBeamSource` fed a
-:class:`~pyRadMC.geometry.fluence.RadialFluence` table.
+photon spectrum. In pyradmc that is
+:class:`~pyradmc.geometry.source.PrimaryFluenceBeamSource` fed a
+:class:`~pyradmc.geometry.fluence.RadialFluence` table.
 
 Three things the figure shows:
 
@@ -39,7 +39,7 @@ The emission plane sits at the field-defining collimator, so its rectangle is a
 perfectly absorbing aperture and the geometric penumbra comes out of the source
 geometry alone — no material data needed. For a real tungsten jaws-and-MLC head,
 move the plane upstream of the devices and wrap in
-:class:`~pyRadMC.geometry.collimation.CollimatedSource`; see
+:class:`~pyradmc.geometry.collimation.CollimatedSource`; see
 ``examples/collimation_demo.py``.
 
 Uses analytic water cross-sections (no downloads); defaults to Warp (GPU if
@@ -61,12 +61,12 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 
-from pyRadMC.data.analytic import AnalyticCrossSections
-from pyRadMC.geometry.fluence import RadialFluence
-from pyRadMC.geometry.grid import VoxelGrid
-from pyRadMC.geometry.source import PrimaryFluenceBeamSource
-from pyRadMC.geometry.spectrum import ali_rogers_mv
-from pyRadMC.rng.host import HostRNG
+from pyradmc.data.analytic import AnalyticCrossSections
+from pyradmc.geometry.fluence import RadialFluence
+from pyradmc.geometry.grid import VoxelGrid
+from pyradmc.geometry.source import PrimaryFluenceBeamSource
+from pyradmc.geometry.spectrum import ali_rogers_mv
+from pyradmc.rng.host import HostRNG
 
 BEAM = "siemens-6mv"  # the vendor of the machine the source paper studied
 SAD_CM = 100.0
@@ -150,14 +150,14 @@ def make_engine(backend: str, grid: VoxelGrid, xs: AnalyticCrossSections):  # ty
         try:
             import warp as wp
 
-            from pyRadMC.backends.warp.engine import WarpEngine
+            from pyradmc.backends.warp.engine import WarpEngine
 
             device = "cuda:0" if wp.is_cuda_available() else "cpu"
             return WarpEngine(grid=grid, cross_sections=xs, device=device), f"warp:{device}"
         except Exception:
             if backend == "warp":
                 raise
-    from pyRadMC.backends.ref.engine import ReferenceEngine
+    from pyradmc.backends.ref.engine import ReferenceEngine
 
     return ReferenceEngine(grid=grid, cross_sections=xs, rng=HostRNG()), "ref"
 

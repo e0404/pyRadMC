@@ -4,7 +4,7 @@ This is the accuracy claim the analytic backend's 5-percent test
 (``tests/unit/test_cross_sections_water.py``) always deferred. It runs the
 full tabulated photon path — parse ``EPDL2023.ALL``, convert units, mix H and O by
 mass fraction onto the canonical geometric grid, and query through the shipping
-:class:`~pyRadMC.data.tabulated.source.TabulatedCrossSections` loader — and gates the
+:class:`~pyradmc.data.tabulated.source.TabulatedCrossSections` loader — and gates the
 total mass attenuation coefficient of liquid water against NIST XCOM (coherent
 included) at 1, 2, 6, 10 and 15 MeV.
 
@@ -27,14 +27,14 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from pyRadMC.data.materials import WATER
-from pyRadMC.data.tabulated.epdl import (
+from pyradmc.data.materials import WATER
+from pyradmc.data.tabulated.epdl import (
     element_photon_channels,
     mass_fractions_from_formula,
     material_mu_over_rho,
 )
-from pyRadMC.data.tabulated.model import TabulatedData
-from pyRadMC.data.tabulated.source import TabulatedCrossSections
+from pyradmc.data.tabulated.model import TabulatedData
+from pyradmc.data.tabulated.source import TabulatedCrossSections
 
 # NIST XCOM total mu/rho (cm^2/g), liquid water, coherent scattering included. The same
 # three-figure transcription pinned in tests/unit/test_cross_sections_water.py; verify
@@ -107,7 +107,7 @@ def test_epdl_water_has_a_nonzero_rayleigh_channel() -> None:
     coherent cross section is nonzero, and the pair-refit warning
     is moot here because every channel comes from one consistent EPDL decomposition.
     """
-    from pyRadMC.data.interface import PhotonProcess
+    from pyradmc.data.interface import PhotonProcess
 
     xs = _water_source(_epdl_path().read_text(encoding="latin-1"))
     assert xs.mu_over_rho(1.0, WATER, PhotonProcess.RAYLEIGH) > 0.0

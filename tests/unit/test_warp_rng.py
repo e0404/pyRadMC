@@ -32,7 +32,7 @@ def _skip_without_device(device: str) -> None:
 @pytest.fixture(scope="module")
 def kernels():
     """Compile the test kernels once for the module."""
-    from pyRadMC.rng.warp_shim import WarpRNGState, init_slot, uniform
+    from pyradmc.rng.warp_shim import WarpRNGState, init_slot, uniform
 
     @wp.kernel
     def draw_many(

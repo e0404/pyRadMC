@@ -22,11 +22,11 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from pyRadMC.backends.ref.engine import ReferenceEngine
-from pyRadMC.data.analytic import AnalyticCrossSections
-from pyRadMC.geometry.grid import VoxelGrid
-from pyRadMC.geometry.phasespace import PhaseSpaceSource
-from pyRadMC.rng.host import HostRNG
+from pyradmc.backends.ref.engine import ReferenceEngine
+from pyradmc.data.analytic import AnalyticCrossSections
+from pyradmc.geometry.grid import VoxelGrid
+from pyradmc.geometry.phasespace import PhaseSpaceSource
+from pyradmc.rng.host import HostRNG
 from tests.conftest import SEED, assert_chi2_consistent_batched
 from tests.phsp_fixtures import Rec, write_phsp
 
@@ -81,7 +81,7 @@ def _source(phsp_path: Path) -> PhaseSpaceSource:
 
 
 def _warp_engine(device: str, **kw):
-    from pyRadMC.backends.warp.engine import WarpEngine
+    from pyradmc.backends.warp.engine import WarpEngine
 
     grid = _grid()
     return WarpEngine(grid=grid, cross_sections=_xs(grid), device=device, **kw)

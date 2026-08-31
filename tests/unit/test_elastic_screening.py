@@ -1,7 +1,7 @@
 r"""Moliere screening parameter and the GS/Fermi-Eyges anchoring contract.
 
 The screening parameter ``eta`` fixes the *shape* of the single-scattering law;
-:meth:`~pyRadMC.data.interface.CrossSectionSource.scattering_power` fixes its
+:meth:`~pyradmc.data.interface.CrossSectionSource.scattering_power` fixes its
 *strength*. Together they determine the Goudsmit-Saunderson distribution for a
 step. The contract test in this module is the one that matters: whatever ``eta``
 comes out, the GS mean-square deflection over a short step must reproduce the
@@ -27,7 +27,7 @@ class TestMoliereScreening:
         mixture is the sharpest available check that the weighting is
         normalized, since any un-normalized weight shows up immediately.
         """
-        from pyRadMC.data.goudsmit_saunderson import moliere_screening
+        from pyradmc.data.goudsmit_saunderson import moliere_screening
 
         for z in (1, 6, 20, 74):
             single = moliere_screening(((z, 1.0),), 1.0)
@@ -42,7 +42,7 @@ class TestMoliereScreening:
         Both trends are structural, not fitted, so a sign error or a swapped
         momentum factor cannot hide behind a plausible magnitude.
         """
-        from pyRadMC.data.goudsmit_saunderson import moliere_screening
+        from pyradmc.data.goudsmit_saunderson import moliere_screening
 
         energies = [0.2, 1.0, 6.0, 20.0]
         etas = [moliere_screening(((8, 1.0),), e) for e in energies]
@@ -61,8 +61,8 @@ class TestMoliereScreening:
         Bohr-radius unit conversion wrong moves it by many decades — the failure
         mode this catches.
         """
-        from pyRadMC.data.goudsmit_saunderson import moliere_screening
-        from pyRadMC.data.materials import MATERIALS, WATER
+        from pyradmc.data.goudsmit_saunderson import moliere_screening
+        from pyradmc.data.materials import MATERIALS, WATER
 
         eta = moliere_screening(MATERIALS[WATER].composition, 1.0)
         assert 1.0e-6 < eta < 1.0e-4, f"water eta at 1 MeV = {eta:.3e}, expected ~1e-5"
@@ -77,8 +77,8 @@ class TestFermiEygesAnchoringContract:
 
     @staticmethod
     def _sources() -> list[tuple[str, object, list[int]]]:
-        from pyRadMC.data.analytic import AnalyticCrossSections
-        from pyRadMC.data.materials import WATER
+        from pyradmc.data.analytic import AnalyticCrossSections
+        from pyradmc.data.materials import WATER
 
         return [("analytic", AnalyticCrossSections(), [WATER])]
 
@@ -90,7 +90,7 @@ class TestFermiEygesAnchoringContract:
         closed-form ``G_1``, the elastic path count ``Lambda`` — rather than any
         single piece, which is why it is the contract worth pinning.
         """
-        from pyRadMC.data.goudsmit_saunderson import (
+        from pyradmc.data.goudsmit_saunderson import (
             first_transport_moment,
             mean_square_angle,
         )
@@ -121,10 +121,10 @@ class TestFermiEygesAnchoringContract:
         is the right tool — and would fail loudly if a future step shrank into
         the single-scattering regime instead.
         """
-        from pyRadMC.data.analytic import AnalyticCrossSections
-        from pyRadMC.data.goudsmit_saunderson import first_transport_moment
-        from pyRadMC.data.materials import WATER
-        from pyRadMC.transport.electron import STEP_ENERGY_FRACTION
+        from pyradmc.data.analytic import AnalyticCrossSections
+        from pyradmc.data.goudsmit_saunderson import first_transport_moment
+        from pyradmc.data.materials import WATER
+        from pyradmc.transport.electron import STEP_ENERGY_FRACTION
 
         source = AnalyticCrossSections()
         rho = 1.0
@@ -144,8 +144,8 @@ class TestScreeningIsReachableThroughTheInterface:
 
     def test_every_source_answers_elastic_screening(self) -> None:
         """Concrete on the ABC, so a source cannot silently omit it."""
-        from pyRadMC.data.analytic import AnalyticCrossSections
-        from pyRadMC.data.materials import WATER
+        from pyradmc.data.analytic import AnalyticCrossSections
+        from pyradmc.data.materials import WATER
 
         eta = AnalyticCrossSections().elastic_screening(1.0, WATER)
         assert np.isfinite(eta) and eta > 0.0

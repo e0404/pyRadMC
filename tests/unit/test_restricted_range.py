@@ -14,7 +14,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from pyRadMC.data.analytic import AnalyticCrossSections
+from pyradmc.data.analytic import AnalyticCrossSections
 
 ECUT = 0.2
 WATER = 0

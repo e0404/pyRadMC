@@ -2,7 +2,7 @@
 
 Builds a synthetic patient-like CT phantom (a water body with a cortical-bone slab and
 an off-axis lung region), writes it to a NRRD file, and reads it back through the CT
-adapter (:func:`pyRadMC.adapters.ct.read_ct`) — the same path a real
+adapter (:func:`pyradmc.adapters.ct.read_ct`) — the same path a real
 DICOM/NIfTI CT takes: Hounsfield units become per-voxel density (a Schneider-like ramp)
 and registry material (HU bins into the ICRP media). It then compiles the tabulated
 multi-material backend from the EPICS libraries, transports a 6 MeV photon field, and
@@ -11,7 +11,7 @@ sagittal slice, so the dose visibly tracks the CT heterogeneities (deeper penetr
 through the low-density lung, perturbation around the bone).
 
 On first run this **downloads the ~120 MB EPDL/EEDL libraries** into
-``~/.cache/pyRadMC/epics`` (cached thereafter). Needs the ``ct`` extra (SimpleITK) and,
+``~/.cache/pyradmc/epics`` (cached thereafter). Needs the ``ct`` extra (SimpleITK) and,
 for the figure, ``examples`` (matplotlib). Defaults to Warp (GPU if present). Run from
 the repository root::
 
@@ -32,12 +32,12 @@ import matplotlib.pyplot as plt
 import numpy as np
 import SimpleITK as sitk  # noqa: N813 - the library's own conventional alias
 
-from pyRadMC.adapters.ct import read_ct
-from pyRadMC.data.tabulated import build
-from pyRadMC.data.tabulated.precompile import compile_materials
-from pyRadMC.data.tabulated.source import TabulatedCrossSections
-from pyRadMC.geometry.source import ParallelBeamSource
-from pyRadMC.rng.host import HostRNG
+from pyradmc.adapters.ct import read_ct
+from pyradmc.data.tabulated import build
+from pyradmc.data.tabulated.precompile import compile_materials
+from pyradmc.data.tabulated.source import TabulatedCrossSections
+from pyradmc.geometry.source import ParallelBeamSource
+from pyradmc.rng.host import HostRNG
 
 SPACING_MM = (3.0, 3.0, 3.0)
 SHAPE = (64, 40, 90)  # (x, y, z): ~19 x 12 x 27 cm
@@ -72,14 +72,14 @@ def make_engine(backend: str, grid, xs: TabulatedCrossSections):
         try:
             import warp as wp
 
-            from pyRadMC.backends.warp.engine import WarpEngine
+            from pyradmc.backends.warp.engine import WarpEngine
 
             device = "cuda:0" if wp.is_cuda_available() else "cpu"
             return WarpEngine(grid=grid, cross_sections=xs, device=device), f"warp:{device}"
         except Exception:
             if backend == "warp":
                 raise
-    from pyRadMC.backends.ref.engine import ReferenceEngine
+    from pyradmc.backends.ref.engine import ReferenceEngine
 
     return ReferenceEngine(grid=grid, cross_sections=xs, rng=HostRNG()), "ref"
 

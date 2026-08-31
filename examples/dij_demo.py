@@ -36,10 +36,10 @@ import warp as wp
 from matplotlib.axes import Axes
 from matplotlib.colors import LogNorm
 
-from pyRadMC.backends.warp.engine import WarpEngine
-from pyRadMC.data.analytic import AnalyticCrossSections
-from pyRadMC.geometry.grid import VoxelGrid
-from pyRadMC.geometry.source import BeamletGridSource, ParallelBeamSource
+from pyradmc.backends.warp.engine import WarpEngine
+from pyradmc.data.analytic import AnalyticCrossSections
+from pyradmc.geometry.grid import VoxelGrid
+from pyradmc.geometry.source import BeamletGridSource, ParallelBeamSource
 
 SEED = 20260711
 

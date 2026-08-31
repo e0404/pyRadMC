@@ -16,10 +16,10 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from pyRadMC.geometry.collimation import TransmissionMaskBeamletSource, TransmissionMaskSource
-from pyRadMC.geometry.source import ParallelBeamSource, PencilBeamSource, SpectralBeamletSource
-from pyRadMC.geometry.spectrum import Spectrum
-from pyRadMC.rng.host import HostRNG, uniform
+from pyradmc.geometry.collimation import TransmissionMaskBeamletSource, TransmissionMaskSource
+from pyradmc.geometry.source import ParallelBeamSource, PencilBeamSource, SpectralBeamletSource
+from pyradmc.geometry.spectrum import Spectrum
+from pyradmc.rng.host import HostRNG, uniform
 from tests.conftest import SEED
 
 ENERGY = 6.0

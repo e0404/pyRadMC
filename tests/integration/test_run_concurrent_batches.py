@@ -15,18 +15,18 @@ wp = pytest.importorskip("warp", reason="warp-lang optional dependency not insta
 
 pytestmark = pytest.mark.warp
 
-from pyRadMC.backends.warp.engine import WarpEngine  # noqa: E402
-from pyRadMC.data.analytic import AnalyticCrossSections  # noqa: E402
-from pyRadMC.geometry.collimation import TransmissionMaskSource  # noqa: E402
-from pyRadMC.geometry.grid import VoxelGrid  # noqa: E402
-from pyRadMC.geometry.source import (  # noqa: E402
+from pyradmc.backends.warp.engine import WarpEngine  # noqa: E402
+from pyradmc.data.analytic import AnalyticCrossSections  # noqa: E402
+from pyradmc.geometry.collimation import TransmissionMaskSource  # noqa: E402
+from pyradmc.geometry.grid import VoxelGrid  # noqa: E402
+from pyradmc.geometry.source import (  # noqa: E402
     ParallelBeamSource,
     Primary,
     Source,
     SpectralBeamSource,
 )
-from pyRadMC.geometry.spectrum import Spectrum  # noqa: E402
-from pyRadMC.rng.host import uniform  # noqa: E402
+from pyradmc.geometry.spectrum import Spectrum  # noqa: E402
+from pyradmc.rng.host import uniform  # noqa: E402
 from tests.conftest import SEED  # noqa: E402
 
 

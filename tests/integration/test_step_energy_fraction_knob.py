@@ -19,11 +19,11 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from pyRadMC.backends.ref.engine import ReferenceEngine
-from pyRadMC.data.analytic import AnalyticCrossSections
-from pyRadMC.geometry.grid import VoxelGrid
-from pyRadMC.geometry.source import ParallelBeamSource
-from pyRadMC.rng.host import HostRNG
+from pyradmc.backends.ref.engine import ReferenceEngine
+from pyradmc.data.analytic import AnalyticCrossSections
+from pyradmc.geometry.grid import VoxelGrid
+from pyradmc.geometry.source import ParallelBeamSource
+from pyradmc.rng.host import HostRNG
 from tests.conftest import SEED, assert_chi2_consistent_batched
 
 ENERGY_BALANCE_RTOL = 1.0e-4
@@ -47,7 +47,7 @@ def _ref(grid: VoxelGrid) -> ReferenceEngine:
 
 def test_default_resolves_to_the_shipped_gs_fraction() -> None:
     """``None`` equals the GS configuration's constant on the reference oracle."""
-    from pyRadMC.transport.electron import GS_STEP_ENERGY_FRACTION
+    from pyradmc.transport.electron import GS_STEP_ENERGY_FRACTION
 
     grid = _grid()
     kwargs = dict(n_histories=2_000, n_batches=4, seed=SEED)
@@ -58,7 +58,7 @@ def test_default_resolves_to_the_shipped_gs_fraction() -> None:
 
 def test_default_resolves_to_the_instrument_fraction_under_gaussian() -> None:
     """``None`` equals 0.05 when the Gaussian instrument is selected."""
-    from pyRadMC.transport.electron import STEP_ENERGY_FRACTION
+    from pyradmc.transport.electron import STEP_ENERGY_FRACTION
 
     grid = _grid()
     kwargs = dict(n_histories=2_000, n_batches=4, seed=SEED, msc_model="gaussian")
@@ -89,7 +89,7 @@ def test_nondefault_fraction_reaches_the_substep_loop_on_warp(device: str) -> No
     wp = pytest.importorskip("warp", reason="warp-lang optional dependency not installed")
     if device.startswith("cuda") and not wp.is_cuda_available():
         pytest.skip("no CUDA device")
-    from pyRadMC.backends.warp.engine import WarpEngine
+    from pyradmc.backends.warp.engine import WarpEngine
 
     grid = _grid()
     engine = WarpEngine(grid=grid, cross_sections=_xs(grid), device=device)
@@ -106,7 +106,7 @@ def test_nondefault_fraction_reaches_the_substep_loop_on_warp(device: str) -> No
 def test_knob_means_the_same_physics_on_both_backends() -> None:
     """ref and warp at 0.10 stay chi-squared consistent — one knob, one meaning."""
     pytest.importorskip("warp", reason="warp-lang optional dependency not installed")
-    from pyRadMC.backends.warp.engine import WarpEngine
+    from pyradmc.backends.warp.engine import WarpEngine
 
     grid = _grid()
     kwargs = dict(n_batches=12, seed=SEED, step_energy_fraction=0.10)
@@ -131,8 +131,8 @@ def test_knob_means_the_same_physics_on_both_backends() -> None:
 def test_knob_is_plumbed_through_the_dij() -> None:
     """run_dij carries the knob too; ledger closes at a non-default value."""
     pytest.importorskip("warp", reason="warp-lang optional dependency not installed")
-    from pyRadMC.backends.warp.engine import WarpEngine
-    from pyRadMC.geometry.source import BeamletGridSource
+    from pyradmc.backends.warp.engine import WarpEngine
+    from pyradmc.geometry.source import BeamletGridSource
 
     grid = _grid()
     lattice = BeamletGridSource(

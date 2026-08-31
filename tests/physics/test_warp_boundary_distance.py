@@ -54,7 +54,7 @@ def boundary_distances(request):
     if device.startswith("cuda") and not wp.is_cuda_available():
         pytest.skip("no CUDA device")
 
-    from pyRadMC.backends.warp.physics import warp_physics
+    from pyradmc.backends.warp.physics import warp_physics
 
     distance_fn = warp_physics().distance_to_voxel_boundary
 

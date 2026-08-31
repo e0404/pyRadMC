@@ -1,6 +1,6 @@
 """A user BeamletSource drives the reference Dij.
 
-The Dij engine asks a :class:`~pyRadMC.geometry.source.BeamletSource` only for
+The Dij engine asks a :class:`~pyradmc.geometry.source.BeamletSource` only for
 ``n_beamlets`` and per-beamlet ``emit`` (beamlet *geometry* is the source's own
 business), so a user can define an arbitrary beamlet layout. This pins that a custom
 strip-lattice source assembles a correct Dij on the reference backend: energy
@@ -14,11 +14,11 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from pyRadMC.backends.ref.engine import ReferenceEngine
-from pyRadMC.data.analytic import AnalyticCrossSections
-from pyRadMC.geometry.grid import VoxelGrid
-from pyRadMC.geometry.source import BeamletSource, Primary
-from pyRadMC.rng.host import HostRNG, uniform
+from pyradmc.backends.ref.engine import ReferenceEngine
+from pyradmc.data.analytic import AnalyticCrossSections
+from pyradmc.geometry.grid import VoxelGrid
+from pyradmc.geometry.source import BeamletSource, Primary
+from pyradmc.rng.host import HostRNG, uniform
 from tests.conftest import SEED
 
 ENERGY = 6.0

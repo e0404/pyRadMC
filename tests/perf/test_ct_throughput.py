@@ -13,7 +13,7 @@ generation added the same day runs the open field at ~7.5e7 histories/s and the
 100-beamlet Dij at ~2.5e6.
 
 Alerts, not pass/fail: baselines drift, no floor. Requires the EPICS libraries in
-the default cache (``python -m pyRadMC.data.tabulated.build`` or any tabulated
+the default cache (``python -m pyradmc.data.tabulated.build`` or any tabulated
 demo fetches them); skips rather than downloading ~120 MB from a perf tier.
 """
 
@@ -26,12 +26,12 @@ from tests.conftest import SEED
 
 wp = pytest.importorskip("warp", reason="warp-lang optional dependency not installed")
 
-from pyRadMC.adapters.ct import grid_from_hu  # noqa: E402
-from pyRadMC.data.tabulated import build  # noqa: E402
-from pyRadMC.data.tabulated.precompile import compile_materials  # noqa: E402
-from pyRadMC.data.tabulated.source import TabulatedCrossSections  # noqa: E402
-from pyRadMC.geometry.source import SpectralBeamletSource, SpectralBeamSource  # noqa: E402
-from pyRadMC.geometry.spectrum import ali_rogers_mv  # noqa: E402
+from pyradmc.adapters.ct import grid_from_hu  # noqa: E402
+from pyradmc.data.tabulated import build  # noqa: E402
+from pyradmc.data.tabulated.precompile import compile_materials  # noqa: E402
+from pyradmc.data.tabulated.source import TabulatedCrossSections  # noqa: E402
+from pyradmc.geometry.source import SpectralBeamletSource, SpectralBeamSource  # noqa: E402
+from pyradmc.geometry.spectrum import ali_rogers_mv  # noqa: E402
 
 pytestmark = [pytest.mark.perf, pytest.mark.warp]
 
@@ -73,8 +73,8 @@ def thorax_engine():
         pytest.skip("no CUDA device")
     epdl, eedl = build.library_path("epdl", None), build.library_path("eedl", None)
     if not (epdl.is_file() and eedl.is_file()):
-        pytest.skip("EPICS libraries not cached; run python -m pyRadMC.data.tabulated.build")
-    from pyRadMC.backends.warp.engine import WarpEngine
+        pytest.skip("EPICS libraries not cached; run python -m pyradmc.data.tabulated.build")
+    from pyradmc.backends.warp.engine import WarpEngine
 
     grid = grid_from_hu(thorax_hu(), SPACING)
     data = compile_materials(

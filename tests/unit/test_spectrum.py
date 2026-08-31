@@ -1,6 +1,6 @@
 """Histogram spectrum sampling and the Ali-Rogers analytic MV form.
 
-The :class:`~pyRadMC.geometry.spectrum.Spectrum` is the energy model of the spectral
+The :class:`~pyradmc.geometry.spectrum.Spectrum` is the energy model of the spectral
 beam sources: a photon-number histogram sampled by CDF inversion. These tests pin
 (a) the input validation and the number/energy-fluence conversion as exact algebra,
 (b) the sampled energies against the input histogram with the chi-squared detection
@@ -15,8 +15,8 @@ import numpy as np
 import pytest
 from scipy import stats
 
-from pyRadMC.geometry.spectrum import ALI_ROGERS_BEAMS, AliRogersMV, Spectrum, ali_rogers_mv
-from pyRadMC.rng.host import HostRNG
+from pyradmc.geometry.spectrum import ALI_ROGERS_BEAMS, AliRogersMV, Spectrum, ali_rogers_mv
+from pyradmc.rng.host import HostRNG
 from tests.conftest import SEED
 
 EDGES = (0.5, 1.0, 2.0, 4.0, 6.0)
@@ -187,7 +187,7 @@ def _line_to_continuum(params: AliRogersMV, n_bins: int = 100) -> tuple[float, f
     — the line-to-continuum ratio, the line's share of all emitted photons, and the
     normalized continuum content of the bin holding 511 keV.
 
-    Nothing here reaches into :mod:`pyRadMC.geometry.spectrum` internals: the point
+    Nothing here reaches into :mod:`pyradmc.geometry.spectrum` internals: the point
     of these tests is to constrain ``ali_rogers_mv`` from the outside, so that a wrong
     mu(E) parameterization or a wrong quadrature cannot satisfy them by construction.
     """

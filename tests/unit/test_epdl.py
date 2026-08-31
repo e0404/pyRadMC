@@ -13,9 +13,9 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from pyRadMC.data.interface import PhotonProcess
-from pyRadMC.data.materials import AVOGADRO
-from pyRadMC.data.tabulated.epdl import (
+from pyradmc.data.interface import PhotonProcess
+from pyradmc.data.materials import AVOGADRO
+from pyradmc.data.tabulated.epdl import (
     STANDARD_ATOMIC_WEIGHT,
     element_coherent_form_factor,
     element_photon_channels,

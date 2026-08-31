@@ -1,6 +1,6 @@
 """Synthetic IAEA phase-space fixtures, generated in code (never committed as binaries).
 
-The reader (:mod:`pyRadMC.geometry.phasespace`) is pinned independently in
+The reader (:mod:`pyradmc.geometry.phasespace`) is pinned independently in
 ``tests/unit/test_iaea_phsp.py`` against hand-authored bytes and a real reference
 file, so writing fixtures to the same spec here to feed *source* tests is not
 circular — these files exercise the source, not the reader.

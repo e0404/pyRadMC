@@ -33,7 +33,7 @@ pytest -m ""                      # every tier, adding validation and perf
 pytest -m validation              # validation tier alone (slow; needs EPICS data)
 pytest -m perf --benchmark-only   # perf tier against recorded baselines
 ruff check . && ruff format .     # lint and format
-mypy pyRadMC                      # types (--strict; kernels exempt)
+mypy pyradmc                      # types (--strict; kernels exempt)
 pre-commit run --all-files        # everything the commit hook gates on
 mkdocs build --strict             # docs, as CI and ReadTheDocs build them
 ```

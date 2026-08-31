@@ -1,10 +1,10 @@
 """Demo: a divergent polyenergetic photon field from the spectral beam source.
 
-A :class:`~pyRadMC.geometry.source.SpectralBeamSource` fans a 6 MV spectrum — the
+A :class:`~pyradmc.geometry.source.SpectralBeamSource` fans a 6 MV spectrum — the
 Ali and Rogers (2012) analytic form with the fitted Varian 6 MV parameters — from a
 focal spot at 100 cm SSD through a 10 x 10 cm aperture at the water surface. This is
 the source model the pyRadPlan adapter feeds (its beamlet-resolved sibling,
-:class:`~pyRadMC.geometry.source.SpectralBeamletSource`, drives ``run_dij``).
+:class:`~pyradmc.geometry.source.SpectralBeamletSource`, drives ``run_dij``).
 
 The figure reads at a glance like a linac commissioning plot:
 
@@ -32,11 +32,11 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 
-from pyRadMC.data.analytic import AnalyticCrossSections
-from pyRadMC.geometry.grid import VoxelGrid
-from pyRadMC.geometry.source import SpectralBeamSource
-from pyRadMC.geometry.spectrum import ali_rogers_mv
-from pyRadMC.rng.host import HostRNG
+from pyradmc.data.analytic import AnalyticCrossSections
+from pyradmc.geometry.grid import VoxelGrid
+from pyradmc.geometry.source import SpectralBeamSource
+from pyradmc.geometry.spectrum import ali_rogers_mv
+from pyradmc.rng.host import HostRNG
 
 BEAM = "varian-6mv"
 SSD_CM = 100.0
@@ -52,14 +52,14 @@ def make_engine(backend: str, grid: VoxelGrid, xs: AnalyticCrossSections):
         try:
             import warp as wp
 
-            from pyRadMC.backends.warp.engine import WarpEngine
+            from pyradmc.backends.warp.engine import WarpEngine
 
             device = "cuda:0" if wp.is_cuda_available() else "cpu"
             return WarpEngine(grid=grid, cross_sections=xs, device=device), f"warp:{device}"
         except Exception:
             if backend == "warp":
                 raise
-    from pyRadMC.backends.ref.engine import ReferenceEngine
+    from pyradmc.backends.ref.engine import ReferenceEngine
 
     return ReferenceEngine(grid=grid, cross_sections=xs, rng=HostRNG()), "ref"
 

@@ -1,6 +1,6 @@
 """Every engine result carries the configuration that produced it.
 
-:class:`~pyRadMC.backends.results.RunProvenance` is optional on the result
+:class:`~pyradmc.backends.results.RunProvenance` is optional on the result
 dataclasses — a hand-assembled or reloaded result need not fabricate one — so the
 guarantee that *engine* results always carry it cannot live in the type. It lives
 here instead, across both backends and both entry points (``run`` and ``run_dij``),
@@ -17,12 +17,12 @@ from __future__ import annotations
 
 import pytest
 
-import pyRadMC
-from pyRadMC.backends.ref.engine import ReferenceEngine
-from pyRadMC.data.analytic import AnalyticCrossSections
-from pyRadMC.geometry.grid import VoxelGrid
-from pyRadMC.geometry.source import BeamletGridSource, PencilBeamSource
-from pyRadMC.rng.host import HostRNG
+import pyradmc
+from pyradmc.backends.ref.engine import ReferenceEngine
+from pyradmc.data.analytic import AnalyticCrossSections
+from pyradmc.geometry.grid import VoxelGrid
+from pyradmc.geometry.source import BeamletGridSource, PencilBeamSource
+from pyradmc.rng.host import HostRNG
 
 SEED = 20260726
 
@@ -56,7 +56,7 @@ def test_run_records_what_the_call_requested(engine: ReferenceEngine) -> None:
 
     provenance = result.provenance
     assert provenance is not None
-    assert provenance.version == pyRadMC.__version__
+    assert provenance.version == pyradmc.__version__
     assert provenance.backend == "ref"
     assert provenance.device == "cpu"
     assert provenance.seed == SEED
@@ -73,7 +73,7 @@ def test_unspecified_step_fraction_is_recorded_resolved(engine: ReferenceEngine)
     Storing the caller's ``None`` would make the record useless for exactly the
     runs that use the shipped defaults, i.e. almost all of them.
     """
-    from pyRadMC.transport.electron import default_step_energy_fraction
+    from pyradmc.transport.electron import default_step_energy_fraction
 
     result = engine.run(_beam(), n_histories=16, n_batches=2, seed=SEED, msc_model="gs")
 
@@ -106,7 +106,7 @@ def test_summary_names_the_run(engine: ReferenceEngine) -> None:
 
     assert result.provenance is not None
     summary = result.provenance.summary()
-    assert pyRadMC.__version__ in summary
+    assert pyradmc.__version__ in summary
     assert "ref/cpu" in summary
     assert str(SEED) in summary
 
@@ -120,7 +120,7 @@ def test_warp_backend_records_its_device() -> None:
     at all.
     """
     pytest.importorskip("warp", reason="warp-lang optional dependency not installed")
-    from pyRadMC.backends.warp.engine import WarpEngine
+    from pyradmc.backends.warp.engine import WarpEngine
 
     grid = VoxelGrid.uniform_water(shape=(8, 8, 8), spacing=(0.5, 0.5, 0.5))
     result = WarpEngine(
@@ -133,7 +133,7 @@ def test_warp_backend_records_its_device() -> None:
     assert result.provenance.backend == "warp"
     assert result.provenance.device == "cpu"
     assert result.provenance.seed == SEED
-    assert result.provenance.version == pyRadMC.__version__
+    assert result.provenance.version == pyradmc.__version__
 
 
 def test_provenance_does_not_perturb_the_dose(engine: ReferenceEngine) -> None:

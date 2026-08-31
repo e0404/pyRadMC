@@ -14,9 +14,9 @@ import warnings
 import numpy as np
 import pytest
 
-from pyRadMC import DIJ_TRUNCATION_RELATIVE, GY_PER_MEV_PER_G
-from pyRadMC.geometry.grid import VoxelGrid
-from pyRadMC.scoring.dij import BatchedBeamletScorer, DijAssembler, DijResult
+from pyradmc import DIJ_TRUNCATION_RELATIVE, GY_PER_MEV_PER_G
+from pyradmc.geometry.grid import VoxelGrid
+from pyradmc.scoring.dij import BatchedBeamletScorer, DijAssembler, DijResult
 
 
 def _grid() -> VoxelGrid:
@@ -98,7 +98,7 @@ class TestBatchedBeamletScorer:
         """Position-based deposits: inside the scoring grid they land in the
         beamlet's column at the C-order flat index; outside (but inside the CT)
         they go to the unscored ledger, never clamped into an edge voxel."""
-        from pyRadMC.scoring.grid import ScoringGrid
+        from pyradmc.scoring.grid import ScoringGrid
 
         grid = _grid()  # transport: [0, 2)^3
         sg = ScoringGrid.rebin(

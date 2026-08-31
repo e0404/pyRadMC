@@ -3,7 +3,7 @@
 The engine's built-in sources are a pencil, a broad parallel field, and a beamlet
 lattice. This shows a source they do *not* provide — a **Gaussian pencil beam** (a
 photon beam whose lateral fluence is a 2-D Gaussian) — written by subclassing
-:class:`pyRadMC.geometry.source.Source`. Two things are all that a custom source needs:
+:class:`pyradmc.geometry.source.Source`. Two things are all that a custom source needs:
 
 * ``emit`` + ``max_energy`` — the host contract. The reference backend transports it
   directly, and (the *simple* GPU route) the default ``sample_batch`` host-samples it
@@ -33,10 +33,10 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 
-from pyRadMC.data.analytic import AnalyticCrossSections
-from pyRadMC.geometry.grid import VoxelGrid
-from pyRadMC.geometry.source import Primary, Source
-from pyRadMC.rng.host import HostRNG, uniform
+from pyradmc.data.analytic import AnalyticCrossSections
+from pyradmc.geometry.grid import VoxelGrid
+from pyradmc.geometry.source import Primary, Source
+from pyradmc.rng.host import HostRNG, uniform
 
 ENERGY = 6.0
 SIGMA_CM = 2.0  # lateral Gaussian sigma
@@ -46,9 +46,9 @@ Z_ENTRY = -1.0
 try:  # the warp_sampler is only defined when warp is available; emit works regardless.
     import warp as wp
 
-    from pyRadMC.rng.warp_shim import WarpRNGState
-    from pyRadMC.rng.warp_shim import uniform as wp_uniform
-    from pyRadMC.transport.particles import PHOTON
+    from pyradmc.rng.warp_shim import WarpRNGState
+    from pyradmc.rng.warp_shim import uniform as wp_uniform
+    from pyradmc.transport.particles import PHOTON
 
     @wp.func
     def _gaussian_sampler(history_index: int, state: WarpRNGState):
@@ -93,14 +93,14 @@ def make_engine(backend: str, grid: VoxelGrid, xs: AnalyticCrossSections):
         try:
             import warp as wp
 
-            from pyRadMC.backends.warp.engine import WarpEngine
+            from pyradmc.backends.warp.engine import WarpEngine
 
             device = "cuda:0" if wp.is_cuda_available() else "cpu"
             return WarpEngine(grid=grid, cross_sections=xs, device=device), f"warp:{device}"
         except Exception:
             if backend == "warp":
                 raise
-    from pyRadMC.backends.ref.engine import ReferenceEngine
+    from pyradmc.backends.ref.engine import ReferenceEngine
 
     return ReferenceEngine(grid=grid, cross_sections=xs, rng=HostRNG()), "ref"
 

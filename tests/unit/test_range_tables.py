@@ -13,8 +13,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from pyRadMC.data.analytic import AnalyticCrossSections
-from pyRadMC.data.tables import build_cross_section_tables, lookup_loglinear_2d
+from pyradmc.data.analytic import AnalyticCrossSections
+from pyradmc.data.tables import build_cross_section_tables, lookup_loglinear_2d
 
 ECUT = 0.2
 PCUT = 0.05

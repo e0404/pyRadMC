@@ -1,113 +1,113 @@
 # API reference
 
-Everything on this page is importable directly from the top-level `pyRadMC` namespace and
+Everything on this page is importable directly from the top-level `pyradmc` namespace and
 is **supported and versioned**. Anything not documented here is an implementation detail
 that may move between releases, even if it is importable.
 
 ```python
-from pyRadMC import VoxelGrid, ReferenceEngine, WarpEngine  # etc.
+from pyradmc import VoxelGrid, ReferenceEngine, WarpEngine  # etc.
 ```
 
-Re-exports are lazy, so importing `pyRadMC` costs nothing and does not pull in NumPy,
+Re-exports are lazy, so importing `pyradmc` costs nothing and does not pull in NumPy,
 SciPy, Warp or SimpleITK. A core-only install can name `WarpEngine` without having warp
 installed; touching it then raises an error naming the extra to install.
 
 ## Engines
 
-::: pyRadMC.backends.ref.engine.ReferenceEngine
+::: pyradmc.backends.ref.engine.ReferenceEngine
 
-::: pyRadMC.backends.warp.engine.WarpEngine
+::: pyradmc.backends.warp.engine.WarpEngine
 
 ## Results
 
-::: pyRadMC.backends.results.TransportResult
+::: pyradmc.backends.results.TransportResult
 
-::: pyRadMC.backends.results.RunProvenance
+::: pyradmc.backends.results.RunProvenance
 
-::: pyRadMC.scoring.dij.DijResult
+::: pyradmc.scoring.dij.DijResult
 
 ## Geometry and scoring
 
-::: pyRadMC.geometry.grid.VoxelGrid
+::: pyradmc.geometry.grid.VoxelGrid
 
-::: pyRadMC.scoring.grid.ScoringGrid
+::: pyradmc.scoring.grid.ScoringGrid
 
-::: pyRadMC.scoring.cylinder.CylindricalScoringGrid
+::: pyradmc.scoring.cylinder.CylindricalScoringGrid
 
-::: pyRadMC.scoring.cylinder.uniform_edges
+::: pyradmc.scoring.cylinder.uniform_edges
 
-::: pyRadMC.scoring.cylinder.geometric_edges
+::: pyradmc.scoring.cylinder.geometric_edges
 
-::: pyRadMC.scoring.cylinder.graded_edges
+::: pyradmc.scoring.cylinder.graded_edges
 
-::: pyRadMC.scoring.cylinder.common_bin_divisor
+::: pyradmc.scoring.cylinder.common_bin_divisor
 
 ## Cross-sections and materials
 
-::: pyRadMC.data.interface.CrossSectionSource
+::: pyradmc.data.interface.CrossSectionSource
 
-::: pyRadMC.data.interface.PhotonProcess
+::: pyradmc.data.interface.PhotonProcess
 
-::: pyRadMC.data.analytic.AnalyticCrossSections
+::: pyradmc.data.analytic.AnalyticCrossSections
 
-::: pyRadMC.data.tabulated.source.TabulatedCrossSections
+::: pyradmc.data.tabulated.source.TabulatedCrossSections
 
-::: pyRadMC.data.materials.MaterialData
+::: pyradmc.data.materials.MaterialData
 
 ## Sources
 
-::: pyRadMC.geometry.source.Source
+::: pyradmc.geometry.source.Source
 
-::: pyRadMC.geometry.source.BeamletSource
+::: pyradmc.geometry.source.BeamletSource
 
-::: pyRadMC.geometry.source.Primary
+::: pyradmc.geometry.source.Primary
 
-::: pyRadMC.geometry.source.PencilBeamSource
+::: pyradmc.geometry.source.PencilBeamSource
 
-::: pyRadMC.geometry.source.ParallelBeamSource
+::: pyradmc.geometry.source.ParallelBeamSource
 
-::: pyRadMC.geometry.source.BeamletGridSource
+::: pyradmc.geometry.source.BeamletGridSource
 
-::: pyRadMC.geometry.source.GaussianSpotBeamSource
+::: pyradmc.geometry.source.GaussianSpotBeamSource
 
-::: pyRadMC.geometry.source.GaussianSpotBeamletSource
+::: pyradmc.geometry.source.GaussianSpotBeamletSource
 
-::: pyRadMC.geometry.source.PrimaryFluenceBeamSource
+::: pyradmc.geometry.source.PrimaryFluenceBeamSource
 
-::: pyRadMC.geometry.source.PrimaryFluenceBeamletSource
+::: pyradmc.geometry.source.PrimaryFluenceBeamletSource
 
-::: pyRadMC.geometry.source.SpectralBeamSource
+::: pyradmc.geometry.source.SpectralBeamSource
 
-::: pyRadMC.geometry.source.SpectralBeamletSource
+::: pyradmc.geometry.source.SpectralBeamletSource
 
-::: pyRadMC.geometry.source.CompositeSource
+::: pyradmc.geometry.source.CompositeSource
 
-::: pyRadMC.geometry.source.CompositeBeamletSource
+::: pyradmc.geometry.source.CompositeBeamletSource
 
-::: pyRadMC.geometry.phasespace.PhaseSpaceSource
+::: pyradmc.geometry.phasespace.PhaseSpaceSource
 
-::: pyRadMC.geometry.phasespace.InMemoryPhaseSpaceSource
+::: pyradmc.geometry.phasespace.InMemoryPhaseSpaceSource
 
 ## Spectra
 
-::: pyRadMC.geometry.spectrum.Spectrum
+::: pyradmc.geometry.spectrum.Spectrum
 
-::: pyRadMC.geometry.spectrum.ali_rogers_mv
+::: pyradmc.geometry.spectrum.ali_rogers_mv
 
 ## Primary fluence
 
-::: pyRadMC.geometry.fluence.RadialFluence
+::: pyradmc.geometry.fluence.RadialFluence
 
 ## Random numbers
 
-::: pyRadMC.rng.host.HostRNG
+::: pyradmc.rng.host.HostRNG
 
 ## Accuracy-defining constants
 
 These live in one place so that a change to any of them is visible in a diff. They are
 not tuning knobs: changing one requires a test demonstrating the dosimetric effect.
 
-::: pyRadMC
+::: pyradmc
     options:
       members:
         - ECUT_MEV
@@ -129,8 +129,8 @@ reaches for. They are supported, but imported from their modules:
 
 | Module | What it provides |
 |---|---|
-| `pyRadMC.geometry.collimation` | Jaw pairs, rounded-tip MLC, collimated and transmission-mask source wrappers |
-| `pyRadMC.geometry.head` | Treatment-head pre-solve producing an exit-plane phase space |
-| `pyRadMC.adapters.ct` | Hounsfield calibration and CT image reading |
-| `pyRadMC.data.tabulated` | Table precompiler and the EPICS build tool |
-| `pyRadMC.study` | Toy fluence optimizer and DVH endpoints, used by the noise/bias study |
+| `pyradmc.geometry.collimation` | Jaw pairs, rounded-tip MLC, collimated and transmission-mask source wrappers |
+| `pyradmc.geometry.head` | Treatment-head pre-solve producing an exit-plane phase space |
+| `pyradmc.adapters.ct` | Hounsfield calibration and CT image reading |
+| `pyradmc.data.tabulated` | Table precompiler and the EPICS build tool |
+| `pyradmc.study` | Toy fluence optimizer and DVH endpoints, used by the noise/bias study |

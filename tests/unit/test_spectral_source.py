@@ -1,6 +1,6 @@
 """Divergent polyenergetic sources: geometry and spectrum contracts.
 
-A :class:`~pyRadMC.geometry.source.SpectralBeamletSource` fans from a focal point
+A :class:`~pyradmc.geometry.source.SpectralBeamletSource` fans from a focal point
 through per-bixel apertures at a reference plane, all **in the engine frame** —
 gantry/couch rotation is the caller's business (the pyRadPlan adapter maps world
 coordinates exactly like the CT adapter does). These tests pin the analytic
@@ -16,9 +16,9 @@ import numpy as np
 import pytest
 from scipy import stats
 
-from pyRadMC.geometry.source import Primary, SpectralBeamletSource, SpectralBeamSource
-from pyRadMC.geometry.spectrum import Spectrum
-from pyRadMC.rng.host import HostRNG
+from pyradmc.geometry.source import Primary, SpectralBeamletSource, SpectralBeamSource
+from pyradmc.geometry.spectrum import Spectrum
+from pyradmc.rng.host import HostRNG
 from tests.conftest import SEED
 
 SPECTRUM = Spectrum((0.5, 1.0, 2.0, 4.0, 6.0), (1.0, 3.0, 4.0, 2.0))

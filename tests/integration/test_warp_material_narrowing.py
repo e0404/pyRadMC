@@ -13,14 +13,14 @@ from __future__ import annotations
 
 import pytest
 
-from pyRadMC.data.analytic import AnalyticCrossSections
-from pyRadMC.geometry.grid import VoxelGrid
-from pyRadMC.geometry.source import BeamletGridSource, ParallelBeamSource
+from pyradmc.data.analytic import AnalyticCrossSections
+from pyradmc.geometry.grid import VoxelGrid
+from pyradmc.geometry.source import BeamletGridSource, ParallelBeamSource
 from tests.conftest import SEED
 
 pytest.importorskip("warp", reason="warp-lang optional dependency not installed")
 
-from pyRadMC.backends.warp.engine import WarpEngine
+from pyradmc.backends.warp.engine import WarpEngine
 
 pytestmark = pytest.mark.warp
 

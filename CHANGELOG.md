@@ -11,6 +11,17 @@ must be able to find out from this file whether the numbers should have moved.
 
 ## [Unreleased]
 
+### Changed
+
+- **The import name is now lowercase: `import pyradmc`**, following PEP 8 package
+  naming. Every module path changes with it (`pyradmc.data`, `pyradmc.geometry`, ...),
+  as do the default EPICS cache directory (`~/.cache/pyradmc/epics`) and the leading
+  token of the provenance summary string. The distribution keeps its display name, so
+  `pip install pyRadMC` and `pip install pyradmc` are the same package (PyPI normalizes
+  case), and the repository stays `e0404/pyRadMC`. Made before the first PyPI release,
+  while no released import site exists to break. The `PYRADMC_*` environment variables
+  are unchanged. No physics, numerics or dose moves.
+
 ### Added
 
 - **Tungsten heavy-alloy material** (`TUNGSTEN_ALLOY`: W 0.95 / Ni 0.035 / Cu 0.015 by
@@ -501,18 +512,18 @@ First public release.
   exact separable voxel-overlap mass rebinning and an unscored energy ledger bucket, so
   `emitted == deposited + unscored + escaped` stays exact. Optional `dose_to_water`
   scoring via restricted stopping-power ratios.
-- **CT adapter** (`pyRadMC.adapters.ct`): Hounsfield calibration to density and material,
+- **CT adapter** (`pyradmc.adapters.ct`): Hounsfield calibration to density and material,
   and a SimpleITK reader for DICOM/NIfTI/MetaImage.
 - **Correlated sampling across beamlets**, the shipped Dij default, which roughly halves
   the renormalized plan-dose error at matched per-beamlet sigma.
 - **Result provenance.** Every engine result carries a `RunProvenance` record — version,
   backend, device, seed, cutoffs, multiple-scattering model, resolved substep fraction and
   the cross-section citation — so an archived dose still says what produced it.
-- **Public API.** Everything reachable from the top-level `pyRadMC` namespace is supported
-  and versioned; re-exports are lazy, so `import pyRadMC` pulls in no third-party module
+- **Public API.** Everything reachable from the top-level `pyradmc` namespace is supported
+  and versioned; re-exports are lazy, so `import pyradmc` pulls in no third-party module
   and a core-only install does not fail on the names of optional backends. The package
   ships a PEP 561 `py.typed` marker.
-- **Cross-section library integrity.** `python -m pyRadMC.data.tabulated.build` verifies
+- **Cross-section library integrity.** `python -m pyradmc.data.tabulated.build` verifies
   every downloaded or cached EPICS library against a pinned SHA-256 before compiling
   tables, and refuses to proceed on a mismatch.
 

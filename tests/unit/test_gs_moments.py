@@ -9,7 +9,7 @@ things that everything downstream rests on:
 2. The GS second moment **reduces to the Fermi-Eyges hinge's** ``<theta^2> =
    T rho s`` in the small-step limit. This is the anchoring that makes GS a
    drop-in replacement rather than a different model: ``G_1`` is tied to
-   :meth:`~pyRadMC.data.interface.CrossSectionSource.scattering_power` by
+   :meth:`~pyradmc.data.interface.CrossSectionSource.scattering_power` by
    construction, so at small steps the two samplers agree in the second moment
    *exactly*, and any transport difference is the large-angle tail alone.
 
@@ -28,7 +28,7 @@ from tests.conftest import SEED
 def _sample_screened_rutherford_cos(xi: np.ndarray, eta: float) -> np.ndarray:
     """Single-scatter cosine by exact inverse CDF, vectorized for the oracle.
 
-    Duplicates :func:`pyRadMC.data.goudsmit_saunderson.screened_rutherford_cos_theta`
+    Duplicates :func:`pyradmc.data.goudsmit_saunderson.screened_rutherford_cos_theta`
     on purpose: an oracle that calls the implementation it checks proves nothing.
     """
     inv = xi / (2.0 * eta * (1.0 + eta)) + 1.0 / (2.0 + 2.0 * eta)
@@ -101,7 +101,7 @@ class TestScreenedRutherfordMoments:
         power; if the quadrature and the closed form disagree, the anchoring is
         silently wrong and every GS step is mis-scaled.
         """
-        from pyRadMC.data.goudsmit_saunderson import (
+        from pyradmc.data.goudsmit_saunderson import (
             first_transport_moment,
             screened_rutherford_moments,
         )
@@ -116,7 +116,7 @@ class TestScreenedRutherfordMoments:
     def test_zeroth_moment_vanishes_identically(self) -> None:
         """``G_0 = 0`` by definition, since ``P_0 = 1``; a nonzero value would
         damp the whole GS series and destroy normalization."""
-        from pyRadMC.data.goudsmit_saunderson import screened_rutherford_moments
+        from pyradmc.data.goudsmit_saunderson import screened_rutherford_moments
 
         assert screened_rutherford_moments(1.0e-4, l_max=6)[0] == pytest.approx(0.0, abs=1.0e-12)
 
@@ -133,7 +133,7 @@ class TestGoudsmitSaundersonSeries:
         assumes nothing about the Legendre series, so it catches a wrong
         normalization, a wrong screening convention, or an off-by-one in ``l``.
         """
-        from pyRadMC.data.goudsmit_saunderson import screened_rutherford_moments
+        from pyradmc.data.goudsmit_saunderson import screened_rutherford_moments
 
         eta = 1.0e-4
         l_max = 4
@@ -163,7 +163,7 @@ class TestGoudsmitSaundersonSampling:
         The Legendre series is truncated, so Gibbs ringing near the forward peak
         is the expected failure mode; this pins that the construction controls it.
         """
-        from pyRadMC.data.goudsmit_saunderson import gs_cumulative, screened_rutherford_moments
+        from pyradmc.data.goudsmit_saunderson import gs_cumulative, screened_rutherford_moments
 
         eta = 1.0e-4
         moments = screened_rutherford_moments(eta, l_max=256)
@@ -209,7 +209,7 @@ class TestGoudsmitSaundersonSampling:
         """
         from scipy import stats
 
-        from pyRadMC.data.goudsmit_saunderson import (
+        from pyradmc.data.goudsmit_saunderson import (
             first_transport_moment,
             gs_scaled_deflection_table,
         )
@@ -263,12 +263,12 @@ class TestFermiEygesLimit:
         The GS mean-square angle is ``2(1 - exp(-Lambda G_1))``, which tends to
         ``2 Lambda G_1``. With the anchoring ``2 (N/M) sigma_el G_1 = T`` and
         ``Lambda = (N/M) sigma_el rho s``, that is exactly ``T rho s`` — the
-        quantity :func:`pyRadMC.physics.msc.sample_hinge_cos_theta` is handed
+        quantity :func:`pyradmc.physics.msc.sample_hinge_cos_theta` is handed
         today. This is the identity that makes the L1 transport limit check
         meaningful: at small steps the two models share a second moment, so any
         dose difference is the large-angle tail, not a rescaling.
         """
-        from pyRadMC.data.goudsmit_saunderson import (
+        from pyradmc.data.goudsmit_saunderson import (
             first_transport_moment,
             mean_square_angle,
         )
@@ -304,7 +304,7 @@ class TestFermiEygesLimit:
         stops a later L1 transport difference from being read as a bug when it
         is the improvement being bought.
         """
-        from pyRadMC.data.goudsmit_saunderson import first_transport_moment, mean_square_angle
+        from pyradmc.data.goudsmit_saunderson import first_transport_moment, mean_square_angle
 
         g1 = first_transport_moment(1.0e-4)
         ratios = []

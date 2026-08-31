@@ -11,20 +11,20 @@ from __future__ import annotations
 
 import pytest
 
-from pyRadMC.backends.ref.engine import ReferenceEngine
-from pyRadMC.data.analytic import AnalyticCrossSections
-from pyRadMC.geometry.grid import VoxelGrid
-from pyRadMC.geometry.source import Primary, Source
-from pyRadMC.rng.host import HostRNG, uniform
+from pyradmc.backends.ref.engine import ReferenceEngine
+from pyradmc.data.analytic import AnalyticCrossSections
+from pyradmc.geometry.grid import VoxelGrid
+from pyradmc.geometry.source import Primary, Source
+from pyradmc.rng.host import HostRNG, uniform
 from tests.conftest import SEED, assert_chi2_consistent_batched
 
 wp = pytest.importorskip("warp", reason="warp-lang optional dependency not installed")
 
 pytestmark = pytest.mark.warp
 
-from pyRadMC.rng.warp_shim import WarpRNGState  # noqa: E402
-from pyRadMC.rng.warp_shim import uniform as wp_uniform  # noqa: E402
-from pyRadMC.transport.particles import PHOTON  # noqa: E402
+from pyradmc.rng.warp_shim import WarpRNGState  # noqa: E402
+from pyradmc.rng.warp_shim import uniform as wp_uniform  # noqa: E402
+from pyradmc.transport.particles import PHOTON  # noqa: E402
 
 
 @wp.func
@@ -64,7 +64,7 @@ def _grid() -> VoxelGrid:
 
 def test_warp_uses_the_sampler_not_emit() -> None:
     """A source whose emit raises still transports on Warp via its warp_sampler."""
-    from pyRadMC.backends.warp.engine import WarpEngine
+    from pyradmc.backends.warp.engine import WarpEngine
 
     grid = _grid()
     xs = AnalyticCrossSections(geometry_densities=grid.max_density_by_material())
@@ -76,7 +76,7 @@ def test_warp_uses_the_sampler_not_emit() -> None:
 
 def test_in_kernel_source_agrees_with_reference() -> None:
     """In-kernel generation matches the reference transport of the equivalent emit."""
-    from pyRadMC.backends.warp.engine import WarpEngine
+    from pyradmc.backends.warp.engine import WarpEngine
 
     grid = _grid()
     xs = AnalyticCrossSections(geometry_densities=grid.max_density_by_material())
@@ -103,7 +103,7 @@ def test_in_kernel_source_agrees_with_reference() -> None:
 
 def test_in_kernel_energy_ledger_closes() -> None:
     """emitted = deposited + escaped on Warp for the in-kernel source."""
-    from pyRadMC.backends.warp.engine import WarpEngine
+    from pyradmc.backends.warp.engine import WarpEngine
 
     grid = _grid()
     xs = AnalyticCrossSections(geometry_densities=grid.max_density_by_material())

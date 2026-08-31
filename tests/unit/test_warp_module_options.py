@@ -14,8 +14,8 @@ import pytest
 
 wp = pytest.importorskip("warp", reason="warp-lang optional dependency not installed")
 
-import pyRadMC.backends.warp.kernels  # noqa: E402
-import pyRadMC.backends.warp.presolve  # noqa: E402, F401
+import pyradmc.backends.warp.kernels  # noqa: E402
+import pyradmc.backends.warp.presolve  # noqa: E402, F401
 
 pytestmark = pytest.mark.warp
 
@@ -25,21 +25,21 @@ def _options(module_name: str) -> dict:
 
 
 def test_transport_kernels_skip_backward_compilation() -> None:
-    assert _options("pyRadMC.backends.warp.kernels")["enable_backward"] is False
+    assert _options("pyradmc.backends.warp.kernels")["enable_backward"] is False
 
 
 def test_presolve_skips_backward_compilation() -> None:
-    assert _options("pyRadMC.backends.warp.presolve")["enable_backward"] is False
+    assert _options("pyradmc.backends.warp.presolve")["enable_backward"] is False
 
 
 def test_transport_kernels_use_fast_math() -> None:
     # Approximate transcendentals, measured 14-23% on the latency-bound transport
     # (2026-07-18); within-device bit reproducibility is unaffected (one binary),
     # and cross-target equivalence is statistical by contract (AGENTS.md 2.3).
-    assert _options("pyRadMC.backends.warp.kernels")["fast_math"] is True
+    assert _options("pyradmc.backends.warp.kernels")["fast_math"] is True
 
 
 def test_presolve_keeps_precise_math() -> None:
     # The device pre-solve's attenuation mode is pinned float32-exact against the
     # host (test_device_presolve); approximate division would break that parity.
-    assert _options("pyRadMC.backends.warp.presolve")["fast_math"] is False
+    assert _options("pyradmc.backends.warp.presolve")["fast_math"] is False

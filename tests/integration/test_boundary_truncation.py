@@ -19,11 +19,11 @@ from __future__ import annotations
 
 import numpy as np
 
-from pyRadMC.data.analytic import AnalyticCrossSections
-from pyRadMC.data.materials import WATER
-from pyRadMC.geometry.grid import VoxelGrid
-from pyRadMC.rng.host import HostRNG
-from pyRadMC.transport.electron import electron_steps
+from pyradmc.data.analytic import AnalyticCrossSections
+from pyradmc.data.materials import WATER
+from pyradmc.geometry.grid import VoxelGrid
+from pyradmc.rng.host import HostRNG
+from pyradmc.transport.electron import electron_steps
 from tests.conftest import SEED
 
 NZ = 80

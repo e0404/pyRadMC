@@ -15,15 +15,15 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from pyRadMC.backends.ref.engine import ReferenceEngine, TransportResult
-from pyRadMC.data.analytic import AnalyticCrossSections
-from pyRadMC.data.materials import WATER
-from pyRadMC.data.tabulated.model import TabulatedData
-from pyRadMC.data.tabulated.precompile import compile_water
-from pyRadMC.data.tabulated.source import TabulatedCrossSections
-from pyRadMC.geometry.grid import VoxelGrid
-from pyRadMC.geometry.source import ParallelBeamSource, PencilBeamSource
-from pyRadMC.rng.host import HostRNG
+from pyradmc.backends.ref.engine import ReferenceEngine, TransportResult
+from pyradmc.data.analytic import AnalyticCrossSections
+from pyradmc.data.materials import WATER
+from pyradmc.data.tabulated.model import TabulatedData
+from pyradmc.data.tabulated.precompile import compile_water
+from pyradmc.data.tabulated.source import TabulatedCrossSections
+from pyradmc.geometry.grid import VoxelGrid
+from pyradmc.geometry.source import ParallelBeamSource, PencilBeamSource
+from pyradmc.rng.host import HostRNG
 from tests.conftest import SEED
 
 

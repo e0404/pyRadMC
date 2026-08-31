@@ -11,14 +11,14 @@ import pytest
 
 
 def _make_grid():
-    from pyRadMC.geometry.grid import VoxelGrid
+    from pyradmc.geometry.grid import VoxelGrid
 
     return VoxelGrid.uniform_water(shape=(2, 1, 1), spacing=(2.0, 1.0, 1.0))
 
 
 def test_mean_and_sigma_match_hand_calculation() -> None:
     """Three batches, one voxel fed known energies: mean and sigma are textbook."""
-    from pyRadMC.scoring.dose import BatchedDoseScorer
+    from pyradmc.scoring.dose import BatchedDoseScorer
 
     grid = _make_grid()
     scorer = BatchedDoseScorer(grid, n_batches=3)
@@ -43,7 +43,7 @@ def test_mean_and_sigma_match_hand_calculation() -> None:
 
 
 def test_deposits_within_a_batch_accumulate() -> None:
-    from pyRadMC.scoring.dose import BatchedDoseScorer
+    from pyradmc.scoring.dose import BatchedDoseScorer
 
     scorer = BatchedDoseScorer(_make_grid(), n_batches=1)
     scorer.deposit(1, 0, 0, 1.5)
@@ -54,7 +54,7 @@ def test_deposits_within_a_batch_accumulate() -> None:
 
 
 def test_finalize_requires_all_batches_closed() -> None:
-    from pyRadMC.scoring.dose import BatchedDoseScorer
+    from pyradmc.scoring.dose import BatchedDoseScorer
 
     scorer = BatchedDoseScorer(_make_grid(), n_batches=2)
     scorer.deposit(0, 0, 0, 1.0)
@@ -65,7 +65,7 @@ def test_finalize_requires_all_batches_closed() -> None:
 
 def test_deposit_grid_equals_equivalent_scalar_deposits() -> None:
     """The kernel backends' bulk entry point is exactly a batch of deposit calls."""
-    from pyRadMC.scoring.dose import BatchedDoseScorer
+    from pyradmc.scoring.dose import BatchedDoseScorer
 
     grid = _make_grid()
     energy = np.zeros(grid.shape)
@@ -87,7 +87,7 @@ def test_deposit_grid_equals_equivalent_scalar_deposits() -> None:
 
 
 def test_deposit_grid_rejects_shape_mismatch() -> None:
-    from pyRadMC.scoring.dose import BatchedDoseScorer
+    from pyradmc.scoring.dose import BatchedDoseScorer
 
     scorer = BatchedDoseScorer(_make_grid(), n_batches=1)
     with pytest.raises(ValueError, match="shape"):
@@ -103,7 +103,7 @@ def test_deposit_at_matches_index_deposit_on_the_transport_grid() -> None:
     """On the default (transport) scoring grid, deposit_at(x,y,z) is exactly the
     index-based deposit at the containing voxel — the byte-identity anchor for
     the engines' scoring_grid=None path."""
-    from pyRadMC.scoring.dose import BatchedDoseScorer
+    from pyradmc.scoring.dose import BatchedDoseScorer
 
     grid = _make_grid()  # (2,1,1), spacing (2,1,1)
     by_index = BatchedDoseScorer(grid, n_batches=1)
@@ -124,8 +124,8 @@ def test_deposit_at_outside_scoring_grid_goes_to_unscored_never_clamped() -> Non
     """A deposit inside the CT but outside the dose grid must land in the
     unscored ledger bucket, not be clamped into an edge voxel (which would
     corrupt edge dose)."""
-    from pyRadMC.scoring.dose import BatchedDoseScorer
-    from pyRadMC.scoring.grid import ScoringGrid
+    from pyradmc.scoring.dose import BatchedDoseScorer
+    from pyradmc.scoring.grid import ScoringGrid
 
     grid = _make_grid()  # transport: x in [0, 4)
     # Scoring subregion: x in [0, 2) only.
@@ -145,8 +145,8 @@ def test_deposit_at_outside_scoring_grid_goes_to_unscored_never_clamped() -> Non
 def test_uncovered_scoring_voxel_reports_zero_dose_not_nan() -> None:
     """A scoring voxel outside the transport grid has zero mass; its dose is
     reported as zero, never NaN, and it cannot silently swallow energy."""
-    from pyRadMC.scoring.dose import BatchedDoseScorer
-    from pyRadMC.scoring.grid import ScoringGrid
+    from pyradmc.scoring.dose import BatchedDoseScorer
+    from pyradmc.scoring.grid import ScoringGrid
 
     grid = _make_grid()  # transport: x in [0, 4)
     # Two scoring voxels; the second spans x in [4, 8): entirely uncovered.

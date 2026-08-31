@@ -14,12 +14,12 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from pyRadMC import DIJ_TRUNCATION_RELATIVE
-from pyRadMC.backends.ref.engine import ReferenceEngine
-from pyRadMC.data.analytic import AnalyticCrossSections
-from pyRadMC.geometry.grid import VoxelGrid
-from pyRadMC.geometry.source import BeamletGridSource, ParallelBeamSource
-from pyRadMC.rng.host import HostRNG
+from pyradmc import DIJ_TRUNCATION_RELATIVE
+from pyradmc.backends.ref.engine import ReferenceEngine
+from pyradmc.data.analytic import AnalyticCrossSections
+from pyradmc.geometry.grid import VoxelGrid
+from pyradmc.geometry.source import BeamletGridSource, ParallelBeamSource
+from pyradmc.rng.host import HostRNG
 from tests.conftest import SEED, assert_chi2_consistent_batched
 
 FIELD_X = (2.0, 14.0)

@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import pytest
 
-from pyRadMC.data.materials import MATERIALS
-from pyRadMC.data.tabulated.precompile import (
+from pyradmc.data.materials import MATERIALS
+from pyradmc.data.tabulated.precompile import (
     ElectronStoppingStrategy,
     compile_materials,
     compile_water,

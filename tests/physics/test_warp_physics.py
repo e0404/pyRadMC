@@ -20,7 +20,7 @@ import numpy as np
 import pytest
 from scipy import integrate, stats
 
-from pyRadMC import ELECTRON_MASS_MEV
+from pyradmc import ELECTRON_MASS_MEV
 from tests.conftest import SEED
 
 wp = pytest.importorskip("warp", reason="warp-lang optional dependency not installed")
@@ -54,8 +54,8 @@ def device_samples(request):
     if device.startswith("cuda") and not wp.is_cuda_available():
         pytest.skip("no CUDA device")
 
-    from pyRadMC.backends.warp.physics import warp_physics
-    from pyRadMC.rng.warp_shim import WarpRNGState, init_slot
+    from pyradmc.backends.warp.physics import warp_physics
+    from pyradmc.rng.warp_shim import WarpRNGState, init_slot
 
     p = warp_physics()
 
@@ -146,22 +146,22 @@ def _assert_histogram_matches_pdf(
 def test_host_physics_modules_stay_untouched() -> None:
     """Loading the warp physics must not replace or mutate the host modules.
 
-    The loader re-imports the physics sources under shimmed ``pyRadMC.rng`` and
+    The loader re-imports the physics sources under shimmed ``pyradmc.rng`` and
     ``math`` entries. If the host modules or their parent-package attributes end up
     pointing at the warp copies, the reference backend silently starts calling
     ``@wp.func`` objects — the exact single-source failure mode this design avoids.
     """
-    import pyRadMC.physics
-    from pyRadMC.backends.warp.physics import warp_physics
-    from pyRadMC.physics import compton as host_compton
-    from pyRadMC.rng.host import HostRNG
+    import pyradmc.physics
+    from pyradmc.backends.warp.physics import warp_physics
+    from pyradmc.physics import compton as host_compton
+    from pyradmc.rng.host import HostRNG
 
     p = warp_physics()
 
-    import pyRadMC.physics.compton
+    import pyradmc.physics.compton
 
-    assert pyRadMC.physics.compton is host_compton
-    assert getattr(pyRadMC.physics, "compton") is host_compton  # noqa: B009
+    assert pyradmc.physics.compton is host_compton
+    assert getattr(pyradmc.physics, "compton") is host_compton  # noqa: B009
     assert p.sample_compton_energy_ratio is not host_compton.sample_compton_energy_ratio
 
     # The host function still runs on a host RNG state (a wp.func would not).
@@ -172,7 +172,7 @@ def test_host_physics_modules_stay_untouched() -> None:
 
 def test_warp_physics_is_a_singleton() -> None:
     """Kernels must all reference one compiled copy of each function."""
-    from pyRadMC.backends.warp.physics import warp_physics
+    from pyradmc.backends.warp.physics import warp_physics
 
     assert warp_physics() is warp_physics()
 
@@ -208,7 +208,7 @@ class TestSampledDistributions:
         )
 
     def test_moller_spectrum_matches_dcs(self, device_samples: np.ndarray) -> None:
-        from pyRadMC.data.analytic import moller_dcs_per_electron
+        from pyradmc.data.analytic import moller_dcs_per_electron
 
         w = device_samples[:, 9]
         assert np.all(w >= MOLLER_CUT - 1e-6)
@@ -268,7 +268,7 @@ class TestDeterministicParity:
         transport loop never evaluates it there, because sub-ECUT recoils deposit
         locally instead of spawning. 50 keV is far below any ECUT this engine allows.
         """
-        from pyRadMC.physics.compton import compton_electron_cos_theta
+        from pyradmc.physics.compton import compton_electron_cos_theta
 
         r = device_samples[:, 2]
         used = r < 1.0 - 0.050 / COMPTON_ENERGY
@@ -282,7 +282,7 @@ class TestDeterministicParity:
         assert np.all(np.abs(norm_sq - 1.0) < 1e-5)
 
     def test_moller_cosines_match_host(self, device_samples: np.ndarray) -> None:
-        from pyRadMC.physics.moller import moller_direction_cosines
+        from pyradmc.physics.moller import moller_direction_cosines
 
         w = device_samples[:, 9]
         want = np.array([moller_direction_cosines(MOLLER_ENERGY, float(wi)) for wi in w])
@@ -304,7 +304,7 @@ class TestDeterministicParity:
         np.testing.assert_allclose(transverse, 0.0, atol=2e-3 * p_in)
 
     def test_brems_step_parameters_match_host(self, device_samples: np.ndarray) -> None:
-        from pyRadMC.physics.brems import bremsstrahlung_step_parameters
+        from pyradmc.physics.brems import bremsstrahlung_step_parameters
 
         want_prob, want_local = bremsstrahlung_step_parameters(
             BREMS_ENERGY, 0.02, 1.0, 0.05, BREMS_PCUT

@@ -9,7 +9,7 @@ profile at the depth of maximum dose.
 Two honest caveats:
 
 - *Uncollimated.* The Varian file is a **patient-independent** phase space stored
-  *above the movable jaws* — pyRadMC models no jaws/MLC or treatment head, so the
+  *above the movable jaws* — pyradmc models no jaws/MLC or treatment head, so the
   simulated field is the full, unshaped divergent cone. A clinical field would need
   the collimation/forward-transport model (a later addition). The central-axis PDD
   is still physically meaningful because on-axis fluence and water attenuation
@@ -41,9 +41,9 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 
-from pyRadMC.data.analytic import AnalyticCrossSections
-from pyRadMC.geometry.grid import VoxelGrid
-from pyRadMC.geometry.phasespace import PhaseSpaceSource
+from pyradmc.data.analytic import AnalyticCrossSections
+from pyradmc.geometry.grid import VoxelGrid
+from pyradmc.geometry.phasespace import PhaseSpaceSource
 
 DEFAULT_PHSP = Path("D:/data/phsp/Varian_TrueBeam6MV_01.IAEAheader")
 
@@ -95,15 +95,15 @@ def make_engine(backend: str, grid: VoxelGrid, xs: AnalyticCrossSections):
         try:
             import warp as wp
 
-            from pyRadMC.backends.warp.engine import WarpEngine
+            from pyradmc.backends.warp.engine import WarpEngine
 
             device = "cuda:0" if wp.is_cuda_available() else "cpu"
             return WarpEngine(grid=grid, cross_sections=xs, device=device), f"warp:{device}"
         except ImportError:
             if backend == "warp":
                 raise
-    from pyRadMC.backends.ref.engine import ReferenceEngine
-    from pyRadMC.rng.host import HostRNG
+    from pyradmc.backends.ref.engine import ReferenceEngine
+    from pyradmc.rng.host import HostRNG
 
     return ReferenceEngine(grid=grid, cross_sections=xs, rng=HostRNG()), "ref"
 

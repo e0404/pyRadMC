@@ -13,7 +13,7 @@ import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
-from pyRadMC.progress import ProgressEmitter, ProgressEvent
+from pyradmc.progress import ProgressEmitter, ProgressEvent
 
 
 def test_ticks_accumulate_histories_done() -> None:
@@ -81,7 +81,7 @@ def test_callback_exception_is_swallowed_and_logged(caplog) -> None:
         raise RuntimeError("observer bug")
 
     emitter = ProgressEmitter(broken, histories_total=10)
-    with caplog.at_level(logging.ERROR, logger="pyRadMC.progress"):
+    with caplog.at_level(logging.ERROR, logger="pyradmc.progress"):
         emitter.tick(10)  # must not raise
     assert "Progress callback raised" in caplog.text
 

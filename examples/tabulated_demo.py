@@ -2,7 +2,7 @@
 
 Compiles liquid water from the EPICS libraries (EPDL photons with coherent form factors,
 EEDL elastic scattering, ICRU-37 electron stopping) via
-:func:`pyRadMC.data.tabulated.precompile.compile_water`, transports a 6 MeV monoenergetic
+:func:`pyradmc.data.tabulated.precompile.compile_water`, transports a 6 MeV monoenergetic
 photon pencil beam through a water phantom, and overlays the central-axis depth dose on
 the maintainer's EGSnrc full-physics benchmark
 (``tests/validation/data/center_ray_dose_EGSNrc_intRadius6.0mm.txt``).
@@ -15,7 +15,7 @@ central-axis dose of a broad beam under lateral scatter equilibrium, which is wh
 benchmark scored.
 
 On first run this **downloads the ~120 MB EPDL/EEDL libraries** into
-``~/.cache/pyRadMC/epics`` (cached thereafter). Defaults to Warp (GPU if present), else
+``~/.cache/pyradmc/epics`` (cached thereafter). Defaults to Warp (GPU if present), else
 the reference engine. Run from the repository root::
 
     python examples/tabulated_demo.py [--histories N] [--backend B]
@@ -34,12 +34,12 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 
-from pyRadMC.data.tabulated import build
-from pyRadMC.data.tabulated.precompile import compile_water
-from pyRadMC.data.tabulated.source import TabulatedCrossSections
-from pyRadMC.geometry.grid import VoxelGrid
-from pyRadMC.geometry.source import PencilBeamSource
-from pyRadMC.rng.host import HostRNG
+from pyradmc.data.tabulated import build
+from pyradmc.data.tabulated.precompile import compile_water
+from pyradmc.data.tabulated.source import TabulatedCrossSections
+from pyradmc.geometry.grid import VoxelGrid
+from pyradmc.geometry.source import PencilBeamSource
+from pyradmc.rng.host import HostRNG
 
 BENCHMARK = (
     Path(__file__).resolve().parents[1]
@@ -61,14 +61,14 @@ def make_engine(backend: str, grid: VoxelGrid, xs: TabulatedCrossSections):
         try:
             import warp as wp
 
-            from pyRadMC.backends.warp.engine import WarpEngine
+            from pyradmc.backends.warp.engine import WarpEngine
 
             device = "cuda:0" if wp.is_cuda_available() else "cpu"
             return WarpEngine(grid=grid, cross_sections=xs, device=device), f"warp:{device}"
         except Exception:
             if backend == "warp":
                 raise
-    from pyRadMC.backends.ref.engine import ReferenceEngine
+    from pyradmc.backends.ref.engine import ReferenceEngine
 
     return ReferenceEngine(grid=grid, cross_sections=xs, rng=HostRNG()), "ref"
 
@@ -116,7 +116,7 @@ def main() -> None:
     norm = bench_dose[mask].max()
 
     fig, ax = plt.subplots(figsize=(7.5, 4.6))
-    ax.plot(depth, 100.0 * pdd * scale / norm, color="#3b7dd8", label="pyRadMC tabulated")
+    ax.plot(depth, 100.0 * pdd * scale / norm, color="#3b7dd8", label="pyradmc tabulated")
     ax.plot(
         bench_depth[mask],
         100.0 * bench_dose[mask] / norm,

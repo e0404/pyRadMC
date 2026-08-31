@@ -26,17 +26,17 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from pyRadMC.backends.ref.engine import ReferenceEngine
-from pyRadMC.data.analytic import AnalyticCrossSections
-from pyRadMC.geometry.grid import VoxelGrid
-from pyRadMC.geometry.source import PencilBeamSource
-from pyRadMC.rng.host import HostRNG
-from pyRadMC.scoring.cylinder import (
+from pyradmc.backends.ref.engine import ReferenceEngine
+from pyradmc.data.analytic import AnalyticCrossSections
+from pyradmc.geometry.grid import VoxelGrid
+from pyradmc.geometry.source import PencilBeamSource
+from pyradmc.rng.host import HostRNG
+from pyradmc.scoring.cylinder import (
     CylindricalScoringGrid,
     geometric_edges,
     uniform_edges,
 )
-from pyRadMC.scoring.grid import ScoringGrid
+from pyradmc.scoring.grid import ScoringGrid
 from tests.conftest import SEED, assert_chi2_consistent_batched
 
 ENERGY = 6.0
@@ -259,7 +259,7 @@ def reference_kernel():
 
 
 def _warp_engine(grid: VoxelGrid, device: str):
-    from pyRadMC.backends.warp.engine import WarpEngine
+    from pyradmc.backends.warp.engine import WarpEngine
 
     return WarpEngine(grid=grid, cross_sections=_xs(grid), device=device)
 

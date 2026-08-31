@@ -23,14 +23,14 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from pyRadMC.data.tabulated.eedl import (
+from pyradmc.data.tabulated.eedl import (
     element_radiative_stopping,
     material_radiative_stopping,
 )
-from pyRadMC.data.tabulated.epdl import mass_fractions_from_formula
+from pyradmc.data.tabulated.epdl import mass_fractions_from_formula
 
 # NIST ESTAR radiative mass stopping power for liquid water (MeV cm^2/g); the same
-# transcription pinned as the analytic backend's ESTAR anchors (pyRadMC/data/analytic.py).
+# transcription pinned as the analytic backend's ESTAR anchors (pyradmc/data/analytic.py).
 ESTAR_WATER_RADIATIVE: dict[float, float] = {
     1.0: 0.0128,
     10.0: 0.1813,

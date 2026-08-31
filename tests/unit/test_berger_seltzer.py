@@ -3,7 +3,7 @@
 The formulas the analytic backend has always evaluated for water — Berger-Seltzer
 restricted collision stopping, the Sternheimer density effect, the restricted Moller
 cross-section, the log-quadratic ESTAR radiative fit, and the CSDA range integral —
-move to ``pyRadMC.data.berger_seltzer`` as pure functions of a ``MaterialData``, so the
+move to ``pyradmc.data.berger_seltzer`` as pure functions of a ``MaterialData``, so the
 precompiler can evaluate them for any registry material. The analytic backend delegates
 with the water entry; the delegation-identity tests here pin that the refactor moved
 the oracle, verbatim, rather than changing it (AGENTS.md 2.2).
@@ -16,8 +16,8 @@ import math
 import numpy as np
 import pytest
 
-from pyRadMC.data.analytic import AnalyticCrossSections
-from pyRadMC.data.berger_seltzer import (
+from pyradmc.data.analytic import AnalyticCrossSections
+from pyradmc.data.berger_seltzer import (
     csda_range_table,
     density_effect,
     radiative_fit_coefficients,
@@ -25,7 +25,7 @@ from pyRadMC.data.berger_seltzer import (
     restricted_collision_stopping,
     restricted_moller_cross_section,
 )
-from pyRadMC.data.materials import MATERIALS, WATER, MaterialData, SternheimerParameters
+from pyradmc.data.materials import MATERIALS, WATER, MaterialData, SternheimerParameters
 
 DELTA_CUT = 0.2
 ENERGIES = (0.05, 0.2, 0.5, 1.0, 2.0, 6.0, 10.0, 20.0)

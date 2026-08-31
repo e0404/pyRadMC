@@ -32,7 +32,7 @@ is indistinguishable from a subtly wrong one.
 
 ### 2.2 The `ref` backend is the oracle
 
-`src/pyRadMC/backends/ref/` is a pure-NumPy, single-history-at-a-time implementation. It is
+`pyradmc/backends/ref/` is a pure-NumPy, single-history-at-a-time implementation. It is
 never optimized. Every other backend is validated against it.
 
 **Never resolve a reference-vs-backend discrepancy by adjusting the reference.** If the
@@ -70,7 +70,7 @@ batch so that sigma is always available. This is required infrastructure, not an
 
 ### 2.5 Physics functions are pure, scalar, and allocation-free
 
-Everything in `src/pyRadMC/physics/` is a pure function of scalars and passed-in array handles.
+Everything in `pyradmc/physics/` is a pure function of scalars and passed-in array handles.
 No allocation. No Python objects. No branching on types. No global state. No RNG construction
 inside the function; the RNG state is passed in.
 
@@ -163,7 +163,7 @@ silent misconfiguration downstream. Concretely:
 ## 3. Architecture
 
 ```
-pyRadMC/
+pyradmc/
   physics/     pure scalar functions: sampling, kinematics, energy loss
   data/        CrossSectionSource interface; analytic and tabulated backends; materials
   geometry/    rectilinear voxel grid, Woodcock majorant, Source/BeamletSource interface
@@ -242,7 +242,7 @@ This ordering was established empirically, not assumed. Do not reorder it withou
   Warp kernels are exempt; mark them.
 - `ruff` for lint and format. No manual formatting debates.
 - Library output goes through `logging.getLogger(__name__)`; `warnings.warn` is reserved for
-  result caveats and API misuse. No `print` in `pyRadMC/` (ruff `T20` enforces this), and no
+  result caveats and API misuse. No `print` in `pyradmc/` (ruff `T20` enforces this), and no
   handlers/`basicConfig` outside a `__main__` CLI entry — verbosity belongs to the consumer.
 - Do not add a dependency without asking. The permissive-licensing constraint is the reason this
   project exists; **check the license of anything you propose to add**, and say what it is.
@@ -289,7 +289,7 @@ runs the fast tiers on every push to `main` and `develop` (GitHub Actions and Gi
 and the validation tier on a schedule. Run `pytest` yourself before pushing; do not
 rely on the hook to catch a broken test.
 
-Releases are semantic-versioned from `pyRadMC.__version__` and cut by the release-candidate
+Releases are semantic-versioned from `pyradmc.__version__` and cut by the release-candidate
 flow of section 9.4; the release workflow refuses a tag that disagrees with `__version__`
 or with `CITATION.cff`. Before a release, `pytest -m ""` passes (including the validation
 tier), `CHANGELOG.md` records what changed, and anything in section 8 that the release
@@ -400,7 +400,7 @@ a `commit-msg` hook is the place for it.
 1. Cut `rc/X.Y.Z` from `develop`; open a PR onto `main`.
 2. Iterate review and CI on the rc branch. `pytest -m ""` (validation tier included)
    must pass — trigger the validation workflow manually if the schedule has not run.
-3. On the rc branch, bump `pyRadMC/__init__.py::__version__`, `CITATION.cff` and
+3. On the rc branch, bump `pyradmc/__init__.py::__version__`, `CITATION.cff` and
    `CHANGELOG.md` (`chore(release): vX.Y.Z`).
 4. Merge the PR with a **merge commit** (never squash — `main` keeps the release shape).
 5. Tag the merge commit `vX.Y.Z` and push the tag. The release workflow publishes to

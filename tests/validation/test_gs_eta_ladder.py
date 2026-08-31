@@ -31,9 +31,9 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from pyRadMC.data.goudsmit_saunderson import moliere_screening
-from pyRadMC.data.tabulated import build
-from pyRadMC.data.tabulated.endf import read_mf26_angular_distributions
+from pyradmc.data.goudsmit_saunderson import moliere_screening
+from pyradmc.data.tabulated import build
+from pyradmc.data.tabulated.endf import read_mf26_angular_distributions
 
 pytestmark = pytest.mark.validation
 
@@ -53,7 +53,7 @@ TAIL_BAND = (0.85, 1.15)
 def distributions():
     eedl = build.library_path("eedl", None)
     if not eedl.is_file():
-        pytest.skip("EEDL library not cached; run python -m pyRadMC.data.tabulated.build")
+        pytest.skip("EEDL library not cached; run python -m pyradmc.data.tabulated.build")
     text = eedl.read_text(encoding="latin-1")
     return read_mf26_angular_distributions(text, 525)
 

@@ -16,7 +16,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from pyRadMC.geometry.collimation import jaw_path_length, mlc_path_length
+from pyradmc.geometry.collimation import jaw_path_length, mlc_path_length
 
 wp = pytest.importorskip("warp", reason="warp-lang optional dependency not installed")
 
@@ -67,7 +67,7 @@ def _compare(device: str, got: np.ndarray, host: np.ndarray) -> None:
 @pytest.mark.parametrize("focused", [0, 1])
 def test_jaw_twin_matches_host_on_device(device: str, focused: int) -> None:
     _require_device(device)
-    from pyRadMC.backends.warp.physics import warp_physics
+    from pyradmc.backends.warp.physics import warp_physics
 
     jaw = warp_physics().jaw_path_length
 
@@ -128,7 +128,7 @@ def test_jaw_twin_matches_host_on_device(device: str, focused: int) -> None:
 @pytest.mark.parametrize("focused_sides", [0, 1])
 def test_mlc_twin_matches_host_on_device(device: str, focused_sides: int) -> None:
     _require_device(device)
-    from pyRadMC.backends.warp.physics import warp_physics
+    from pyradmc.backends.warp.physics import warp_physics
 
     mlc = warp_physics().mlc_path_length
     n_pairs = len(LEAF_EDGES) - 1

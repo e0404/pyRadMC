@@ -12,9 +12,9 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from pyRadMC.data.interface import PhotonProcess
-from pyRadMC.data.tabulated.format import FORMAT_VERSION, load_tables, save_tables
-from pyRadMC.data.tabulated.model import TabulatedData
+from pyradmc.data.interface import PhotonProcess
+from pyradmc.data.tabulated.format import FORMAT_VERSION, load_tables, save_tables
+from pyradmc.data.tabulated.model import TabulatedData
 
 _PROCESSES = (
     PhotonProcess.COMPTON,

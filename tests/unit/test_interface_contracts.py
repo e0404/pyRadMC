@@ -1,4 +1,4 @@
-"""Contract tests for :mod:`pyRadMC.data.interface` and :mod:`pyRadMC.rng.interface`.
+"""Contract tests for :mod:`pyradmc.data.interface` and :mod:`pyradmc.rng.interface`.
 
 These tests encode invariants that, if violated, produce silently wrong dose rather than
 a crash. They are the highest-value tests in the repository per line, and they must run
@@ -25,8 +25,8 @@ class TestMajorantContract:
         will not show up as a crash, an assertion, or a visibly wrong depth-dose curve.
         It will show up as a two percent error in bone that nobody finds for a year.
         """
-        from pyRadMC.data.analytic import AnalyticCrossSections
-        from pyRadMC.data.materials import WATER
+        from pyradmc.data.analytic import AnalyticCrossSections
+        from pyradmc.data.materials import WATER
 
         # Densities bracketing what a water-with-density-scaling geometry can
         # contain, including a >1 g/cm^3 voxel (contoured bolus, wet lung, CT noise).
@@ -54,7 +54,7 @@ class TestUniformContract:
         boundary bug in the bit-manipulation of the underlying generator would surface;
         1e7 is cheap and catches the common float32 rounding-to-one case.
         """
-        from pyRadMC.rng.host import HostRNG
+        from pyradmc.rng.host import HostRNG
 
         rng = HostRNG()
         state = rng.init_state(seed=1234, history_index=0)
@@ -78,7 +78,7 @@ class TestUniformContract:
         the property that makes within-target reproducibility survive a change of
         thread count.
         """
-        from pyRadMC.rng.host import HostRNG
+        from pyradmc.rng.host import HostRNG
 
         rng = HostRNG()
         seed = 42
@@ -124,9 +124,9 @@ class TestTableIntegrationContract:
 
         The reference value is computed by dense-grid quadrature of the product.
         """
-        from pyRadMC.data.interface import PhotonProcess
-        from pyRadMC.data.tabulated.model import TabulatedData
-        from pyRadMC.data.tabulated.source import TabulatedCrossSections
+        from pyradmc.data.interface import PhotonProcess
+        from pyradmc.data.tabulated.model import TabulatedData
+        from pyradmc.data.tabulated.source import TabulatedCrossSections
 
         # Two correlated-decreasing quantities tabulated on a shared grid.
         e_grid = np.geomspace(0.1, 10.0, 40)

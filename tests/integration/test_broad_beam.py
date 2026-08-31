@@ -16,10 +16,10 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from pyRadMC.data.analytic import AnalyticCrossSections
-from pyRadMC.data.materials import WATER
-from pyRadMC.geometry.grid import VoxelGrid
-from pyRadMC.geometry.source import ParallelBeamSource
+from pyradmc.data.analytic import AnalyticCrossSections
+from pyradmc.data.materials import WATER
+from pyradmc.geometry.grid import VoxelGrid
+from pyradmc.geometry.source import ParallelBeamSource
 from tests.conftest import SEED
 
 ENERGY_MEV = 2.0
@@ -30,8 +30,8 @@ N_BATCHES = 10
 @pytest.fixture(scope="module")
 def depth_dose() -> tuple[np.ndarray, np.ndarray, float, np.ndarray]:
     """One engine run shared by the tests in this module (it is the expensive part)."""
-    from pyRadMC.backends.ref.engine import ReferenceEngine
-    from pyRadMC.rng.host import HostRNG
+    from pyradmc.backends.ref.engine import ReferenceEngine
+    from pyradmc.rng.host import HostRNG
 
     grid = VoxelGrid.uniform_water(shape=(16, 16, 16), spacing=(1.0, 1.0, 1.0))
     xs = AnalyticCrossSections(geometry_densities=grid.max_density_by_material())

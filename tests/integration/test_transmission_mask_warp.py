@@ -5,13 +5,13 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from pyRadMC.backends.ref.engine import ReferenceEngine
-from pyRadMC.data.analytic import AnalyticCrossSections
-from pyRadMC.geometry.collimation import TransmissionMaskSource
-from pyRadMC.geometry.grid import VoxelGrid
-from pyRadMC.geometry.source import SpectralBeamSource
-from pyRadMC.geometry.spectrum import Spectrum
-from pyRadMC.rng.host import HostRNG
+from pyradmc.backends.ref.engine import ReferenceEngine
+from pyradmc.data.analytic import AnalyticCrossSections
+from pyradmc.geometry.collimation import TransmissionMaskSource
+from pyradmc.geometry.grid import VoxelGrid
+from pyradmc.geometry.source import SpectralBeamSource
+from pyradmc.geometry.spectrum import Spectrum
+from pyradmc.rng.host import HostRNG
 from tests.conftest import SEED, assert_chi2_consistent_batched
 
 wp = pytest.importorskip("warp", reason="warp-lang optional dependency not installed")
@@ -44,7 +44,7 @@ def _source() -> TransmissionMaskSource:
 
 def test_spectral_mask_is_generated_on_device(monkeypatch: pytest.MonkeyPatch) -> None:
     """The recognized composition must never call host ``sample_batch``."""
-    from pyRadMC.backends.warp.engine import WarpEngine
+    from pyradmc.backends.warp.engine import WarpEngine
 
     def fail_host_sampling(*args, **kwargs):
         raise AssertionError("spectral transmission mask fell back to host sampling")
@@ -67,7 +67,7 @@ def test_spectral_mask_is_generated_on_device(monkeypatch: pytest.MonkeyPatch) -
 
 def test_device_mask_agrees_with_reference_statistically() -> None:
     """The device mask interpolation and source sampling preserve the reference dose."""
-    from pyRadMC.backends.warp.engine import WarpEngine
+    from pyradmc.backends.warp.engine import WarpEngine
 
     grid = _grid()
     xs = AnalyticCrossSections(geometry_densities=grid.max_density_by_material())
@@ -105,7 +105,7 @@ def test_device_mask_agrees_with_reference_statistically() -> None:
 )
 def test_device_mask_is_chunk_size_bitwise_inert(device: str) -> None:
     """Global history keys make mask compaction and chunking scheduling-only."""
-    from pyRadMC.backends.warp.engine import WarpEngine
+    from pyradmc.backends.warp.engine import WarpEngine
 
     if device.startswith("cuda") and not wp.is_cuda_available():
         pytest.skip("no CUDA device")

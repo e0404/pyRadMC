@@ -27,12 +27,12 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.axes import Axes
 
-from pyRadMC.backends.ref.engine import ReferenceEngine
-from pyRadMC.data.analytic import AnalyticCrossSections
-from pyRadMC.data.materials import WATER
-from pyRadMC.geometry.grid import VoxelGrid
-from pyRadMC.geometry.source import ParallelBeamSource
-from pyRadMC.rng.host import HostRNG
+from pyradmc.backends.ref.engine import ReferenceEngine
+from pyradmc.data.analytic import AnalyticCrossSections
+from pyradmc.data.materials import WATER
+from pyradmc.geometry.grid import VoxelGrid
+from pyradmc.geometry.source import ParallelBeamSource
+from pyradmc.rng.host import HostRNG
 
 SEED = 20260711
 
@@ -135,7 +135,7 @@ def main() -> None:
         1, 2, figsize=(11.0, 4.6), facecolor=SURFACE, constrained_layout=True
     )
     fig.suptitle(
-        "pyRadMC — Class II condensed-history electron transport in water",
+        "pyradmc — Class II condensed-history electron transport in water",
         color=INK,
         fontsize=12,
     )

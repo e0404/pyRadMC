@@ -25,18 +25,18 @@ jobs:
           python-version: "3.13"
           cache: pip
 
-      # The version is single-sourced from pyRadMC/__init__.py, so a tag is a *claim*
+      # The version is single-sourced from pyradmc/__init__.py, so a tag is a *claim*
       # about it that nothing else checks. A mismatch here would publish a release whose
       # artifacts report a different version than the tag they were cut from — and every
       # RunProvenance record stamped by that build would carry the wrong number. Refuse.
-      - name: tag must match pyRadMC.__version__
+      - name: tag must match pyradmc.__version__
         if: startsWith(github.ref, 'refs/tags/')
         run: |
           tag="${GITHUB_REF_NAME#v}"
-          version=$(python -c "import re,pathlib; print(re.search(r'__version__ = \"([^\"]+)\"', pathlib.Path('pyRadMC/__init__.py').read_text()).group(1))")
+          version=$(python -c "import re,pathlib; print(re.search(r'__version__ = \"([^\"]+)\"', pathlib.Path('pyradmc/__init__.py').read_text()).group(1))")
           echo "tag=$tag  __version__=$version"
           if [ "$tag" != "$version" ]; then
-            echo "::error::tag v$tag does not match pyRadMC.__version__ ($version)"
+            echo "::error::tag v$tag does not match pyradmc.__version__ ($version)"
             exit 1
           fi
 
@@ -61,9 +61,9 @@ jobs:
           python -m venv /tmp/fresh
           /tmp/fresh/bin/pip install dist/*.whl
           /tmp/fresh/bin/python -c "
-          import pyRadMC, pathlib
-          assert (pathlib.Path(pyRadMC.__file__).parent / 'py.typed').is_file()
-          print('ok', pyRadMC.__version__)
+          import pyradmc, pathlib
+          assert (pathlib.Path(pyradmc.__file__).parent / 'py.typed').is_file()
+          print('ok', pyradmc.__version__)
           "
 
       - uses: actions/upload-artifact@v4

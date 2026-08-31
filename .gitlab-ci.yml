@@ -87,7 +87,7 @@ build:
     # or a subpackage left out of the wheel, which a source-tree import never would.
     - python -m venv /tmp/fresh
     - /tmp/fresh/bin/pip install --quiet dist/*.whl
-    - /tmp/fresh/bin/python -c "import pyRadMC, pathlib; assert (pathlib.Path(pyRadMC.__file__).parent / 'py.typed').is_file(); print(pyRadMC.__version__)"
+    - /tmp/fresh/bin/python -c "import pyradmc, pathlib; assert (pathlib.Path(pyradmc.__file__).parent / 'py.typed').is_file(); print(pyradmc.__version__)"
   artifacts:
     paths: [dist/]
     expire_in: 1 week

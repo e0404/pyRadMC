@@ -18,8 +18,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from pyRadMC.geometry.phasespace import InMemoryPhaseSpaceSource
-from pyRadMC.rng.host import HostRNG, uniform
+from pyradmc.geometry.phasespace import InMemoryPhaseSpaceSource
+from pyradmc.rng.host import HostRNG, uniform
 from tests.conftest import SEED
 
 

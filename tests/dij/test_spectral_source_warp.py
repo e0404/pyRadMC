@@ -1,6 +1,6 @@
 """The spectral beamlet source generates in-kernel on the Warp Dij.
 
-:class:`~pyRadMC.geometry.source.SpectralBeamletSource` reaches the device Dij
+:class:`~pyradmc.geometry.source.SpectralBeamletSource` reaches the device Dij
 through a built-in generator kernel — the same block mapping as the beamlet
 lattice (group-local column tag, correlated key ``r``) with the spectrum CDF
 inversion and the divergent-fan geometry inline, its four uniforms drawn from the
@@ -17,12 +17,12 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from pyRadMC.backends.ref.engine import ReferenceEngine
-from pyRadMC.data.analytic import AnalyticCrossSections
-from pyRadMC.geometry.grid import VoxelGrid
-from pyRadMC.geometry.source import SpectralBeamletSource
-from pyRadMC.geometry.spectrum import Spectrum
-from pyRadMC.rng.host import HostRNG
+from pyradmc.backends.ref.engine import ReferenceEngine
+from pyradmc.data.analytic import AnalyticCrossSections
+from pyradmc.geometry.grid import VoxelGrid
+from pyradmc.geometry.source import SpectralBeamletSource
+from pyradmc.geometry.spectrum import Spectrum
+from pyradmc.rng.host import HostRNG
 from tests.conftest import SEED, assert_chi2_consistent_batched
 
 wp = pytest.importorskip("warp", reason="warp-lang optional dependency not installed")
@@ -68,7 +68,7 @@ def _xs(grid: VoxelGrid) -> AnalyticCrossSections:
 
 def test_spectral_dij_matches_reference(device: str) -> None:
     """Each in-kernel Warp column is statistically consistent with the reference."""
-    from pyRadMC.backends.warp.engine import WarpEngine
+    from pyradmc.backends.warp.engine import WarpEngine
 
     grid = _grid()
     source = _source()
@@ -92,7 +92,7 @@ def test_spectral_dij_matches_reference(device: str) -> None:
 
 def test_spectral_dij_ledger_closes_on_warp(device: str) -> None:
     """emitted == deposited + escaped for the polyenergetic in-kernel Dij."""
-    from pyRadMC.backends.warp.engine import WarpEngine
+    from pyradmc.backends.warp.engine import WarpEngine
 
     grid = _grid()
     dij = WarpEngine(grid=grid, cross_sections=_xs(grid), device=device).run_dij(
@@ -107,7 +107,7 @@ def test_spectral_dij_ledger_closes_on_warp(device: str) -> None:
 
 def test_warp_never_host_samples_the_spectral_beamlets(device: str) -> None:
     """The exact spectral beamlet type transports with host sampling off-limits."""
-    from pyRadMC.backends.warp.engine import WarpEngine
+    from pyradmc.backends.warp.engine import WarpEngine
 
     grid = _grid()
     source = _source()
@@ -120,7 +120,7 @@ def test_warp_never_host_samples_the_spectral_beamlets(device: str) -> None:
 
 def test_beamlet_group_size_is_bitwise_inert_on_the_spectral_route(device: str) -> None:
     """Grouping is scheduling: the in-kernel spectral Dij is identical for any group."""
-    from pyRadMC.backends.warp.engine import WarpEngine
+    from pyradmc.backends.warp.engine import WarpEngine
 
     grid = _grid()
     columns = []
@@ -138,7 +138,7 @@ def test_beamlet_group_size_is_bitwise_inert_on_the_spectral_route(device: str) 
 
 def test_subclass_keeps_the_presampling_dij_route(device: str) -> None:
     """A subclass may override emit/sample_beamlet_batch; it must not be bypassed."""
-    from pyRadMC.backends.warp.engine import WarpEngine
+    from pyradmc.backends.warp.engine import WarpEngine
 
     class ShiftedBeamlets(SpectralBeamletSource):
         sampled = False

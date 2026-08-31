@@ -14,7 +14,7 @@ import numpy as np
 import pytest
 from scipy.sparse import csc_array
 
-from pyRadMC.study import (
+from pyradmc.study import (
     ToyPlanProblem,
     dose_at_volume,
     objective_and_gradient,

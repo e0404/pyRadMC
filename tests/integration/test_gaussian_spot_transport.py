@@ -9,12 +9,12 @@ from __future__ import annotations
 
 import pytest
 
-from pyRadMC.backends.ref.engine import ReferenceEngine
-from pyRadMC.data.analytic import AnalyticCrossSections
-from pyRadMC.geometry.grid import VoxelGrid
-from pyRadMC.geometry.source import GaussianSpotBeamSource
-from pyRadMC.geometry.spectrum import Spectrum
-from pyRadMC.rng.host import HostRNG
+from pyradmc.backends.ref.engine import ReferenceEngine
+from pyradmc.data.analytic import AnalyticCrossSections
+from pyradmc.geometry.grid import VoxelGrid
+from pyradmc.geometry.source import GaussianSpotBeamSource
+from pyradmc.geometry.spectrum import Spectrum
+from pyradmc.rng.host import HostRNG
 from tests.conftest import SEED, assert_chi2_consistent_batched
 
 pytestmark = pytest.mark.warp
@@ -38,7 +38,7 @@ def _grid() -> VoxelGrid:
 
 def test_gaussian_spot_agrees_across_backends() -> None:
     pytest.importorskip("warp", reason="warp-lang optional dependency not installed")
-    from pyRadMC.backends.warp.engine import WarpEngine
+    from pyradmc.backends.warp.engine import WarpEngine
 
     grid = _grid()
     xs = AnalyticCrossSections(geometry_densities=grid.max_density_by_material())
@@ -64,7 +64,7 @@ def test_gaussian_spot_agrees_across_backends() -> None:
 
 def test_ledgers_close_on_both_backends() -> None:
     pytest.importorskip("warp", reason="warp-lang optional dependency not installed")
-    from pyRadMC.backends.warp.engine import WarpEngine
+    from pyradmc.backends.warp.engine import WarpEngine
 
     grid = _grid()
     xs = AnalyticCrossSections(geometry_densities=grid.max_density_by_material())

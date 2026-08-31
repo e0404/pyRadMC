@@ -35,7 +35,7 @@ Design choices that keep the numbers honest:
 Setup: a 16 cm water cube, an 8 x 8 lattice of 1 x 1 cm 6 MeV beamlets, a
 central 4 cm PTV box with an OAR box directly downstream — the simplest
 geometry with a real coverage-vs-sparing trade-off for the toy objective of
-:mod:`pyRadMC.study`.
+:mod:`pyradmc.study`.
 
 Renders ``noise_bias_study.png`` and the raw per-realization table
 ``noise_bias_study.csv`` beside this script; ``--full`` switches to the
@@ -66,12 +66,12 @@ import warp as wp
 from matplotlib.axes import Axes
 from matplotlib.ticker import NullFormatter, StrMethodFormatter
 
-from pyRadMC.backends.warp.engine import WarpEngine
-from pyRadMC.data.analytic import AnalyticCrossSections
-from pyRadMC.geometry.grid import VoxelGrid
-from pyRadMC.geometry.source import BeamletGridSource
-from pyRadMC.scoring.dij import DijResult
-from pyRadMC.study import ToyPlanProblem, dose_at_volume, optimize_weights
+from pyradmc.backends.warp.engine import WarpEngine
+from pyradmc.data.analytic import AnalyticCrossSections
+from pyradmc.geometry.grid import VoxelGrid
+from pyradmc.geometry.source import BeamletGridSource
+from pyradmc.scoring.dij import DijResult
+from pyradmc.study import ToyPlanProblem, dose_at_volume, optimize_weights
 
 SEED = 20260711
 SEED_TRUTH_B = SEED + 999_999  # the independent recalculation's stream space

@@ -11,16 +11,16 @@ from __future__ import annotations
 
 import pytest
 
-from pyRadMC.backends.ref.engine import ReferenceEngine
-from pyRadMC.data.analytic import AnalyticCrossSections
-from pyRadMC.geometry.grid import VoxelGrid
-from pyRadMC.geometry.source import (
+from pyradmc.backends.ref.engine import ReferenceEngine
+from pyradmc.data.analytic import AnalyticCrossSections
+from pyradmc.geometry.grid import VoxelGrid
+from pyradmc.geometry.source import (
     BeamletGridSource,
     CompositeBeamletSource,
     CompositeSource,
     ParallelBeamSource,
 )
-from pyRadMC.rng.host import HostRNG
+from pyradmc.rng.host import HostRNG
 from tests.conftest import SEED, assert_chi2_consistent_batched
 
 wp = pytest.importorskip("warp", reason="warp-lang optional dependency not installed")
@@ -38,7 +38,7 @@ def _xs(grid: VoxelGrid) -> AnalyticCrossSections:
 
 def test_composite_open_field_agrees_across_backends() -> None:
     """A wide+narrow parallel-field mixture: ref and Warp (pre-sampled) agree."""
-    from pyRadMC.backends.warp.engine import WarpEngine
+    from pyradmc.backends.warp.engine import WarpEngine
 
     grid = _grid()
     source = CompositeSource(
@@ -68,7 +68,7 @@ def test_composite_open_field_agrees_across_backends() -> None:
 
 def test_composite_beamlet_dij_agrees_across_backends() -> None:
     """A per-beamlet mixture of two lattices: ref and Warp Dij agree per column."""
-    from pyRadMC.backends.warp.engine import WarpEngine
+    from pyradmc.backends.warp.engine import WarpEngine
 
     grid = _grid()
     source = CompositeBeamletSource(

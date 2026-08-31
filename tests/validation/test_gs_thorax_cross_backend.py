@@ -29,14 +29,14 @@ from tests.conftest import SEED, assert_chi2_consistent_batched
 
 wp = pytest.importorskip("warp", reason="warp-lang optional dependency not installed")
 
-from pyRadMC.adapters.ct import grid_from_hu  # noqa: E402
-from pyRadMC.backends.ref.engine import ReferenceEngine  # noqa: E402
-from pyRadMC.data.tabulated import build  # noqa: E402
-from pyRadMC.data.tabulated.precompile import compile_materials  # noqa: E402
-from pyRadMC.data.tabulated.source import TabulatedCrossSections  # noqa: E402
-from pyRadMC.geometry.source import SpectralBeamSource  # noqa: E402
-from pyRadMC.geometry.spectrum import ali_rogers_mv  # noqa: E402
-from pyRadMC.rng.host import HostRNG  # noqa: E402
+from pyradmc.adapters.ct import grid_from_hu  # noqa: E402
+from pyradmc.backends.ref.engine import ReferenceEngine  # noqa: E402
+from pyradmc.data.tabulated import build  # noqa: E402
+from pyradmc.data.tabulated.precompile import compile_materials  # noqa: E402
+from pyradmc.data.tabulated.source import TabulatedCrossSections  # noqa: E402
+from pyradmc.geometry.source import SpectralBeamSource  # noqa: E402
+from pyradmc.geometry.spectrum import ali_rogers_mv  # noqa: E402
+from pyradmc.rng.host import HostRNG  # noqa: E402
 from tests.perf.test_ct_throughput import SHAPE, SPACING, thorax_hu  # noqa: E402
 
 pytestmark = [pytest.mark.validation, pytest.mark.warp]
@@ -52,7 +52,7 @@ def thorax():
     """The perf tier's thorax grid with compiled EPICS media, or skip."""
     epdl, eedl = build.library_path("epdl", None), build.library_path("eedl", None)
     if not (epdl.is_file() and eedl.is_file()):
-        pytest.skip("EPICS libraries not cached; run python -m pyRadMC.data.tabulated.build")
+        pytest.skip("EPICS libraries not cached; run python -m pyradmc.data.tabulated.build")
     grid = grid_from_hu(thorax_hu(), SPACING)
     data = compile_materials(
         epdl.read_text(encoding="latin-1"), eedl.read_text(encoding="latin-1"), e_max=8.0
@@ -90,7 +90,7 @@ def test_gs_thorax_depth_profile_agrees_across_backends(thorax) -> None:
     """
     if not wp.is_cuda_available():
         pytest.skip("no CUDA device")
-    from pyRadMC.backends.warp.engine import WarpEngine
+    from pyradmc.backends.warp.engine import WarpEngine
 
     grid, xs = thorax
     source = _source()

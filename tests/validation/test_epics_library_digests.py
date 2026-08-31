@@ -1,6 +1,6 @@
 """Validation tier: the pinned EPICS digests are the libraries we validated against.
 
-:data:`~pyRadMC.data.tabulated.build.LIBRARY_SHA256` is the only thing standing
+:data:`~pyradmc.data.tabulated.build.LIBRARY_SHA256` is the only thing standing
 between a silently altered cross-section file and every dose this engine computes.
 The unit tier exercises the *mechanism* (mismatch raises, a bad transfer never
 becomes a cache entry) against synthetic bytes; only this tier can check the pins
@@ -26,7 +26,7 @@ from pathlib import Path
 
 import pytest
 
-from pyRadMC.data.tabulated import build
+from pyradmc.data.tabulated import build
 
 pytestmark = pytest.mark.validation
 

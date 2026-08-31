@@ -12,12 +12,12 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from pyRadMC.backends.ref.engine import ReferenceEngine
-from pyRadMC.data.analytic import AnalyticCrossSections
-from pyRadMC.geometry.grid import VoxelGrid
-from pyRadMC.geometry.source import BeamletGridSource
-from pyRadMC.rng.host import HostRNG
-from pyRadMC.scoring.grid import ScoringGrid
+from pyradmc.backends.ref.engine import ReferenceEngine
+from pyradmc.data.analytic import AnalyticCrossSections
+from pyradmc.geometry.grid import VoxelGrid
+from pyradmc.geometry.source import BeamletGridSource
+from pyradmc.rng.host import HostRNG
+from pyradmc.scoring.grid import ScoringGrid
 from tests.conftest import SEED, assert_chi2_consistent_batched
 
 wp = pytest.importorskip("warp", reason="warp-lang optional dependency not installed")
@@ -57,7 +57,7 @@ def _lattice(n_x: int, n_y: int) -> BeamletGridSource:
 
 
 def _warp_engine(device: str):
-    from pyRadMC.backends.warp.engine import WarpEngine
+    from pyradmc.backends.warp.engine import WarpEngine
 
     grid = _grid()
     return WarpEngine(grid=grid, cross_sections=_xs(grid), device=device)

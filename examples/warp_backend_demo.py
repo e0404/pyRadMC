@@ -31,12 +31,12 @@ import numpy as np
 import warp as wp
 from matplotlib.axes import Axes
 
-from pyRadMC.backends.ref.engine import ReferenceEngine
-from pyRadMC.backends.warp.engine import WarpEngine
-from pyRadMC.data.analytic import AnalyticCrossSections
-from pyRadMC.geometry.grid import VoxelGrid
-from pyRadMC.geometry.source import ParallelBeamSource
-from pyRadMC.rng.host import HostRNG
+from pyradmc.backends.ref.engine import ReferenceEngine
+from pyradmc.backends.warp.engine import WarpEngine
+from pyradmc.data.analytic import AnalyticCrossSections
+from pyradmc.geometry.grid import VoxelGrid
+from pyradmc.geometry.source import ParallelBeamSource
+from pyradmc.rng.host import HostRNG
 
 SEED = 20260711
 

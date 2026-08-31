@@ -7,7 +7,7 @@ the Woodcock majorant inequality *in float32 kernel arithmetic* (a violated majo
 is a smooth, silent under-attenuation bias — the worst kind), and clamped behaviour at
 the grid edges.
 
-The lookups themselves are single-source functions (``pyRadMC.data.tables``): the same
+The lookups themselves are single-source functions (``pyradmc.data.tables``): the same
 code runs under NumPy here and compiles under ``@wp.func`` for the kernels, so parity
 established here transfers to the device up to float32 rounding, which the warp-marked
 test at the bottom verifies on each device.
@@ -18,10 +18,10 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from pyRadMC import ECUT_MEV, PCUT_MEV
-from pyRadMC.data.analytic import AnalyticCrossSections
-from pyRadMC.data.interface import PhotonProcess
-from pyRadMC.data.materials import MATERIALS, WATER
+from pyradmc import ECUT_MEV, PCUT_MEV
+from pyradmc.data.analytic import AnalyticCrossSections
+from pyradmc.data.interface import PhotonProcess
+from pyradmc.data.materials import MATERIALS, WATER
 from tests.conftest import SEED
 
 E_MAX = 21.0
@@ -39,7 +39,7 @@ def tables(xs: AnalyticCrossSections):
 
 
 def _photon_lookup(tables, values: np.ndarray, material: int, energy: float) -> float:
-    from pyRadMC.data.tables import lookup_loglinear_2d
+    from pyradmc.data.tables import lookup_loglinear_2d
 
     return lookup_loglinear_2d(
         values,
@@ -52,7 +52,7 @@ def _photon_lookup(tables, values: np.ndarray, material: int, energy: float) -> 
 
 
 def _electron_lookup(tables, values: np.ndarray, material: int, energy: float) -> float:
-    from pyRadMC.data.tables import lookup_loglinear_2d
+    from pyradmc.data.tables import lookup_loglinear_2d
 
     return lookup_loglinear_2d(
         values,
@@ -166,7 +166,7 @@ class TestMajorantContract:
             for field, _ in TestPhotonParity.CHANNELS
         }
         majorant32 = tables.majorant.astype(np.float32)
-        from pyRadMC.data.tables import lookup_loglinear_1d
+        from pyradmc.data.tables import lookup_loglinear_1d
 
         for energy in energies:
             e = float(energy)
@@ -261,7 +261,7 @@ def test_warp_compiled_lookup_matches_host_lookup(tables) -> None:
     everything the transport kernels see flows through these two functions.
     """
     wp = pytest.importorskip("warp", reason="warp-lang optional dependency not installed")
-    from pyRadMC.backends.warp.physics import warp_physics
+    from pyradmc.backends.warp.physics import warp_physics
 
     p = warp_physics()
     lookup_2d = p.lookup_loglinear_2d
@@ -285,7 +285,7 @@ def test_warp_compiled_lookup_matches_host_lookup(tables) -> None:
     rng = np.random.default_rng(SEED)
     energies = np.exp(rng.uniform(np.log(PCUT_MEV * 0.4), np.log(E_MAX * 1.1), 2000))
 
-    from pyRadMC.data.tables import lookup_loglinear_1d, lookup_loglinear_2d
+    from pyradmc.data.tables import lookup_loglinear_1d, lookup_loglinear_2d
 
     compton32 = tables.mu_compton.astype(np.float32)
     majorant32 = tables.majorant.astype(np.float32)

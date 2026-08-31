@@ -28,11 +28,11 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from pyRadMC.backends.ref.engine import ReferenceEngine
-from pyRadMC.data.analytic import AnalyticCrossSections
-from pyRadMC.geometry.grid import VoxelGrid
-from pyRadMC.geometry.source import BeamletSource, Primary
-from pyRadMC.rng.host import HostRNG, uniform
+from pyradmc.backends.ref.engine import ReferenceEngine
+from pyradmc.data.analytic import AnalyticCrossSections
+from pyradmc.geometry.grid import VoxelGrid
+from pyradmc.geometry.source import BeamletSource, Primary
+from pyradmc.rng.host import HostRNG, uniform
 from tests.conftest import SEED, assert_chi2_consistent_batched
 
 ENERGY = 6.0
@@ -125,7 +125,7 @@ class TestWarpPresampled:
     def test_warp_ledger_books_the_weight(self) -> None:
         wp = pytest.importorskip("warp", reason="warp-lang optional dependency not installed")
         del wp
-        from pyRadMC.backends.warp.engine import WarpEngine
+        from pyradmc.backends.warp.engine import WarpEngine
 
         grid = _grid()
         xs = AnalyticCrossSections(geometry_densities=grid.max_density_by_material())
@@ -140,7 +140,7 @@ class TestWarpPresampled:
     def test_warp_columns_match_reference(self) -> None:
         wp = pytest.importorskip("warp", reason="warp-lang optional dependency not installed")
         del wp
-        from pyRadMC.backends.warp.engine import WarpEngine
+        from pyradmc.backends.warp.engine import WarpEngine
 
         grid = _grid()
         xs = AnalyticCrossSections(geometry_densities=grid.max_density_by_material())

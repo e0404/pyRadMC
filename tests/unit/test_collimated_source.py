@@ -18,18 +18,18 @@ import math
 import numpy as np
 import pytest
 
-from pyRadMC.data.analytic import AnalyticCrossSections
-from pyRadMC.data.materials import TUNGSTEN, WATER
-from pyRadMC.geometry.collimation import (
+from pyradmc.data.analytic import AnalyticCrossSections
+from pyradmc.data.materials import TUNGSTEN, WATER
+from pyradmc.geometry.collimation import (
     BeamFrame,
     BeamLimitingStack,
     CollimatedBeamletSource,
     CollimatedSource,
     JawPair,
 )
-from pyRadMC.geometry.source import ParallelBeamSource, PencilBeamSource, SpectralBeamletSource
-from pyRadMC.geometry.spectrum import Spectrum
-from pyRadMC.rng.host import HostRNG, uniform
+from pyradmc.geometry.source import ParallelBeamSource, PencilBeamSource, SpectralBeamletSource
+from pyradmc.geometry.spectrum import Spectrum
+from pyradmc.rng.host import HostRNG, uniform
 from tests.conftest import SEED
 
 ENERGY = 6.0

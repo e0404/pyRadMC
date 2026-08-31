@@ -14,7 +14,7 @@ Good for standing up a calculation, development, and anything where a few percen
 soft spectrum does not matter. It reports itself honestly in `result.provenance`.
 
 ```python
-from pyRadMC import AnalyticCrossSections
+from pyradmc import AnalyticCrossSections
 xs = AnalyticCrossSections(geometry_densities=grid.max_density_by_material())
 ```
 
@@ -25,12 +25,12 @@ against NIST XCOM) including MF=27 coherent form factors, EEDL elastic scatterin
 ICRU-37 Berger-Seltzer electron stopping. Covers the whole material registry.
 
 ```bash
-python -m pyRadMC.data.tabulated.build --output materials.npz
+python -m pyradmc.data.tabulated.build --output materials.npz
 ```
 
 ```python
-from pyRadMC import TabulatedCrossSections
-from pyRadMC.data.tabulated.format import load_tables
+from pyradmc import TabulatedCrossSections
+from pyradmc.data.tabulated.format import load_tables
 
 xs = TabulatedCrossSections(load_tables("materials.npz"),
                             geometry_densities=grid.max_density_by_material())
@@ -38,7 +38,7 @@ xs = TabulatedCrossSections(load_tables("materials.npz"),
 
 The build downloads `EPDL2023.ALL` and `EEDL2023.ALL` (~120 MB) from
 [www-nds.iaea.org/epics](https://www-nds.iaea.org/epics/ENDF2023/) and caches them under
-`~/.cache/pyRadMC/epics`.
+`~/.cache/pyradmc/epics`.
 
 ## Integrity
 
@@ -81,7 +81,7 @@ elemental mass fractions, an ICRU-37 I-value, exact Sternheimer density-effect
 coefficients, and per-material ESTAR radiative anchors.
 
 ```python
-from pyRadMC import MATERIALS, WATER, LUNG, CORTICAL_BONE
+from pyradmc import MATERIALS, WATER, LUNG, CORTICAL_BONE
 ```
 
 The analytic source answers for water only and raises for anything else — a source that

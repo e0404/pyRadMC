@@ -15,8 +15,8 @@ from tests.conftest import SEED
 
 class TestVoxelGrid:
     def test_uniform_water_construction(self) -> None:
-        from pyRadMC.data.materials import WATER
-        from pyRadMC.geometry.grid import VoxelGrid
+        from pyradmc.data.materials import WATER
+        from pyradmc.geometry.grid import VoxelGrid
 
         grid = VoxelGrid.uniform_water(shape=(4, 5, 6), spacing=(0.1, 0.2, 0.3))
         assert grid.density.shape == (4, 5, 6)
@@ -27,7 +27,7 @@ class TestVoxelGrid:
 
     def test_voxel_index_maps_corners_and_boundaries(self) -> None:
         """Half-open voxels [lo, hi): a boundary position belongs to the upper voxel."""
-        from pyRadMC.geometry.grid import VoxelGrid
+        from pyradmc.geometry.grid import VoxelGrid
 
         grid = VoxelGrid.uniform_water(
             shape=(4, 4, 4), spacing=(1.0, 1.0, 1.0), origin=(-2.0, -2.0, -2.0)
@@ -48,7 +48,7 @@ class TestVoxelGrid:
         access under Warp). The clamp keeps such a point in voxel ``n - 1`` and a
         below-origin straggler in voxel 0, without moving any interior point.
         """
-        from pyRadMC.geometry.grid import point_axis_index
+        from pyradmc.geometry.grid import point_axis_index
 
         # position == upper face -> floor gives n; must clamp to n - 1.
         assert point_axis_index(10.0, 0.0, 1.0, 10) == 9
@@ -62,7 +62,7 @@ class TestVoxelGrid:
         assert point_axis_index(9.999, 0.0, 1.0, 10) == 9
 
     def test_contains_is_half_open_on_the_upper_faces(self) -> None:
-        from pyRadMC.geometry.grid import VoxelGrid
+        from pyradmc.geometry.grid import VoxelGrid
 
         grid = VoxelGrid.uniform_water(shape=(4, 4, 4), spacing=(1.0, 1.0, 1.0))
         assert grid.contains(0.0, 0.0, 0.0)
@@ -72,8 +72,8 @@ class TestVoxelGrid:
         assert not grid.contains(2.0, 2.0, 4.0)
 
     def test_mismatched_arrays_are_rejected(self) -> None:
-        from pyRadMC.data.materials import WATER
-        from pyRadMC.geometry.grid import VoxelGrid
+        from pyradmc.data.materials import WATER
+        from pyradmc.geometry.grid import VoxelGrid
 
         with pytest.raises(ValueError, match="shape"):
             VoxelGrid(
@@ -88,7 +88,7 @@ class TestVoxelGrid:
         """Slab clipping: head-on entry, oblique entry, miss, pointing away, inside."""
         import math
 
-        from pyRadMC.geometry.grid import VoxelGrid
+        from pyradmc.geometry.grid import VoxelGrid
 
         grid = VoxelGrid.uniform_water(shape=(4, 4, 4), spacing=(1.0, 1.0, 1.0))
 
@@ -113,7 +113,7 @@ class TestVoxelGrid:
         """
         import math
 
-        from pyRadMC.geometry.grid import distance_to_voxel_boundary
+        from pyradmc.geometry.grid import distance_to_voxel_boundary
 
         o = (0.0, 0.0, 0.0)
         sp = (1.0, 1.0, 1.0)
@@ -144,8 +144,8 @@ class TestVoxelGrid:
 
     def test_density_extrema_per_material(self) -> None:
         """The majorant declaration must see the *maximum* density in the grid."""
-        from pyRadMC.data.materials import WATER
-        from pyRadMC.geometry.grid import VoxelGrid
+        from pyradmc.data.materials import WATER
+        from pyradmc.geometry.grid import VoxelGrid
 
         grid = VoxelGrid.uniform_water(shape=(3, 3, 3), spacing=(1.0, 1.0, 1.0))
         grid.density[1, 2, 0] = 1.19
@@ -154,8 +154,8 @@ class TestVoxelGrid:
 
 class TestSources:
     def test_pencil_beam_is_deterministic(self) -> None:
-        from pyRadMC.geometry.source import PencilBeamSource
-        from pyRadMC.rng.host import HostRNG
+        from pyradmc.geometry.source import PencilBeamSource
+        from pyradmc.rng.host import HostRNG
 
         source = PencilBeamSource(energy=6.0, position=(1.0, 2.0, -0.5), direction=(0.0, 0.0, 1.0))
         state = HostRNG().init_state(SEED, 40)
@@ -166,15 +166,15 @@ class TestSources:
             assert (p.ux, p.uy, p.uz) == (0.0, 0.0, 1.0)
 
     def test_pencil_beam_direction_is_normalized(self) -> None:
-        from pyRadMC.geometry.source import PencilBeamSource
+        from pyradmc.geometry.source import PencilBeamSource
 
         source = PencilBeamSource(energy=2.0, position=(0.0, 0.0, 0.0), direction=(3.0, 0.0, 4.0))
         assert (source.direction[0], source.direction[2]) == pytest.approx((0.6, 0.8))
 
     def test_parallel_beam_covers_field_uniformly(self) -> None:
         """Positions uniform over the rectangular field: chi-squared on both marginals."""
-        from pyRadMC.geometry.source import ParallelBeamSource
-        from pyRadMC.rng.host import HostRNG
+        from pyradmc.geometry.source import ParallelBeamSource
+        from pyradmc.rng.host import HostRNG
 
         source = ParallelBeamSource(
             energy=2.0,

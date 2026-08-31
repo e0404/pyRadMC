@@ -14,8 +14,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from pyRadMC.geometry.phasespace import PhaseSpaceSource
-from pyRadMC.rng.host import HostRNG
+from pyradmc.geometry.phasespace import PhaseSpaceSource
+from pyradmc.rng.host import HostRNG
 from tests.conftest import SEED
 from tests.phsp_fixtures import Rec, write_phsp
 

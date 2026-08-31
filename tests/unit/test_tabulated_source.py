@@ -12,9 +12,9 @@ import math
 import numpy as np
 import pytest
 
-from pyRadMC.data.interface import PhotonProcess
-from pyRadMC.data.tabulated.model import TabulatedData
-from pyRadMC.data.tabulated.source import TabulatedCrossSections
+from pyradmc.data.interface import PhotonProcess
+from pyradmc.data.tabulated.model import TabulatedData
+from pyradmc.data.tabulated.source import TabulatedCrossSections
 
 _PROC = (
     PhotonProcess.COMPTON,
@@ -175,7 +175,7 @@ class TestElectronQueries:
 
 def test_round_trips_through_build_cross_section_tables() -> None:
     """The loader flattens through the same runtime builder the analytic source uses."""
-    from pyRadMC.data.tables import build_cross_section_tables
+    from pyradmc.data.tables import build_cross_section_tables
 
     src = TabulatedCrossSections(_tables())  # compiled at delta_cut = 0.2
     tab = build_cross_section_tables(src, ecut=DELTA_CUT, pcut=0.01, e_max=10.0, n_points=64)

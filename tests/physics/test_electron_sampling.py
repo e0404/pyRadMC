@@ -14,15 +14,15 @@ import numpy as np
 import pytest
 from scipy import integrate, stats
 
-from pyRadMC import ELECTRON_MASS_MEV
-from pyRadMC.data.analytic import moller_dcs_per_electron
-from pyRadMC.physics.brems import (
+from pyradmc import ELECTRON_MASS_MEV
+from pyradmc.data.analytic import moller_dcs_per_electron
+from pyradmc.physics.brems import (
     bremsstrahlung_step_parameters,
     sample_bremsstrahlung_energy,
 )
-from pyRadMC.physics.moller import moller_direction_cosines, sample_moller_delta_energy
-from pyRadMC.physics.msc import sample_hinge_cos_theta
-from pyRadMC.rng.host import HostRNG
+from pyradmc.physics.moller import moller_direction_cosines, sample_moller_delta_energy
+from pyradmc.physics.msc import sample_hinge_cos_theta
+from pyradmc.rng.host import HostRNG
 from tests.conftest import SEED
 
 

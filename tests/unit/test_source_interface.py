@@ -12,11 +12,11 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from pyRadMC.backends.ref.engine import ReferenceEngine
-from pyRadMC.data.analytic import AnalyticCrossSections
-from pyRadMC.geometry.grid import VoxelGrid
-from pyRadMC.geometry.phasespace import PhaseSpaceSource
-from pyRadMC.geometry.source import (
+from pyradmc.backends.ref.engine import ReferenceEngine
+from pyradmc.data.analytic import AnalyticCrossSections
+from pyradmc.geometry.grid import VoxelGrid
+from pyradmc.geometry.phasespace import PhaseSpaceSource
+from pyradmc.geometry.source import (
     BeamletGridSource,
     BeamletSource,
     ParallelBeamSource,
@@ -24,7 +24,7 @@ from pyRadMC.geometry.source import (
     Primary,
     Source,
 )
-from pyRadMC.rng.host import HostRNG, uniform
+from pyradmc.rng.host import HostRNG, uniform
 from tests.conftest import SEED
 
 

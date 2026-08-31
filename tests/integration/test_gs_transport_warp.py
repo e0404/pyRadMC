@@ -19,11 +19,11 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from pyRadMC.backends.ref.engine import ReferenceEngine
-from pyRadMC.data.analytic import AnalyticCrossSections
-from pyRadMC.geometry.grid import VoxelGrid
-from pyRadMC.geometry.source import BeamletGridSource, ParallelBeamSource
-from pyRadMC.rng.host import HostRNG
+from pyradmc.backends.ref.engine import ReferenceEngine
+from pyradmc.data.analytic import AnalyticCrossSections
+from pyradmc.geometry.grid import VoxelGrid
+from pyradmc.geometry.source import BeamletGridSource, ParallelBeamSource
+from pyradmc.rng.host import HostRNG
 from tests.conftest import SEED, assert_chi2_consistent_batched
 
 pytestmark = pytest.mark.warp
@@ -51,7 +51,7 @@ def _beam() -> ParallelBeamSource:
 
 
 def _warp_engine(grid: VoxelGrid, device: str = "cpu"):
-    from pyRadMC.backends.warp.engine import WarpEngine
+    from pyradmc.backends.warp.engine import WarpEngine
 
     xs = AnalyticCrossSections(geometry_densities=grid.max_density_by_material())
     return WarpEngine(grid=grid, cross_sections=xs, device=device)

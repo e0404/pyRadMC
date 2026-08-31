@@ -18,17 +18,17 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from pyRadMC.backends.ref.engine import ReferenceEngine
-from pyRadMC.data.analytic import AnalyticCrossSections
-from pyRadMC.data.interface import PhotonProcess
-from pyRadMC.data.materials import WATER
-from pyRadMC.data.tabulated.format import load_tables, save_tables
-from pyRadMC.data.tabulated.model import TabulatedData
-from pyRadMC.data.tabulated.precompile import ElectronStoppingStrategy, compile_water
-from pyRadMC.data.tabulated.source import TabulatedCrossSections
-from pyRadMC.geometry.grid import VoxelGrid
-from pyRadMC.geometry.source import ParallelBeamSource
-from pyRadMC.rng.host import HostRNG
+from pyradmc.backends.ref.engine import ReferenceEngine
+from pyradmc.data.analytic import AnalyticCrossSections
+from pyradmc.data.interface import PhotonProcess
+from pyradmc.data.materials import WATER
+from pyradmc.data.tabulated.format import load_tables, save_tables
+from pyradmc.data.tabulated.model import TabulatedData
+from pyradmc.data.tabulated.precompile import ElectronStoppingStrategy, compile_water
+from pyradmc.data.tabulated.source import TabulatedCrossSections
+from pyradmc.geometry.grid import VoxelGrid
+from pyradmc.geometry.source import ParallelBeamSource
+from pyradmc.rng.host import HostRNG
 from tests.conftest import SEED, assert_chi2_consistent_batched
 
 NIST_WATER_MU_OVER_RHO = {1.0: 0.0707, 2.0: 0.0493, 6.0: 0.0277, 10.0: 0.0222, 15.0: 0.0194}
@@ -170,7 +170,7 @@ def test_tabulated_dose_agrees_across_backends(water: TabulatedData) -> None:
     file), so the whole tabulated transport is statistically equivalent across targets
     (AGENTS.md 2.3). Small phantom, KERMA mode to keep the reference cheap.
     """
-    from pyRadMC.backends.warp.engine import WarpEngine
+    from pyradmc.backends.warp.engine import WarpEngine
 
     grid = VoxelGrid.uniform_water(shape=(8, 8, 16), spacing=(2.0, 2.0, 1.0))
     xs = TabulatedCrossSections(water, geometry_densities=grid.max_density_by_material())

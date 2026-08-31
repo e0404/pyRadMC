@@ -42,10 +42,10 @@ import numpy as np
 from matplotlib.axes import Axes
 from matplotlib.colors import LogNorm
 
-from pyRadMC.data.analytic import AnalyticCrossSections
-from pyRadMC.geometry.grid import VoxelGrid
-from pyRadMC.geometry.source import PencilBeamSource
-from pyRadMC.scoring.cylinder import (
+from pyradmc.data.analytic import AnalyticCrossSections
+from pyradmc.geometry.grid import VoxelGrid
+from pyradmc.geometry.source import PencilBeamSource
+from pyradmc.scoring.cylinder import (
     CylindricalScoringGrid,
     geometric_edges,
     graded_edges,
@@ -87,10 +87,10 @@ def _engine(grid: VoxelGrid):
     """Build the Warp CPU backend if available, else the reference oracle."""
     xs = AnalyticCrossSections(geometry_densities=grid.max_density_by_material())
     try:
-        from pyRadMC.backends.warp.engine import WarpEngine
+        from pyradmc.backends.warp.engine import WarpEngine
     except ImportError:
-        from pyRadMC.backends.ref.engine import ReferenceEngine
-        from pyRadMC.rng.host import HostRNG
+        from pyradmc.backends.ref.engine import ReferenceEngine
+        from pyradmc.rng.host import HostRNG
 
         return ReferenceEngine(grid=grid, cross_sections=xs, rng=HostRNG())
     return WarpEngine(grid=grid, cross_sections=xs, device="cpu")
@@ -203,7 +203,7 @@ def main() -> None:
 
     fig, axes = plt.subplots(1, 3, figsize=(15.5, 4.6), facecolor=SURFACE, constrained_layout=True)
     fig.suptitle(
-        "pyRadMC — mono-energetic pencil-beam kernels in water (cylindrical scoring)",
+        "pyradmc — mono-energetic pencil-beam kernels in water (cylindrical scoring)",
         color=INK,
         fontsize=12,
     )

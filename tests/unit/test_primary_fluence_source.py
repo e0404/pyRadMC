@@ -2,7 +2,7 @@
 
 Photons are born on a plane rectangle upstream of the beam-limiting devices and
 aimed from a 2D-Gaussian focal spot — the
-:class:`~pyRadMC.geometry.source.GaussianSpotBeamSource` geometry, unchanged —
+:class:`~pyradmc.geometry.source.GaussianSpotBeamSource` geometry, unchanged —
 and the measured radial primary fluence psi(r) enters as the per-history
 statistical **weight**, evaluated at the ray's radius projected onto the plane
 the table was measured at.
@@ -26,15 +26,15 @@ import math
 import numpy as np
 import pytest
 
-from pyRadMC.geometry.fluence import RadialFluence
-from pyRadMC.geometry.source import (
+from pyradmc.geometry.fluence import RadialFluence
+from pyradmc.geometry.source import (
     GaussianSpotBeamletSource,
     GaussianSpotBeamSource,
     PrimaryFluenceBeamletSource,
     PrimaryFluenceBeamSource,
 )
-from pyRadMC.geometry.spectrum import Spectrum
-from pyRadMC.rng.host import HostRNG, uniform
+from pyradmc.geometry.spectrum import Spectrum
+from pyradmc.rng.host import HostRNG, uniform
 from tests.conftest import SEED
 
 SPECTRUM = Spectrum((0.5, 1.0, 2.0, 4.0, 6.0), (1.0, 3.0, 4.0, 2.0))

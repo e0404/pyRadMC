@@ -10,7 +10,7 @@ scales the answer directly and silently:
 
 The scalar primitives are pinned separately from the host container because the Warp
 kernels compile *those functions*, not the container (see
-:mod:`pyRadMC.backends.warp.physics`); a convention that lived only in the dataclass
+:mod:`pyradmc.backends.warp.physics`); a convention that lived only in the dataclass
 would not be the one running on the device.
 """
 
@@ -21,14 +21,14 @@ import math
 import numpy as np
 import pytest
 
-from pyRadMC.data.materials import WATER
-from pyRadMC.geometry.cylinder import (
+from pyradmc.data.materials import WATER
+from pyradmc.geometry.cylinder import (
     cylinder_contains,
     cylinder_radius_squared,
     edge_bin_index,
 )
-from pyRadMC.geometry.grid import VoxelGrid
-from pyRadMC.scoring.cylinder import (
+from pyradmc.geometry.grid import VoxelGrid
+from pyradmc.scoring.cylinder import (
     CylindricalScoringGrid,
     common_bin_divisor,
     geometric_edges,
@@ -80,7 +80,7 @@ def test_bin_index_is_half_open_upward() -> None:
 def test_bin_index_clamps_like_point_axis_index() -> None:
     """A radius within a rounding ULP of the outer edge stays in the last shell.
 
-    Mirrors :func:`~pyRadMC.geometry.grid.point_axis_index`: containment is the
+    Mirrors :func:`~pyradmc.geometry.grid.point_axis_index`: containment is the
     caller's decision, and the index lookup must never return an out-of-range bin
     for a point that has already passed it.
     """

@@ -14,9 +14,9 @@ import numpy as np
 import pytest
 from scipy import integrate, stats
 
-from pyRadMC import ELECTRON_MASS_MEV
-from pyRadMC.physics.compton import compton_cos_theta, sample_compton_energy_ratio
-from pyRadMC.rng.host import HostRNG
+from pyradmc import ELECTRON_MASS_MEV
+from pyradmc.physics.compton import compton_cos_theta, sample_compton_energy_ratio
+from pyradmc.rng.host import HostRNG
 from tests.conftest import SEED
 
 ENERGIES_MEV = [0.2, 1.0, 6.0, 20.0]
@@ -134,7 +134,7 @@ def test_recoil_electron_angle_conserves_momentum(energy: float) -> None:
     """
     import math
 
-    from pyRadMC.physics.compton import compton_electron_cos_theta
+    from pyradmc.physics.compton import compton_electron_cos_theta
 
     for sampled in _samples(energy, 1_000, stream=4):
         ratio = float(sampled)

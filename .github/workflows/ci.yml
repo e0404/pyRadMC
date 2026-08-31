@@ -109,11 +109,11 @@ jobs:
           python -m venv /tmp/fresh
           /tmp/fresh/bin/pip install dist/*.whl
           /tmp/fresh/bin/python -c "
-          import pyRadMC, pathlib
-          print('version', pyRadMC.__version__)
-          assert (pathlib.Path(pyRadMC.__file__).parent / 'py.typed').is_file(), 'py.typed missing from wheel'
-          assert pyRadMC.VoxelGrid is not None
-          print('public names:', len(pyRadMC.__all__))
+          import pyradmc, pathlib
+          print('version', pyradmc.__version__)
+          assert (pathlib.Path(pyradmc.__file__).parent / 'py.typed').is_file(), 'py.typed missing from wheel'
+          assert pyradmc.VoxelGrid is not None
+          print('public names:', len(pyradmc.__all__))
           "
       - uses: actions/upload-artifact@v4
         with:

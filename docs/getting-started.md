@@ -9,13 +9,13 @@ pip install "pyRadMC[ct]"        # CT image reading (SimpleITK)
 ```
 
 Warp is CUDA-only for GPU. The core install has no GPU dependency at all: `import
-pyRadMC` pulls in no third-party module, so a machine with neither warp nor a GPU can
+pyradmc` pulls in no third-party module, so a machine with neither warp nor a GPU can
 still use the reference engine.
 
 ## A first dose calculation
 
 ```python
-from pyRadMC import AnalyticCrossSections, HostRNG, PencilBeamSource, ReferenceEngine, VoxelGrid
+from pyradmc import AnalyticCrossSections, HostRNG, PencilBeamSource, ReferenceEngine, VoxelGrid
 
 grid = VoxelGrid.uniform_water(shape=(16, 16, 16), spacing=(1.0, 1.0, 1.0))
 xs = AnalyticCrossSections(geometry_densities=grid.max_density_by_material())
@@ -27,7 +27,7 @@ result = ReferenceEngine(grid=grid, cross_sections=xs, rng=HostRNG()).run(
 ```
 
 `result.dose` is per-voxel dose in MeV/g **per emitted history**; multiply by
-`pyRadMC.GY_PER_MEV_PER_G` and your own particles-per-MU scaling for Gy.
+`pyradmc.GY_PER_MEV_PER_G` and your own particles-per-MU scaling for Gy.
 `result.dose_sigma` is the batched 1-sigma standard error — batches exist so that
 uncertainty is *measured*, not modelled.
 
@@ -49,7 +49,7 @@ the cheapest sanity check available, and worth keeping in your own scripts.
 
 ```python
 print(result.provenance.summary())
-# pyRadMC 0.1.0 ref/cpu seed=20260726 pcut=0.05 ecut=0.2 msc=gs step=0.2 xs=[analytic ...]
+# pyradmc 0.1.0 ref/cpu seed=20260726 pcut=0.05 ecut=0.2 msc=gs step=0.2 xs=[analytic ...]
 ```
 
 A dose array outlives the process that made it. `result.provenance` records the version,
@@ -59,7 +59,7 @@ the cross-section citation, so an archived result still says how it was produced
 ## Running on the GPU
 
 ```python
-from pyRadMC import WarpEngine
+from pyradmc import WarpEngine
 
 engine = WarpEngine(grid=grid, cross_sections=xs, device="cuda:0")
 result = engine.run(
@@ -88,7 +88,7 @@ with a chi-squared test, not `assert_allclose`.
 This is what the engine is for.
 
 ```python
-from pyRadMC import BeamletGridSource
+from pyradmc import BeamletGridSource
 
 source = BeamletGridSource(
     energy=6.0, z=-1.0, x_range=(0.0, 10.0), y_range=(0.0, 10.0), n_x=10, n_y=10
@@ -114,7 +114,7 @@ homogeneous medium, binned by depth and by radius about the beam axis. Bin dose 
 cylindrical shells instead of voxels by handing `run` a `CylindricalScoringGrid`:
 
 ```python
-from pyRadMC import (
+from pyradmc import (
     CylindricalScoringGrid, PencilBeamSource, geometric_edges, graded_edges,
 )
 

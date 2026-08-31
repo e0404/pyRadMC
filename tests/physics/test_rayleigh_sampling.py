@@ -12,11 +12,11 @@ import itertools
 import numpy as np
 from scipy import integrate, stats
 
-from pyRadMC.physics.rayleigh import (
+from pyradmc.physics.rayleigh import (
     sample_coherent_cos_theta_form_factor,
     sample_rayleigh_cos_theta,
 )
-from pyRadMC.rng.host import HostRNG
+from pyradmc.rng.host import HostRNG
 from tests.conftest import SEED
 
 

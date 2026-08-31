@@ -14,12 +14,12 @@ import math
 
 import pytest
 
-from pyRadMC.backends.ref.engine import ReferenceEngine
-from pyRadMC.data.analytic import AnalyticCrossSections
-from pyRadMC.geometry.grid import VoxelGrid
-from pyRadMC.geometry.source import BeamletGridSource, ParallelBeamSource
-from pyRadMC.progress import ProgressEvent
-from pyRadMC.rng.host import HostRNG
+from pyradmc.backends.ref.engine import ReferenceEngine
+from pyradmc.data.analytic import AnalyticCrossSections
+from pyradmc.geometry.grid import VoxelGrid
+from pyradmc.geometry.source import BeamletGridSource, ParallelBeamSource
+from pyradmc.progress import ProgressEvent
+from pyradmc.rng.host import HostRNG
 from tests.conftest import SEED
 
 N_PER = 240
@@ -105,7 +105,7 @@ wp = pytest.importorskip("warp", reason="warp-lang optional dependency not insta
 
 pytestmark = pytest.mark.warp
 
-from pyRadMC.backends.warp.engine import WarpEngine  # noqa: E402
+from pyradmc.backends.warp.engine import WarpEngine  # noqa: E402
 
 
 def _warp_engine(device: str = "cpu") -> WarpEngine:

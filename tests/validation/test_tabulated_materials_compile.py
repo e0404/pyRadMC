@@ -24,12 +24,12 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from pyRadMC.data import berger_seltzer
-from pyRadMC.data.materials import ADIPOSE, AIR, CORTICAL_BONE, LUNG, MATERIALS, TUNGSTEN, WATER
-from pyRadMC.data.tabulated.format import load_tables, save_tables
-from pyRadMC.data.tabulated.model import TabulatedData
-from pyRadMC.data.tabulated.precompile import compile_materials
-from pyRadMC.data.tabulated.source import TabulatedCrossSections
+from pyradmc.data import berger_seltzer
+from pyradmc.data.materials import ADIPOSE, AIR, CORTICAL_BONE, LUNG, MATERIALS, TUNGSTEN, WATER
+from pyradmc.data.tabulated.format import load_tables, save_tables
+from pyradmc.data.tabulated.model import TabulatedData
+from pyradmc.data.tabulated.precompile import compile_materials
+from pyradmc.data.tabulated.source import TabulatedCrossSections
 
 ECUT = 0.2
 

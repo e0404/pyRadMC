@@ -12,19 +12,19 @@ import math
 
 import pytest
 
-from pyRadMC.backends.ref.engine import ReferenceEngine
-from pyRadMC.data.analytic import AnalyticCrossSections
-from pyRadMC.data.materials import WATER
-from pyRadMC.geometry.collimation import (
+from pyradmc.backends.ref.engine import ReferenceEngine
+from pyradmc.data.analytic import AnalyticCrossSections
+from pyradmc.data.materials import WATER
+from pyradmc.geometry.collimation import (
     BeamFrame,
     BeamLimitingStack,
     CollimatedBeamletSource,
     JawPair,
 )
-from pyRadMC.geometry.grid import VoxelGrid
-from pyRadMC.geometry.source import SpectralBeamletSource
-from pyRadMC.geometry.spectrum import Spectrum
-from pyRadMC.rng.host import HostRNG
+from pyradmc.geometry.grid import VoxelGrid
+from pyradmc.geometry.source import SpectralBeamletSource
+from pyradmc.geometry.spectrum import Spectrum
+from pyradmc.rng.host import HostRNG
 from tests.conftest import SEED, assert_chi2_consistent_batched
 
 SPECTRUM = Spectrum((0.5, 1.0, 2.0, 4.0, 6.0), (1.0, 3.0, 4.0, 2.0))
@@ -107,7 +107,7 @@ def test_blocked_column_collapses_to_the_transmission_level() -> None:
 @pytest.mark.warp
 def test_collimated_dij_matches_reference_per_column() -> None:
     pytest.importorskip("warp", reason="warp-lang optional dependency not installed")
-    from pyRadMC.backends.warp.engine import WarpEngine
+    from pyradmc.backends.warp.engine import WarpEngine
 
     grid = _grid()
     xs = AnalyticCrossSections(geometry_densities=grid.max_density_by_material())

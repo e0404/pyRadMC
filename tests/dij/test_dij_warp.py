@@ -14,12 +14,12 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from pyRadMC import DIJ_TRUNCATION_RELATIVE
-from pyRadMC.backends.ref.engine import ReferenceEngine
-from pyRadMC.data.analytic import AnalyticCrossSections
-from pyRadMC.geometry.grid import VoxelGrid
-from pyRadMC.geometry.source import BeamletGridSource, ParallelBeamSource
-from pyRadMC.rng.host import HostRNG
+from pyradmc import DIJ_TRUNCATION_RELATIVE
+from pyradmc.backends.ref.engine import ReferenceEngine
+from pyradmc.data.analytic import AnalyticCrossSections
+from pyradmc.geometry.grid import VoxelGrid
+from pyradmc.geometry.source import BeamletGridSource, ParallelBeamSource
+from pyradmc.rng.host import HostRNG
 from tests.conftest import SEED, assert_chi2_consistent_batched
 
 wp = pytest.importorskip("warp", reason="warp-lang optional dependency not installed")
@@ -54,7 +54,7 @@ def _lattice(n_x: int, n_y: int) -> BeamletGridSource:
 
 
 def _warp_engine(device: str, **kwargs):
-    from pyRadMC.backends.warp.engine import WarpEngine
+    from pyradmc.backends.warp.engine import WarpEngine
 
     grid = _grid()
     return WarpEngine(grid=grid, cross_sections=_xs(grid), device=device, **kwargs)
@@ -306,7 +306,7 @@ class TestTruncationAgainstDVH:
         self, device: str
     ) -> None:
         grid = VoxelGrid.uniform_water(shape=(16, 16, 24), spacing=(1.0, 1.0, 0.5))
-        from pyRadMC.backends.warp.engine import WarpEngine
+        from pyradmc.backends.warp.engine import WarpEngine
 
         engine = WarpEngine(grid=grid, cross_sections=_xs(grid), device=device)
         source = _lattice(3, 3)

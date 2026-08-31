@@ -16,11 +16,11 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from pyRadMC.backends.ref.engine import ReferenceEngine
-from pyRadMC.data.tabulated.source import TabulatedCrossSections
-from pyRadMC.geometry.grid import VoxelGrid
-from pyRadMC.geometry.source import ParallelBeamSource
-from pyRadMC.rng.host import HostRNG
+from pyradmc.backends.ref.engine import ReferenceEngine
+from pyradmc.data.tabulated.source import TabulatedCrossSections
+from pyradmc.geometry.grid import VoxelGrid
+from pyradmc.geometry.source import ParallelBeamSource
+from pyradmc.rng.host import HostRNG
 from tests.conftest import SEED, assert_chi2_consistent_batched
 from tests.unit.test_tabulated_source import _two_material_tables
 
@@ -77,7 +77,7 @@ def test_heterogeneous_dose_agrees_across_backends() -> None:
     voxel-material lookup inside the kernel, and the Woodcock majorant over both
     materials.
     """
-    from pyRadMC.backends.warp.engine import WarpEngine
+    from pyradmc.backends.warp.engine import WarpEngine
 
     grid = _slab_grid()
     source = ParallelBeamSource(energy=2.0, z=-1.0, x_range=(0.0, 16.0), y_range=(0.0, 16.0))

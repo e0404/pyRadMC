@@ -19,11 +19,11 @@ wp = pytest.importorskip("warp", reason="warp-lang optional dependency not insta
 
 pytestmark = pytest.mark.warp
 
-from pyRadMC.backends.warp import kernels  # noqa: E402
-from pyRadMC.backends.warp.kernels import ENERGY_QUANTUM_MEV, _mean_sigma  # noqa: E402
-from pyRadMC.scoring.dij import BatchedBeamletScorer  # noqa: E402
-from pyRadMC.scoring.dose import BatchedDoseScorer  # noqa: E402
-from pyRadMC.scoring.grid import ScoringGrid  # noqa: E402
+from pyradmc.backends.warp import kernels  # noqa: E402
+from pyradmc.backends.warp.kernels import ENERGY_QUANTUM_MEV, _mean_sigma  # noqa: E402
+from pyradmc.scoring.dij import BatchedBeamletScorer  # noqa: E402
+from pyradmc.scoring.dose import BatchedDoseScorer  # noqa: E402
+from pyradmc.scoring.grid import ScoringGrid  # noqa: E402
 
 DEVICES = ["cpu", pytest.param("cuda:0", marks=pytest.mark.gpu)]
 
@@ -37,8 +37,8 @@ def device(request) -> str:
 
 def _scoring_grid() -> ScoringGrid:
     """A grid with a genuine density spread and one uncovered (zero-mass) voxel."""
-    from pyRadMC.data.materials import WATER
-    from pyRadMC.geometry.grid import VoxelGrid
+    from pyradmc.data.materials import WATER
+    from pyradmc.geometry.grid import VoxelGrid
 
     shape = (2, 2, 3)
     rng = np.random.default_rng(4242)
@@ -178,7 +178,7 @@ def test_device_truncation_compaction_matches_host_assembler(
     product — so the sparse pattern and values must be byte-identical, and the compacted
     indices sorted ascending per column (AGENTS 2.8 truncation, 2.3 determinism).
     """
-    from pyRadMC.scoring.dij import DijAssembler
+    from pyradmc.scoring.dij import DijAssembler
 
     group = 4
     grid_shape = (2, 2, 4)
@@ -378,7 +378,7 @@ def test_chunked_truncation_matches_host_assembler(device: str, truncation: floa
     write cursors are the exclusive prefix within each column, so splitting the sweep
     cannot reorder it.
     """
-    from pyRadMC.scoring.dij import DijAssembler
+    from pyradmc.scoring.dij import DijAssembler
 
     group = 6
     grid_shape = (7, 11, 13)  # 1001 voxels: not a multiple of the chunk count

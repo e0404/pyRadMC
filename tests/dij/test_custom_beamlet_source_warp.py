@@ -1,6 +1,6 @@
 """A user BeamletSource drives the Warp Dij via pre-sampling.
 
-A custom :class:`~pyRadMC.geometry.source.BeamletSource` with no ``warp_beamlet_sampler``
+A custom :class:`~pyradmc.geometry.source.BeamletSource` with no ``warp_beamlet_sampler``
 reaches the GPU Dij through host pre-sampling: per beamlet, ``sample_beamlet_batch``
 draws the primaries and they are uploaded with the correlated-sampling history key
 (``r`` correlated, ``h = j*n_per + r`` independent) and the batch-resolved beamlet tag,
@@ -14,11 +14,11 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from pyRadMC.backends.ref.engine import ReferenceEngine
-from pyRadMC.data.analytic import AnalyticCrossSections
-from pyRadMC.geometry.grid import VoxelGrid
-from pyRadMC.geometry.source import BeamletSource, Primary
-from pyRadMC.rng.host import HostRNG, uniform
+from pyradmc.backends.ref.engine import ReferenceEngine
+from pyradmc.data.analytic import AnalyticCrossSections
+from pyradmc.geometry.grid import VoxelGrid
+from pyradmc.geometry.source import BeamletSource, Primary
+from pyradmc.rng.host import HostRNG, uniform
 from tests.conftest import SEED, assert_chi2_consistent_batched
 
 wp = pytest.importorskip("warp", reason="warp-lang optional dependency not installed")
@@ -63,7 +63,7 @@ def _xs(grid: VoxelGrid) -> AnalyticCrossSections:
 
 def test_presampled_dij_matches_reference() -> None:
     """Each column of the pre-sampled Warp Dij is consistent with the reference."""
-    from pyRadMC.backends.warp.engine import WarpEngine
+    from pyradmc.backends.warp.engine import WarpEngine
 
     grid = _grid()
     source = StripBeamletSource(3)
@@ -87,7 +87,7 @@ def test_presampled_dij_matches_reference() -> None:
 
 def test_presampled_dij_is_group_size_invariant() -> None:
     """The pre-sampled Dij is bit-identical across beamlet group sizes."""
-    from pyRadMC.backends.warp.engine import WarpEngine
+    from pyradmc.backends.warp.engine import WarpEngine
 
     grid = _grid()
     source = StripBeamletSource(4)
@@ -101,7 +101,7 @@ def test_presampled_dij_is_group_size_invariant() -> None:
 
 def test_presampled_dij_conserves_energy() -> None:
     """emitted = deposited + escaped for the pre-sampled Warp Dij."""
-    from pyRadMC.backends.warp.engine import WarpEngine
+    from pyradmc.backends.warp.engine import WarpEngine
 
     grid = _grid()
     dij = WarpEngine(grid=grid, cross_sections=_xs(grid), device="cpu").run_dij(

@@ -18,8 +18,8 @@ pytestmark = pytest.mark.warp
 
 from warp.types import type_size_in_bytes  # noqa: E402
 
-from pyRadMC.backends.warp import kernels  # noqa: E402
-from pyRadMC.backends.warp.engine import (  # noqa: E402
+from pyradmc.backends.warp import kernels  # noqa: E402
+from pyradmc.backends.warp.engine import (  # noqa: E402
     _CHUNK_SIZE_CAP,
     _CHUNK_SIZE_FALLBACK,
     _GROUP_SIZE_CAP,

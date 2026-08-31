@@ -29,7 +29,7 @@ and Windows.
 | Validation tier only (slow; needs EPICS data) | `pytest -m validation` |
 | Benchmarks against recorded baselines | `pytest -m perf --benchmark-only` |
 | Lint and format | `ruff check .` / `ruff format .` |
-| Types | `mypy pyRadMC` |
+| Types | `mypy pyradmc` |
 | Build the docs | `mkdocs build --strict` |
 | Preview the docs | `mkdocs serve` |
 

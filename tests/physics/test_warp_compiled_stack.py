@@ -16,8 +16,8 @@ import math
 import numpy as np
 import pytest
 
-from pyRadMC.data.materials import TUNGSTEN
-from pyRadMC.geometry.collimation import (
+from pyradmc.data.materials import TUNGSTEN
+from pyradmc.geometry.collimation import (
     MLC,
     BeamFrame,
     BeamLimitingStack,
@@ -87,7 +87,7 @@ def _rotated_stack() -> BeamLimitingStack:
 def test_uploaded_stack_matches_host_path_lengths(device: str, from_origin: int) -> None:
     if device.startswith("cuda") and not wp.is_cuda_available():
         pytest.skip("no CUDA device")
-    from pyRadMC.backends.warp.presolve import stack_path_lengths_kernel, upload_stack
+    from pyradmc.backends.warp.presolve import stack_path_lengths_kernel, upload_stack
 
     stack = _rotated_stack()
     rng = np.random.default_rng(7)

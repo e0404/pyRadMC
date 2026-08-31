@@ -63,7 +63,7 @@ given seed.
 ## Quick start
 
 ```python
-from pyRadMC import AnalyticCrossSections, HostRNG, PencilBeamSource, ReferenceEngine, VoxelGrid
+from pyradmc import AnalyticCrossSections, HostRNG, PencilBeamSource, ReferenceEngine, VoxelGrid
 
 grid = VoxelGrid.uniform_water(shape=(16, 16, 16), spacing=(1.0, 1.0, 1.0))
 xs = AnalyticCrossSections(geometry_densities=grid.max_density_by_material())
@@ -78,7 +78,7 @@ result.provenance    # version, seed, cutoffs, backend, device, cross-sections
 ```
 
 Swap in `WarpEngine(grid=..., cross_sections=..., device="cuda:0")` for the production backend —
-the `run` signatures are identical. Everything importable from the top-level `pyRadMC`
+the `run` signatures are identical. Everything importable from the top-level `pyradmc`
 namespace is public API.
 
 From here, the [documentation](https://pyradmc.readthedocs.io/) carries the rest:

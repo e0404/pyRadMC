@@ -17,7 +17,7 @@ import pytest
 
 pytest.importorskip("warp", reason="warp-lang optional dependency not installed")
 
-from pyRadMC.backends.warp.engine import (
+from pyradmc.backends.warp.engine import (
     _GROUP_SIZE_CAP,
     _GROUP_SIZE_FALLBACK,
     _auto_group_size,

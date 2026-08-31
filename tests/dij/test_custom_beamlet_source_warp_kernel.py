@@ -12,19 +12,19 @@ from __future__ import annotations
 
 import pytest
 
-from pyRadMC.backends.ref.engine import ReferenceEngine
-from pyRadMC.data.analytic import AnalyticCrossSections
-from pyRadMC.geometry.grid import VoxelGrid
-from pyRadMC.geometry.source import BeamletSource, Primary
-from pyRadMC.rng.host import HostRNG, uniform
+from pyradmc.backends.ref.engine import ReferenceEngine
+from pyradmc.data.analytic import AnalyticCrossSections
+from pyradmc.geometry.grid import VoxelGrid
+from pyradmc.geometry.source import BeamletSource, Primary
+from pyradmc.rng.host import HostRNG, uniform
 from tests.conftest import SEED, assert_chi2_consistent_batched
 
 wp = pytest.importorskip("warp", reason="warp-lang optional dependency not installed")
 
 pytestmark = pytest.mark.warp
 
-from pyRadMC.rng.warp_shim import WarpRNGState  # noqa: E402
-from pyRadMC.rng.warp_shim import uniform as wp_uniform  # noqa: E402
+from pyradmc.rng.warp_shim import WarpRNGState  # noqa: E402
+from pyradmc.rng.warp_shim import uniform as wp_uniform  # noqa: E402
 
 ENERGY = 6.0
 Z0 = -1.0
@@ -81,7 +81,7 @@ def _xs(grid: VoxelGrid) -> AnalyticCrossSections:
 
 def test_warp_dij_uses_the_sampler_not_emit() -> None:
     """A source whose emit raises still assembles a Dij on Warp via its sampler."""
-    from pyRadMC.backends.warp.engine import WarpEngine
+    from pyradmc.backends.warp.engine import WarpEngine
 
     grid = _grid()
     dij = WarpEngine(grid=grid, cross_sections=_xs(grid), device="cpu").run_dij(
@@ -93,7 +93,7 @@ def test_warp_dij_uses_the_sampler_not_emit() -> None:
 
 def test_in_kernel_dij_matches_reference() -> None:
     """In-kernel Dij generation matches the reference column for column."""
-    from pyRadMC.backends.warp.engine import WarpEngine
+    from pyradmc.backends.warp.engine import WarpEngine
 
     grid = _grid()
     source = StripWarpBeamletSource()
@@ -116,7 +116,7 @@ def test_in_kernel_dij_matches_reference() -> None:
 
 def test_in_kernel_dij_conserves_energy() -> None:
     """emitted = deposited + escaped for the in-kernel Warp Dij."""
-    from pyRadMC.backends.warp.engine import WarpEngine
+    from pyradmc.backends.warp.engine import WarpEngine
 
     grid = _grid()
     dij = WarpEngine(grid=grid, cross_sections=_xs(grid), device="cpu").run_dij(
@@ -147,7 +147,7 @@ class HalfWeightWarpBeamletSource(StripWarpBeamletSource):
 
 def test_in_kernel_dij_books_the_sampler_weight() -> None:
     """The wrapped kernel books emitted weight*energy and transports the weight."""
-    from pyRadMC.backends.warp.engine import WarpEngine
+    from pyradmc.backends.warp.engine import WarpEngine
 
     grid = _grid()
     dij = WarpEngine(grid=grid, cross_sections=_xs(grid), device="cpu").run_dij(

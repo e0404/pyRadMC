@@ -15,12 +15,12 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from pyRadMC.data.analytic import AnalyticCrossSections
-from pyRadMC.data.materials import WATER
-from pyRadMC.geometry.collimation import MLC, BeamFrame, BeamLimitingStack, JawPair
-from pyRadMC.geometry.grid import VoxelGrid
-from pyRadMC.geometry.source import GaussianSpotBeamSource
-from pyRadMC.geometry.spectrum import Spectrum
+from pyradmc.data.analytic import AnalyticCrossSections
+from pyradmc.data.materials import WATER
+from pyradmc.geometry.collimation import MLC, BeamFrame, BeamLimitingStack, JawPair
+from pyradmc.geometry.grid import VoxelGrid
+from pyradmc.geometry.source import GaussianSpotBeamSource
+from pyradmc.geometry.spectrum import Spectrum
 from tests.conftest import SEED, assert_chi2_consistent_batched
 
 wp = pytest.importorskip("warp", reason="warp-lang optional dependency not installed")
@@ -96,8 +96,8 @@ def _require(device: str) -> None:
 @pytest.mark.parametrize("device", DEVICES)
 def test_device_resident_transport_matches_host_handoff(device: str) -> None:
     _require(device)
-    from pyRadMC.backends.warp.engine import WarpEngine
-    from pyRadMC.backends.warp.presolve import presolve_head_device
+    from pyradmc.backends.warp.engine import WarpEngine
+    from pyradmc.backends.warp.presolve import presolve_head_device
 
     grid = _grid()
     xs = AnalyticCrossSections(geometry_densities=grid.max_density_by_material())
@@ -134,7 +134,7 @@ def test_device_resident_transport_matches_host_handoff(device: str) -> None:
 def test_device_source_round_trips_to_the_host_phase_space(device: str) -> None:
     """``to_phase_space`` materializes the same population the buffer holds."""
     _require(device)
-    from pyRadMC.backends.warp.presolve import presolve_head_device
+    from pyradmc.backends.warp.presolve import presolve_head_device
 
     resident = presolve_head_device(
         _source(),
@@ -157,8 +157,8 @@ def test_device_source_round_trips_to_the_host_phase_space(device: str) -> None:
 def test_engine_rejects_a_buffer_from_another_device() -> None:
     if not wp.is_cuda_available():
         pytest.skip("needs two devices to cross them")
-    from pyRadMC.backends.warp.engine import WarpEngine
-    from pyRadMC.backends.warp.presolve import presolve_head_device
+    from pyradmc.backends.warp.engine import WarpEngine
+    from pyradmc.backends.warp.presolve import presolve_head_device
 
     grid = _grid()
     resident = presolve_head_device(

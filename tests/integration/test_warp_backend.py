@@ -8,7 +8,7 @@ reorder its sums.
 
 Energy conservation for this backend is float32 transport arithmetic plus int64
 quantization (1e-9 MeV per quantum), so the balance is asserted at 1e-4 relative —
-documented in :mod:`pyRadMC.backends.warp.engine`, not a tunable.
+documented in :mod:`pyradmc.backends.warp.engine`, not a tunable.
 """
 
 from __future__ import annotations
@@ -16,11 +16,11 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from pyRadMC.backends.ref.engine import ReferenceEngine
-from pyRadMC.data.analytic import AnalyticCrossSections
-from pyRadMC.geometry.grid import VoxelGrid
-from pyRadMC.geometry.source import ParallelBeamSource
-from pyRadMC.rng.host import HostRNG
+from pyradmc.backends.ref.engine import ReferenceEngine
+from pyradmc.data.analytic import AnalyticCrossSections
+from pyradmc.geometry.grid import VoxelGrid
+from pyradmc.geometry.source import ParallelBeamSource
+from pyradmc.rng.host import HostRNG
 from tests.conftest import SEED, assert_chi2_consistent_batched
 
 wp = pytest.importorskip("warp", reason="warp-lang optional dependency not installed")
@@ -70,7 +70,7 @@ def ref_results() -> dict:
 
 
 def _warp_engine(device: str):
-    from pyRadMC.backends.warp.engine import WarpEngine
+    from pyradmc.backends.warp.engine import WarpEngine
 
     grid = _grid()
     return WarpEngine(grid=grid, cross_sections=_xs(grid), device=device)
@@ -126,7 +126,7 @@ class TestStatisticalEquivalenceWithReference:
             source, n_histories=1_200, n_batches=8, seed=SEED, primary_kind="electron"
         )
 
-        from pyRadMC.backends.warp.engine import WarpEngine
+        from pyradmc.backends.warp.engine import WarpEngine
 
         engine = WarpEngine(grid=grid, cross_sections=_xs(grid), device=device)
         result = engine.run(
@@ -164,7 +164,7 @@ class TestDeterminism:
 
     def test_chunking_does_not_change_the_result(self, device: str) -> None:
         """Streams are per history and scoring is order-free, so chunk size is inert."""
-        from pyRadMC.backends.warp.engine import WarpEngine
+        from pyradmc.backends.warp.engine import WarpEngine
 
         grid = _grid()
         results = [

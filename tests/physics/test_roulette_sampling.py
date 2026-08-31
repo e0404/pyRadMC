@@ -11,8 +11,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from pyRadMC.physics.roulette import roulette_weight
-from pyRadMC.rng.host import HostRNG
+from pyradmc.physics.roulette import roulette_weight
+from pyradmc.rng.host import HostRNG
 from tests.conftest import SEED
 
 
@@ -56,7 +56,7 @@ class TestFairness:
 
 def test_consumes_exactly_one_uniform() -> None:
     """Stream accounting: one draw per game, so mirrored loops stay in lockstep."""
-    from pyRadMC.rng import uniform
+    from pyradmc.rng import uniform
 
     rng = HostRNG()
     a, b = rng.init_state(SEED, 7), rng.init_state(SEED, 7)

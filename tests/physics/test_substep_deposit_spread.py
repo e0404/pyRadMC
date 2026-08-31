@@ -23,10 +23,10 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from pyRadMC.data.analytic import AnalyticCrossSections
-from pyRadMC.geometry.grid import VoxelGrid
-from pyRadMC.rng.host import HostRNG
-from pyRadMC.transport.electron import electron_steps, substep_deposit_count
+from pyradmc.data.analytic import AnalyticCrossSections
+from pyradmc.geometry.grid import VoxelGrid
+from pyradmc.rng.host import HostRNG
+from pyradmc.transport.electron import electron_steps, substep_deposit_count
 
 
 class TestSubstepDepositCount:

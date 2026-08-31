@@ -44,7 +44,7 @@ repos:
       # whole-package in pyproject.toml (kernels exempt), so it does not take filenames.
       - id: mypy
         name: mypy --strict (non-kernel code)
-        entry: mypy pyRadMC
+        entry: mypy pyradmc
         language: system
         types: [python]
         pass_filenames: false

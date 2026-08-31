@@ -2,7 +2,7 @@
 
 ``CrossSectionSource.build_tables`` flattens the host data by looping the Python
 query API over every grid node — seconds of fixed overhead per call for a tabulated
-source. The flattened :class:`~pyRadMC.data.tables.CrossSectionTables` is frozen
+source. The flattened :class:`~pyradmc.data.tables.CrossSectionTables` is frozen
 after construction, so one build can serve every run, batch lane, and device shard
 with the same cutoffs and energy ceiling; only the (cheap) device upload stays per
 call. These tests pin that caching contract: same key builds once, a different key
@@ -15,14 +15,14 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from pyRadMC.data.analytic import AnalyticCrossSections
-from pyRadMC.geometry.grid import VoxelGrid
-from pyRadMC.geometry.source import ParallelBeamSource
+from pyradmc.data.analytic import AnalyticCrossSections
+from pyradmc.geometry.grid import VoxelGrid
+from pyradmc.geometry.source import ParallelBeamSource
 from tests.conftest import SEED
 
 pytest.importorskip("warp", reason="warp-lang optional dependency not installed")
 
-from pyRadMC.backends.warp.engine import WarpEngine
+from pyradmc.backends.warp.engine import WarpEngine
 
 pytestmark = pytest.mark.warp
 

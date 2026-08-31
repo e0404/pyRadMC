@@ -1,6 +1,6 @@
 """The spectral open-field source generates in-kernel on the Warp backend.
 
-:class:`~pyRadMC.geometry.source.SpectralBeamSource` was measured host-bound on a
+:class:`~pyradmc.geometry.source.SpectralBeamSource` was measured host-bound on a
 CT-grade workload (2026-07-19): per-chunk ``sample_batch`` cost ~42 ms per 262k
 histories against ~10 ms of GPU transport, leaving the device idle. The Warp engine
 therefore routes the exact spectral source type to a built-in generator kernel —
@@ -19,12 +19,12 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from pyRadMC.backends.ref.engine import ReferenceEngine
-from pyRadMC.data.analytic import AnalyticCrossSections
-from pyRadMC.geometry.grid import VoxelGrid
-from pyRadMC.geometry.source import SpectralBeamSource
-from pyRadMC.geometry.spectrum import Spectrum, ali_rogers_mv
-from pyRadMC.rng.host import HostRNG
+from pyradmc.backends.ref.engine import ReferenceEngine
+from pyradmc.data.analytic import AnalyticCrossSections
+from pyradmc.geometry.grid import VoxelGrid
+from pyradmc.geometry.source import SpectralBeamSource
+from pyradmc.geometry.spectrum import Spectrum, ali_rogers_mv
+from pyradmc.rng.host import HostRNG
 from tests.conftest import SEED, assert_chi2_consistent_batched
 
 wp = pytest.importorskip("warp", reason="warp-lang optional dependency not installed")
@@ -65,7 +65,7 @@ def _xs(grid: VoxelGrid) -> AnalyticCrossSections:
 
 
 def _engine(grid: VoxelGrid, device: str):
-    from pyRadMC.backends.warp.engine import WarpEngine
+    from pyradmc.backends.warp.engine import WarpEngine
 
     return WarpEngine(grid=grid, cross_sections=_xs(grid), device=device)
 
@@ -125,7 +125,7 @@ def test_inkernel_mean_energy_matches_spectrum(device: str) -> None:
 
 def test_chunk_size_is_bitwise_inert(device: str) -> None:
     """Streams are keyed by global history index, so chunking cannot move a draw."""
-    from pyRadMC.backends.warp.engine import WarpEngine
+    from pyradmc.backends.warp.engine import WarpEngine
 
     grid = _grid()
     doses = []

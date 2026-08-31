@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from pyRadMC.data.tabulated import build
+from pyradmc.data.tabulated import build
 
 
 def test_library_path_uses_the_cache_dir(tmp_path: Path) -> None:
@@ -156,7 +156,7 @@ def test_download_progress_goes_through_logging_not_stdout(
     monkeypatch.setattr(
         build.urllib.request, "urlopen", lambda request: io.BytesIO(b"library bytes")
     )
-    with caplog.at_level(logging.INFO, logger="pyRadMC"):
+    with caplog.at_level(logging.INFO, logger="pyradmc"):
         result = build.download_library("epdl", tmp_path, force=True, verify=False)
     assert result.read_bytes() == b"library bytes"
     assert any(

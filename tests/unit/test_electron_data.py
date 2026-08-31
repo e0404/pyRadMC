@@ -29,13 +29,13 @@ import pytest
 from scipy import integrate
 
 pytest.importorskip(
-    "pyRadMC.data.analytic",
+    "pyradmc.data.analytic",
     reason="analytic backend must exist",
 )
 
-from pyRadMC import ELECTRON_MASS_MEV
-from pyRadMC.data.analytic import AnalyticCrossSections
-from pyRadMC.data.materials import WATER
+from pyradmc import ELECTRON_MASS_MEV
+from pyradmc.data.analytic import AnalyticCrossSections
+from pyradmc.data.materials import WATER
 
 # Kinetic energy (MeV) -> collision stopping power (MeV cm^2/g), water, NIST ESTAR.
 ESTAR_WATER_COLLISION: dict[float, float] = {
@@ -146,8 +146,8 @@ class TestMollerConsistency:
     @pytest.mark.parametrize("energy", [0.5, 2.0, 10.0])
     @pytest.mark.parametrize("cut", [0.05, 0.2])
     def test_identity(self, xs: AnalyticCrossSections, energy: float, cut: float) -> None:
-        from pyRadMC.data.analytic import moller_dcs_per_electron
-        from pyRadMC.data.materials import MATERIALS
+        from pyradmc.data.analytic import moller_dcs_per_electron
+        from pyradmc.data.materials import MATERIALS
 
         lhs = xs.restricted_stopping_power(
             energy, WATER, delta_cut=energy / 2.0
@@ -175,8 +175,8 @@ class TestMollerCrossSection:
 
     def test_matches_quadrature_of_the_dcs(self, xs: AnalyticCrossSections) -> None:
         """The closed-form total equals the numeric integral of the DCS."""
-        from pyRadMC.data.analytic import moller_dcs_per_electron
-        from pyRadMC.data.materials import MATERIALS
+        from pyradmc.data.analytic import moller_dcs_per_electron
+        from pyradmc.data.materials import MATERIALS
 
         energy, cut = 5.0, 0.2
         total, _ = integrate.quad(lambda w: moller_dcs_per_electron(energy, w), cut, energy / 2.0)

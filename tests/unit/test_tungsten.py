@@ -30,8 +30,8 @@ import math
 import numpy as np
 import pytest
 
-from pyRadMC.data import berger_seltzer
-from pyRadMC.data.materials import (
+from pyradmc.data import berger_seltzer
+from pyradmc.data.materials import (
     AVOGADRO,
     MATERIALS,
     STANDARD_ATOMIC_WEIGHT,

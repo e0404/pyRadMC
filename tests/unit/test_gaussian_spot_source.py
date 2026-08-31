@@ -19,13 +19,13 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from pyRadMC.geometry.source import (
+from pyradmc.geometry.source import (
     GaussianSpotBeamletSource,
     GaussianSpotBeamSource,
     SpectralBeamSource,
 )
-from pyRadMC.geometry.spectrum import Spectrum
-from pyRadMC.rng.host import HostRNG, uniform
+from pyradmc.geometry.spectrum import Spectrum
+from pyradmc.rng.host import HostRNG, uniform
 from tests.conftest import SEED
 
 SPECTRUM = Spectrum((0.5, 1.0, 2.0, 4.0, 6.0), (1.0, 3.0, 4.0, 2.0))

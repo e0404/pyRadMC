@@ -13,15 +13,15 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from pyRadMC.geometry.grid import VoxelGrid
-from pyRadMC.geometry.source import BeamletGridSource, ParallelBeamSource
+from pyradmc.geometry.grid import VoxelGrid
+from pyradmc.geometry.source import BeamletGridSource, ParallelBeamSource
 from tests.conftest import SEED
 from tests.unit.test_dose_to_water_spr import DELTA_CUT, _two_material_tables
 
 wp = pytest.importorskip("warp", reason="warp-lang optional dependency not installed")
 
-from pyRadMC.data.analytic import AnalyticCrossSections  # noqa: E402
-from pyRadMC.data.tabulated.source import TabulatedCrossSections  # noqa: E402
+from pyradmc.data.analytic import AnalyticCrossSections  # noqa: E402
+from pyradmc.data.tabulated.source import TabulatedCrossSections  # noqa: E402
 
 pytestmark = pytest.mark.warp
 
@@ -46,7 +46,7 @@ def _source() -> ParallelBeamSource:
 
 
 def _water_engine(device: str):
-    from pyRadMC.backends.warp.engine import WarpEngine
+    from pyradmc.backends.warp.engine import WarpEngine
 
     grid = VoxelGrid.uniform_water(shape=(8, 8, 16), spacing=(2.0, 2.0, 0.5))
     xs = AnalyticCrossSections(geometry_densities=grid.max_density_by_material())
@@ -54,7 +54,7 @@ def _water_engine(device: str):
 
 
 def _medium_engine(device: str):
-    from pyRadMC.backends.warp.engine import WarpEngine
+    from pyradmc.backends.warp.engine import WarpEngine
 
     shape = (8, 8, 16)
     grid = VoxelGrid(

@@ -1,7 +1,7 @@
 """Multi-material transport through bone and lung heterogeneities.
 
 Compiles the whole material registry (water, air, lung, adipose, cortical bone) from
-the EPICS libraries via :func:`pyRadMC.data.tabulated.precompile.compile_materials`,
+the EPICS libraries via :func:`pyradmc.data.tabulated.precompile.compile_materials`,
 then transports a 6 MeV photon pencil beam through two phantoms: homogeneous water,
 and water with a 2 cm cortical-bone slab (rho = 1.85) followed by an 8 cm inflated-lung
 region (lung tissue at rho = 0.26 — the material carries the composition, the voxel
@@ -11,7 +11,7 @@ attenuation (a shallower dose slope) across the low-density lung, and the water 
 recovered downstream shifted by the radiological path difference.
 
 The profiles run smoothly through the interfaces because each electron substep is
-capped at the next voxel face (:func:`pyRadMC.geometry.grid.distance_to_voxel_boundary`),
+capped at the next voxel face (:func:`pyradmc.geometry.grid.distance_to_voxel_boundary`),
 so a step's density and material match the voxel it is actually in rather than plowing
 one medium's stopping power across the boundary into the neighbour's mass. Any small
 residual feature at the bone edges is second order (the multiple-scattering hinge can
@@ -19,7 +19,7 @@ still deflect the short post-hinge segment across the face) plus genuine interfa
 dosimetry, not the single-voxel spike the earlier start-voxel step produced.
 
 On first run this **downloads the ~120 MB EPDL/EEDL libraries** into
-``~/.cache/pyRadMC/epics`` (cached thereafter). Defaults to Warp (GPU if present),
+``~/.cache/pyradmc/epics`` (cached thereafter). Defaults to Warp (GPU if present),
 else the reference engine. Run from the repository root::
 
     python examples/materials_demo.py [--histories N] [--backend B]
@@ -38,13 +38,13 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 
-from pyRadMC.data.materials import CORTICAL_BONE, LUNG, WATER
-from pyRadMC.data.tabulated import build
-from pyRadMC.data.tabulated.precompile import compile_materials
-from pyRadMC.data.tabulated.source import TabulatedCrossSections
-from pyRadMC.geometry.grid import VoxelGrid
-from pyRadMC.geometry.source import PencilBeamSource
-from pyRadMC.rng.host import HostRNG
+from pyradmc.data.materials import CORTICAL_BONE, LUNG, WATER
+from pyradmc.data.tabulated import build
+from pyradmc.data.tabulated.precompile import compile_materials
+from pyradmc.data.tabulated.source import TabulatedCrossSections
+from pyradmc.geometry.grid import VoxelGrid
+from pyradmc.geometry.source import PencilBeamSource
+from pyradmc.rng.host import HostRNG
 
 ENERGY_MEV = 6.0
 N_Z = 260
@@ -60,14 +60,14 @@ def make_engine(backend: str, grid: VoxelGrid, xs: TabulatedCrossSections):
         try:
             import warp as wp
 
-            from pyRadMC.backends.warp.engine import WarpEngine
+            from pyradmc.backends.warp.engine import WarpEngine
 
             device = "cuda:0" if wp.is_cuda_available() else "cpu"
             return WarpEngine(grid=grid, cross_sections=xs, device=device), f"warp:{device}"
         except Exception:
             if backend == "warp":
                 raise
-    from pyRadMC.backends.ref.engine import ReferenceEngine
+    from pyradmc.backends.ref.engine import ReferenceEngine
 
     return ReferenceEngine(grid=grid, cross_sections=xs, rng=HostRNG()), "ref"
 

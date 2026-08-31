@@ -35,12 +35,12 @@ from matplotlib.axes import Axes
 from matplotlib.colors import LinearSegmentedColormap, LogNorm, Normalize
 from matplotlib.figure import Figure
 
-from pyRadMC.backends.ref.engine import ReferenceEngine, TransportResult
-from pyRadMC.data.analytic import AnalyticCrossSections
-from pyRadMC.data.materials import WATER
-from pyRadMC.geometry.grid import VoxelGrid
-from pyRadMC.geometry.source import ParallelBeamSource, PencilBeamSource
-from pyRadMC.rng.host import HostRNG
+from pyradmc.backends.ref.engine import ReferenceEngine, TransportResult
+from pyradmc.data.analytic import AnalyticCrossSections
+from pyradmc.data.materials import WATER
+from pyradmc.geometry.grid import VoxelGrid
+from pyradmc.geometry.source import ParallelBeamSource, PencilBeamSource
+from pyradmc.rng.host import HostRNG
 
 SEED = 20260711
 ENERGY_MEV = 2.0
@@ -192,7 +192,7 @@ def main() -> None:
 
     fig, axes = plt.subplots(2, 2, figsize=(11.5, 9.2), facecolor=SURFACE, constrained_layout=True)
     fig.suptitle(
-        "pyRadMC — reference photon engine, 2 MeV in water (KERMA approximation)",
+        "pyradmc — reference photon engine, 2 MeV in water (KERMA approximation)",
         color=INK,
         fontsize=12,
     )

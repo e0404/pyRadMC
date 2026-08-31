@@ -1,6 +1,6 @@
 """The ICRP reference media: registry data and electron-stopping validation.
 
-The Berger-Seltzer machinery (``pyRadMC.data.berger_seltzer``) is then
+The Berger-Seltzer machinery (``pyradmc.data.berger_seltzer``) is then
 gated against ESTAR per material at the same tolerances the water gate has always
 used: collision 3%, radiative 5% (calibration regression pin), CSDA range 3%.
 
@@ -19,8 +19,8 @@ from __future__ import annotations
 
 import pytest
 
-from pyRadMC.data import berger_seltzer
-from pyRadMC.data.materials import (
+from pyradmc.data import berger_seltzer
+from pyradmc.data.materials import (
     ADIPOSE,
     AIR,
     AVOGADRO,

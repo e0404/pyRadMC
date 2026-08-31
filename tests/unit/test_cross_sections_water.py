@@ -1,6 +1,6 @@
 """The first red test.
 
-Nothing in ``pyRadMC.data.analytic`` exists yet. That is the point: this test defines
+Nothing in ``pyradmc.data.analytic`` exists yet. That is the point: this test defines
 what must exist and what it must produce, before a line of it is written.
 
 Reference values are NIST XCOM total mass attenuation coefficients for liquid water,
@@ -15,7 +15,7 @@ from __future__ import annotations
 import pytest
 
 pytest.importorskip(
-    "pyRadMC.data.analytic",
+    "pyradmc.data.analytic",
     reason="analytic cross-section backend not implemented yet",
 )
 
@@ -41,8 +41,8 @@ ANALYTIC_TOLERANCE_RELATIVE = 0.05
 @pytest.mark.parametrize(("energy", "expected"), sorted(NIST_WATER_MU_OVER_RHO.items()))
 def test_total_attenuation_water_matches_nist(energy: float, expected: float) -> None:
     """The analytic backend reproduces NIST mu/rho for water within 5 percent."""
-    from pyRadMC.data.analytic import AnalyticCrossSections
-    from pyRadMC.data.materials import WATER
+    from pyradmc.data.analytic import AnalyticCrossSections
+    from pyradmc.data.materials import WATER
 
     xs = AnalyticCrossSections()
     actual = xs.mu_over_rho_total(energy, WATER)
@@ -64,9 +64,9 @@ def test_total_equals_sum_of_processes(energy: float) -> None:
     the one used to select the interaction, which biases the transport in a way that is
     invisible in a depth-dose curve.
     """
-    from pyRadMC.data.analytic import AnalyticCrossSections
-    from pyRadMC.data.interface import PhotonProcess
-    from pyRadMC.data.materials import WATER
+    from pyradmc.data.analytic import AnalyticCrossSections
+    from pyradmc.data.interface import PhotonProcess
+    from pyradmc.data.materials import WATER
 
     xs = AnalyticCrossSections()
     processes = [
