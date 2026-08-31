@@ -65,7 +65,9 @@ from pyRadMC.geometry.source import (
     SpectralBeamSource,
 )
 from pyRadMC.progress import ProgressCallback, ProgressEmitter
+from pyRadMC.scoring.cylinder import CylindricalScoringGrid
 from pyRadMC.scoring.dij import DijAssembler, DijResult
+from pyRadMC.scoring.dose import ScoringGeometry
 from pyRadMC.scoring.dose_to_water import validate_scoring_mode
 from pyRadMC.scoring.grid import ScoringGrid
 from pyRadMC.transport.electron import default_step_energy_fraction
@@ -85,20 +87,63 @@ _PRESOLVE_SAMPLING_SALT = 0x50524553
 _IAEA_TO_TRANSPORT = np.array([-1, PHOTON, ELECTRON, POSITRON], dtype=np.int32)
 
 
-def _scoring_info(scoring: ScoringGrid) -> GridInfo:
-    """Scalar metadata of the scoring grid, in the same struct as the transport grid.
+def _no_shells(device: str):
+    """One-element placeholder for the bin-edge fields of a non-cylindrical grid.
+
+    Warp struct array fields must reference real storage even where no kernel reads
+    them; the rectilinear branch of ``kernels._scoring_index`` never touches these,
+    exactly as the Gaussian-MSC path never touches the GS table placeholder.
+    """
+    return wp.zeros(1, dtype=float, device=device)
+
+
+def _scoring_info(scoring: ScoringGeometry, device: str) -> GridInfo:
+    """Scalar metadata of the scoring geometry, in the same struct as the transport grid.
 
     The kernels' ``_deposit`` routes positions through this exactly as the host
-    scorer's ``deposit_at`` does; only the scalars travel — the mass map stays on
-    the host, where the dose normalization happens.
+    scorer's ``deposit_at`` does; only the scalars (and, for a cylinder, the small
+    shell-edge array) travel — the mass map stays on the host, where the dose
+    normalization happens.
+
+    A cylindrical geometry keeps ``z_lo``/``z_hi``/``nz`` as its depth extent and bin
+    count but uploads the depth boundaries themselves, because the bins are graded;
+    the lateral fields carry the axis and the shell edges, uploaded already squared
+    so no root is taken per deposit. ``sx``/``sy``/``sz``, ``nx`` and ``ny`` are never
+    read in this mode.
     """
     si = GridInfo()
+    if isinstance(scoring, CylindricalScoringGrid):
+        si.mode = 1
+        si.x_lo = si.y_lo = si.x_hi = si.y_hi = 0.0
+        si.sx = si.sy = 1.0
+        si.nx = scoring.n_depth
+        si.ny = scoring.n_shells
+        si.z_lo = scoring.depth_origin
+        si.z_hi = scoring.depth_upper
+        si.sz = 1.0
+        si.nz = scoring.n_depth
+        si.z_edges = wp.array(scoring.depth_edges.astype(np.float32), dtype=float, device=device)
+        si.axis_x, si.axis_y = scoring.axis
+        si.n_shells = scoring.n_shells
+        edges_sq = scoring.radial_edges.astype(np.float32) ** 2
+        si.r_inner_sq = float(edges_sq[0])
+        si.r_outer_sq = float(edges_sq[-1])
+        si.r_edges_sq = wp.array(edges_sq, dtype=float, device=device)
+        si.n_voxels = scoring.n_voxels
+        si.min_spacing = float(scoring.depth_thickness.min())  # unused; kept coherent
+        return si
+    si.mode = 0
     si.x_lo, si.y_lo, si.z_lo = scoring.origin
     si.x_hi, si.y_hi, si.z_hi = scoring.upper_corner
     si.sx, si.sy, si.sz = scoring.spacing
     si.nx, si.ny, si.nz = scoring.shape
     si.n_voxels = scoring.n_voxels
     si.min_spacing = min(scoring.spacing)  # unused for scoring; kept coherent
+    si.axis_x = si.axis_y = 0.0
+    si.n_shells = 0
+    si.r_inner_sq = si.r_outer_sq = 0.0
+    si.r_edges_sq = _no_shells(device)
+    si.z_edges = _no_shells(device)
     return si
 
 
@@ -368,6 +413,7 @@ class WarpEngine:
         ecut: float,
         msc_model: str,
         step_energy_fraction: float,
+        deposit_resolution_cm: float | None,
         devices: Sequence[str] | None = None,
     ) -> RunProvenance:
         """Record the configuration this run actually used.
@@ -386,6 +432,7 @@ class WarpEngine:
             msc_model=msc_model,
             step_energy_fraction=step_energy_fraction,
             cross_sections=self.cross_sections.provenance,
+            deposit_resolution_cm=deposit_resolution_cm,
         )
 
     def _chunk_histories(self, device: str | None = None) -> int:
@@ -414,9 +461,10 @@ class WarpEngine:
         ecut: float = ECUT_MEV,
         transport_electrons: bool = True,
         primary_kind: str = "photon",
-        scoring_grid: ScoringGrid | None = None,
+        scoring_grid: ScoringGeometry | None = None,
         scoring_mode: str = "dose_to_medium",
         step_energy_fraction: float | None = None,
+        deposit_resolution_cm: float | None = None,
         msc_model: str = "gs",
         progress: ProgressCallback | None = None,
         concurrent_batches: int = 1,
@@ -425,8 +473,10 @@ class WarpEngine:
 
         See :meth:`pyRadMC.backends.ref.engine.ReferenceEngine.run` for parameter
         semantics — the two signatures are deliberately identical (``scoring_grid``
-        included: the dose grid deposits accumulate on, default the transport grid,
-        with off-grid deposits booked to ``energy_unscored``; and ``scoring_mode``:
+        included: the scoring geometry deposits accumulate on — a rectilinear
+        :class:`~pyRadMC.scoring.grid.ScoringGrid`, default the transport grid, or a
+        :class:`~pyRadMC.scoring.cylinder.CylindricalScoringGrid` for a pencil-beam
+        kernel — with off-geometry deposits booked to ``energy_unscored``; and ``scoring_mode``:
         dose-to-water weights each deposit in-kernel by the stopping-power ratio
         from the flattened tables while the books stay physical; ``progress``: one
         tick per completed batch, the identical cadence to the reference engine —
@@ -493,11 +543,16 @@ class WarpEngine:
         msc_model_gs = _validate_msc_model(msc_model)
         if step_energy_fraction is None:
             step_energy_fraction = default_step_energy_fraction(msc_model)
+        if deposit_resolution_cm is not None and deposit_resolution_cm <= 0.0:
+            raise ValueError(f"deposit resolution must be positive, got {deposit_resolution_cm}")
+        # One float travels to the kernels; non-positive is the single-midpoint
+        # sentinel, matching pyRadMC.transport.electron.substep_pieces.
+        deposit_resolution = 0.0 if deposit_resolution_cm is None else deposit_resolution_cm
 
         device = self.device
         gi, density, material = self._upload_grid(device)
         scoring = scoring_grid if scoring_grid is not None else ScoringGrid.for_grid(self.grid)
-        si = _scoring_info(scoring)
+        si = _scoring_info(scoring, device)
         table_energy = source.max_energy
         tab = self._upload_tables(table_energy, pcut, ecut, device, with_gs=msc_model_gs == 1)
 
@@ -613,6 +668,7 @@ class WarpEngine:
                 pcut=pcut,
                 ecut=ecut,
                 step_energy_fraction=step_energy_fraction,
+                deposit_resolution=deposit_resolution,
                 msc_model_gs=msc_model_gs,
                 transport_electrons=transport_electrons,
                 dose_to_water=dose_to_water,
@@ -668,6 +724,7 @@ class WarpEngine:
                         pcut,
                         ecut,
                         step_energy_fraction,
+                        deposit_resolution,
                         msc_model_gs,
                         transport_electrons,
                         dose_to_water,
@@ -694,6 +751,7 @@ class WarpEngine:
                         pcut,
                         ecut,
                         step_energy_fraction,
+                        deposit_resolution,
                         msc_model_gs,
                         transport_electrons,
                         dose_to_water,
@@ -723,6 +781,7 @@ class WarpEngine:
                         pcut,
                         ecut,
                         step_energy_fraction,
+                        deposit_resolution,
                         msc_model_gs,
                         transport_electrons,
                         dose_to_water,
@@ -751,6 +810,7 @@ class WarpEngine:
                         pcut,
                         ecut,
                         step_energy_fraction,
+                        deposit_resolution,
                         msc_model_gs,
                         transport_electrons,
                         dose_to_water,
@@ -778,6 +838,7 @@ class WarpEngine:
                         pcut,
                         ecut,
                         step_energy_fraction,
+                        deposit_resolution,
                         msc_model_gs,
                         transport_electrons,
                         dose_to_water,
@@ -805,6 +866,7 @@ class WarpEngine:
                         pcut,
                         ecut,
                         step_energy_fraction,
+                        deposit_resolution,
                         msc_model_gs,
                         transport_electrons,
                         dose_to_water,
@@ -878,7 +940,9 @@ class WarpEngine:
             n_histories=n_histories,
             n_batches=n_batches,
             scoring_mode=scoring_mode,
-            provenance=self._provenance(seed, pcut, ecut, msc_model, step_energy_fraction),
+            provenance=self._provenance(
+                seed, pcut, ecut, msc_model, step_energy_fraction, deposit_resolution_cm
+            ),
         )
 
     def run_dij(
@@ -896,6 +960,7 @@ class WarpEngine:
         scoring_grid: ScoringGrid | None = None,
         scoring_mode: str = "dose_to_medium",
         step_energy_fraction: float | None = None,
+        deposit_resolution_cm: float | None = None,
         msc_model: str = "gs",
         devices: Sequence[str] | None = None,
         concurrent_batches: int = 1,
@@ -1019,6 +1084,11 @@ class WarpEngine:
         msc_model_gs = _validate_msc_model(msc_model)
         if step_energy_fraction is None:
             step_energy_fraction = default_step_energy_fraction(msc_model)
+        if deposit_resolution_cm is not None and deposit_resolution_cm <= 0.0:
+            raise ValueError(f"deposit resolution must be positive, got {deposit_resolution_cm}")
+        # One float travels to the kernels; non-positive is the single-midpoint
+        # sentinel, matching pyRadMC.transport.electron.substep_pieces.
+        deposit_resolution = 0.0 if deposit_resolution_cm is None else deposit_resolution_cm
 
         scoring = scoring_grid if scoring_grid is not None else ScoringGrid.for_grid(self.grid)
         n_beamlets = source.n_beamlets
@@ -1078,7 +1148,13 @@ class WarpEngine:
             correlated=correlated,
             scoring_mode=scoring_mode,
             provenance=self._provenance(
-                seed, pcut, ecut, msc_model, step_energy_fraction, devices=device_list
+                seed,
+                pcut,
+                ecut,
+                msc_model,
+                step_energy_fraction,
+                deposit_resolution_cm,
+                devices=device_list,
             ),
         )
 
@@ -1092,6 +1168,7 @@ class WarpEngine:
             pcut=pcut,
             ecut=ecut,
             step_energy_fraction=step_energy_fraction,
+            deposit_resolution=deposit_resolution,
             msc_model_gs=msc_model_gs,
             transport_electrons=transport_electrons,
             truncation=truncation,
@@ -1165,6 +1242,7 @@ class WarpEngine:
         pcut: float,
         ecut: float,
         step_energy_fraction: float,
+        deposit_resolution: float,
         msc_model_gs: int,
         transport_electrons: bool,
         truncation: float,
@@ -1189,7 +1267,7 @@ class WarpEngine:
         streams and always runs the sequential path.
         """
         gi, density, material = self._upload_grid(device)
-        si = _scoring_info(scoring)
+        si = _scoring_info(scoring, device)
         tab = self._upload_tables(source.max_energy, pcut, ecut, device, with_gs=msc_model_gs == 1)
         n_beamlets = source.n_beamlets
         n_voxels = scoring.n_voxels
@@ -1301,6 +1379,7 @@ class WarpEngine:
             pcut=pcut,
             ecut=ecut,
             step_energy_fraction=step_energy_fraction,
+            deposit_resolution=deposit_resolution,
             msc_model_gs=msc_model_gs,
             transport_electrons=transport_electrons,
             dose_to_water=dose_to_water,
@@ -1524,6 +1603,7 @@ class WarpEngine:
         pcut,
         ecut,
         step_energy_fraction,
+        deposit_resolution,
         msc_model_gs,
         transport_electrons,
         dose_to_water,
@@ -1566,6 +1646,7 @@ class WarpEngine:
                 pcut,
                 ecut,
                 step_energy_fraction,
+                deposit_resolution,
                 msc_model_gs,
                 transport_electrons,
                 dose_to_water,
@@ -1603,6 +1684,7 @@ class WarpEngine:
                 pcut,
                 ecut,
                 step_energy_fraction,
+                deposit_resolution,
                 msc_model_gs,
                 transport_electrons,
                 dose_to_water,
@@ -1639,6 +1721,7 @@ class WarpEngine:
                 pcut,
                 ecut,
                 step_energy_fraction,
+                deposit_resolution,
                 msc_model_gs,
                 transport_electrons,
                 dose_to_water,
@@ -1673,6 +1756,7 @@ class WarpEngine:
             pcut,
             ecut,
             step_energy_fraction,
+            deposit_resolution,
             msc_model_gs,
             transport_electrons,
             dose_to_water,
@@ -1910,6 +1994,7 @@ class WarpEngine:
         pcut,
         ecut,
         step_energy_fraction,
+        deposit_resolution,
         msc_model_gs,
         transport_electrons,
         dose_to_water,
@@ -1942,6 +2027,7 @@ class WarpEngine:
                 pcut,
                 ecut,
                 step_energy_fraction,
+                deposit_resolution,
                 msc_model_gs,
                 transport_electrons,
                 dose_to_water,
@@ -2030,6 +2116,7 @@ class WarpEngine:
         pcut,
         ecut,
         step_energy_fraction,
+        deposit_resolution,
         msc_model_gs,
         transport_electrons,
         dose_to_water,
@@ -2073,6 +2160,7 @@ class WarpEngine:
             pcut,
             ecut,
             step_energy_fraction,
+            deposit_resolution,
             msc_model_gs,
             transport_electrons,
             dose_to_water,
@@ -2103,6 +2191,7 @@ class WarpEngine:
         pcut,
         ecut,
         step_energy_fraction,
+        deposit_resolution,
         msc_model_gs,
         transport_electrons,
         dose_to_water,
@@ -2177,6 +2266,7 @@ class WarpEngine:
             pcut,
             ecut,
             step_energy_fraction,
+            deposit_resolution,
             msc_model_gs,
             transport_electrons,
             dose_to_water,
@@ -2208,6 +2298,7 @@ class WarpEngine:
         pcut,
         ecut,
         step_energy_fraction,
+        deposit_resolution,
         msc_model_gs,
         transport_electrons,
         dose_to_water,
@@ -2297,6 +2388,7 @@ class WarpEngine:
             pcut,
             ecut,
             step_energy_fraction,
+            deposit_resolution,
             msc_model_gs,
             transport_electrons,
             dose_to_water,
@@ -2326,6 +2418,7 @@ class WarpEngine:
         pcut,
         ecut,
         step_energy_fraction,
+        deposit_resolution,
         msc_model_gs,
         transport_electrons,
         dose_to_water,
@@ -2373,6 +2466,7 @@ class WarpEngine:
             pcut,
             ecut,
             step_energy_fraction,
+            deposit_resolution,
             msc_model_gs,
             transport_electrons,
             dose_to_water,
@@ -2402,6 +2496,7 @@ class WarpEngine:
         pcut,
         ecut,
         step_energy_fraction,
+        deposit_resolution,
         msc_model_gs,
         transport_electrons,
         dose_to_water,
@@ -2480,6 +2575,7 @@ class WarpEngine:
             pcut,
             ecut,
             step_energy_fraction,
+            deposit_resolution,
             msc_model_gs,
             transport_electrons,
             dose_to_water,
@@ -2516,6 +2612,7 @@ class WarpEngine:
         pcut,
         ecut,
         step_energy_fraction,
+        deposit_resolution,
         msc_model_gs,
         transport_electrons,
         dose_to_water,
@@ -2580,6 +2677,7 @@ class WarpEngine:
             pcut,
             ecut,
             step_energy_fraction,
+            deposit_resolution,
             msc_model_gs,
             transport_electrons,
             dose_to_water,
@@ -2651,6 +2749,7 @@ class WarpEngine:
         pcut,
         ecut,
         step_energy_fraction,
+        deposit_resolution,
         msc_model_gs,
         transport_electrons,
         dose_to_water,
@@ -2718,6 +2817,7 @@ class WarpEngine:
                         pcut,
                         ecut,
                         step_energy_fraction,
+                        deposit_resolution,
                         msc_model_gs,
                         dose_to_water,
                     ],
@@ -2822,6 +2922,7 @@ class WarpEngine:
         pcut,
         ecut,
         step_energy_fraction,
+        deposit_resolution,
         msc_model_gs,
         transport_electrons,
         dose_to_water,
@@ -2879,6 +2980,7 @@ class WarpEngine:
                 pcut,
                 ecut,
                 step_energy_fraction,
+                deposit_resolution,
                 msc_model_gs,
                 transport_electrons,
                 dose_to_water,
@@ -2932,6 +3034,7 @@ class WarpEngine:
         pcut,
         ecut,
         step_energy_fraction,
+        deposit_resolution,
         msc_model_gs,
         transport_electrons,
         dose_to_water,
@@ -3012,6 +3115,7 @@ class WarpEngine:
                 pcut,
                 ecut,
                 step_energy_fraction,
+                deposit_resolution,
                 msc_model_gs,
                 transport_electrons,
                 dose_to_water,
@@ -3048,6 +3152,7 @@ class WarpEngine:
         pcut,
         ecut,
         step_energy_fraction,
+        deposit_resolution,
         msc_model_gs,
         transport_electrons,
         dose_to_water,
@@ -3106,6 +3211,7 @@ class WarpEngine:
                 pcut,
                 ecut,
                 step_energy_fraction,
+                deposit_resolution,
                 msc_model_gs,
                 transport_electrons,
                 dose_to_water,
@@ -3141,6 +3247,7 @@ class WarpEngine:
         pcut,
         ecut,
         step_energy_fraction,
+        deposit_resolution,
         msc_model_gs,
         transport_electrons,
         dose_to_water,
@@ -3215,6 +3322,7 @@ class WarpEngine:
                     pcut,
                     ecut,
                     step_energy_fraction,
+                    deposit_resolution,
                     msc_model_gs,
                     transport_electrons,
                     dose_to_water,
@@ -3235,6 +3343,14 @@ class WarpEngine:
         gi.nz = self.grid.shape[2]
         gi.n_voxels = int(np.prod(self.grid.shape))
         gi.min_spacing = min(self.grid.spacing)
+        # The transport grid is always rectilinear (AGENTS.md 6); these fields exist
+        # only because scoring shares the struct, and no kernel reads them at mode 0.
+        gi.mode = 0
+        gi.axis_x = gi.axis_y = 0.0
+        gi.n_shells = 0
+        gi.r_inner_sq = gi.r_outer_sq = 0.0
+        gi.r_edges_sq = _no_shells(device)
+        gi.z_edges = _no_shells(device)
         density = wp.array(self.grid.density.astype(np.float32), dtype=float, device=device)
         # Material indices travel as uint8: 4x narrower than int32 on the transport
         # kernels' random per-step load, and lossless for any registry the tables can

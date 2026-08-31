@@ -165,6 +165,24 @@ class ScoringGrid:
         return self.shape[0] * self.shape[1] * self.shape[2]
 
     @property
+    def deposit_resolution_cm(self) -> float:
+        """Suggested ``deposit_resolution_cm`` for an engine run on this grid: min spacing.
+
+        Asks the transport loop to file energy no coarser than this grid can
+        distinguish. Passing it is only worth the cost when this grid is finer than
+        the transport voxels; at or above voxel resolution leave the engine's
+        ``None`` default, which is cheaper and equivalent. See
+        :meth:`pyRadMC.backends.ref.engine.ReferenceEngine.run`.
+
+        Half the smallest spacing: a uniform grid has one bin width, so any
+        divisor of it is commensurate, and halving puts two deposits in the
+        narrowest voxel. (The aliasing a non-dividing spacing causes on a *graded*
+        axis is discussed in
+        :func:`pyRadMC.scoring.cylinder.common_bin_divisor`.)
+        """
+        return 0.5 * min(self.spacing)
+
+    @property
     def upper_corner(self) -> tuple[float, float, float]:
         """Position of the upper outer corner, in cm (outside, half-open)."""
         return (
@@ -185,3 +203,17 @@ class ScoringGrid:
             point_axis_index(y, self.origin[1], self.spacing[1], self.shape[1]),
             point_axis_index(z, self.origin[2], self.spacing[2], self.shape[2]),
         )
+
+    def flat_index(self, x: float, y: float, z: float) -> int:
+        """Flat voxel index ``(ix * ny + iy) * nz + iz``, or ``-1`` when outside.
+
+        C order, matching ``voxel_mass.reshape(-1)`` and the flat buffer the Warp
+        kernels score into. Reporting "outside" in band is what lets the batched
+        scorer route a deposit through one query regardless of which scoring
+        geometry it was handed (see :class:`~pyRadMC.scoring.cylinder.CylindricalScoringGrid`,
+        which offers the same two methods over a different binning).
+        """
+        if not self.contains(x, y, z):
+            return -1
+        ix, iy, iz = self.voxel_index(x, y, z)
+        return (ix * self.shape[1] + iy) * self.shape[2] + iz

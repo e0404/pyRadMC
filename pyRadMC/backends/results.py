@@ -53,13 +53,23 @@ class RunProvenance:
     :attr:`~pyRadMC.data.interface.CrossSectionSource.provenance` — the compiled
     library citation for a tabulated source, the parameterization for the analytic
     one. This is the field that distinguishes two otherwise identical runs."""
+    deposit_resolution_cm: float | None = None
+    """Longest piece a half-substep's continuous energy loss was filed as, in cm.
+
+    ``None`` is the single midpoint deposit — the default, and what every result
+    produced before this option existed used. A value moves dose *within* a
+    transport voxel (never between voxels, and never any total), so two runs that
+    differ only here agree on the energy books and on any dose scored at voxel
+    resolution, and can differ below it. That is exactly why it is recorded: it is
+    not recoverable from the dose array."""
 
     def summary(self) -> str:
         """One-line human-readable digest, for logs and file headers."""
         return (
             f"pyRadMC {self.version} {self.backend}/{self.device} seed={self.seed} "
             f"pcut={self.pcut_mev} ecut={self.ecut_mev} msc={self.msc_model} "
-            f"step={self.step_energy_fraction} xs=[{self.cross_sections}]"
+            f"step={self.step_energy_fraction} deposit_res={self.deposit_resolution_cm} "
+            f"xs=[{self.cross_sections}]"
         )
 
 

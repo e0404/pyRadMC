@@ -62,6 +62,12 @@ _KERNEL_MODULES: dict[str, tuple[str, ...] | None] = {
         "slab_entry_distance",
         "distance_to_voxel_boundary",
     ),
+    "pyRadMC.geometry.cylinder": (
+        "cylinder_contains",
+        "cylinder_radius_squared",
+        "edge_bin_index",
+    ),
+    "pyRadMC.transport.electron": ("substep_pieces",),
     "pyRadMC.geometry.collimation": (
         "_clip_len",
         "_affine_interval_length",

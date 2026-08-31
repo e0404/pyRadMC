@@ -49,6 +49,9 @@ planning, and readable.
   and a rounded-tip MLC, IAEA phase-space sources, polyenergetic spectra, virtual source
   models driven by a measured radial primary fluence, and a dose grid
   decoupled from the transport grid with optional dose-to-water scoring.
+- **Pencil-beam kernels.** Mono-energetic pencil-beam kernels in water, scored in cylindrical
+  depth-by-radial-shell bins about the beam axis, on every backend. The cylinder is a *scoring*
+  geometry: transport stays on the rectilinear grid, so the physics is unchanged by choosing it.
 
 ## What it does not do
 

@@ -107,6 +107,79 @@ plan_dose = matrix @ weights # the loop an optimizer runs thousands of times
     sigma is invalid. `dij.variance_csc()` exports per-column variance and warns about
     exactly this. A per-batch plan-dose sigma is a known gap.
 
+## Pencil-beam kernels
+
+A mono-energetic pencil-beam kernel is the dose an infinitely narrow beam deposits in a
+homogeneous medium, binned by depth and by radius about the beam axis. Bin dose in
+cylindrical shells instead of voxels by handing `run` a `CylindricalScoringGrid`:
+
+```python
+from pyRadMC import (
+    CylindricalScoringGrid, PencilBeamSource, geometric_edges, graded_edges,
+)
+
+grid = VoxelGrid.uniform_water(shape=(64, 64, 50), spacing=(0.25, 0.25, 0.2))
+cylinder = CylindricalScoringGrid.for_grid(
+    grid,
+    # Equal-ratio shells resolve the near-axis gradient; graded depth bins spend
+    # resolution on the build-up and coarsen through the flat tail.
+    radial_edges=geometric_edges(r_max=6.0, n_shells=28, r_min=0.05),
+    depth_edges=graded_edges([(0.0, 2.0, 0.05), (2.0, 10.0, 0.25)]),
+)
+source = PencilBeamSource(energy=6.0, position=(8.0, 8.0, -0.1), direction=(0.0, 0.0, 1.0))
+
+result = engine.run(source, n_histories=200_000, n_batches=10, seed=20260726,
+                    scoring_grid=cylinder)
+
+result.dose          # (n_depth, n_shells), MeV/g per history
+result.dose_sigma    # per-shell 1 sigma, from the same batch statistics as always
+cylinder.depth_centers, cylinder.radial_centers   # the abscissae to plot against
+```
+
+The same call runs on the reference, Warp CPU and Warp CUDA backends. Shells are cheap
+statistically: each averages over the whole azimuth, so a kernel resolves at history
+counts a Cartesian grid would need orders more for.
+
+!!! warning "Scoring below the transport voxel needs `deposit_resolution_cm`"
+
+    A condensed-history substep is capped at the transport voxel face, and its
+    collision loss is filed at the half-step midpoint. Once steps are longer than a
+    voxel — above roughly 2 MeV at 0.25 cm voxels — every deposit lands near the
+    voxel centre, and a dose profile binned *below* the voxel picks up a large
+    modulation at the voxel pitch (78 % peak-to-trough at 6 MeV).
+
+    Pass `deposit_resolution_cm=cylinder.deposit_resolution_cm` to file each
+    half-step in pieces that fine instead. It moves energy only *within* a voxel, so
+    nothing scored at voxel resolution changes; it costs roughly 1.4x to 2x. Leave
+    it off when your dose grid is the transport grid.
+
+    Take the value from the scoring geometry rather than picking one. It must
+    **divide** the bin widths: deposits sit at a fixed spacing from the step start
+    and step starts are pinned to voxel faces, so a spacing that does not divide the
+    bin aliases against it at a fixed phase, leaving a standing ripple. Over 0.025 cm
+    bins at 15 MeV, a 0.010 cm spacing leaves 12.7 % peak-to-trough where 0.005 cm
+    leaves 1.7 %.
+
+!!! note "The cylinder is scoring, not geometry"
+
+    Transport still runs on the rectilinear `VoxelGrid` — the phantom is a water **box**
+    that surrounds the binned cylinder, which is also what keeps the outermost shell under
+    full lateral scatter conditions. Nothing about the physics changes when you choose
+    this binning; deposits landing in the box but outside the shells are booked to
+    `result.energy_unscored`, so the energy ledger stays exact.
+
+    Per-shell mass is the analytic annulus volume, which is exact only in a uniform
+    medium. `for_grid` refuses a region the phantom does not cover or does not fill
+    uniformly — use `ScoringGrid` for a heterogeneous phantom.
+
+Electron primaries work through `primary_kind="electron"`, which exists for validating
+electron transport against published ranges. Electron beams as a clinical modality are
+out of scope.
+
+`examples/pencil_kernel_demo.py` runs both and saves a figure.
+`examples/pencil_kernel_database.py` sweeps an energy series into a single `.npz`
+kernel table, and reports the achieved statistics per dose band.
+
 ## Better cross-sections
 
 The analytic parameterization is correct to a few percent and needs no data files. For

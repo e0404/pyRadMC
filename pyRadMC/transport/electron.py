@@ -71,8 +71,11 @@ __all__ = [
     "GS_STEP_ENERGY_FRACTION",
     "STEP_ENERGY_FRACTION",
     "STEP_HINGE_THETA2_MAX",
+    "SUBSTEP_DEPOSIT_CAP",
     "default_step_energy_fraction",
     "electron_steps",
+    "substep_deposit_count",
+    "substep_pieces",
 ]
 
 STEP_ENERGY_FRACTION: float = 0.05
@@ -155,6 +158,50 @@ positions; 1 micrometre is far below any voxel edge, and its short over-step is 
 to the crossed voxel's stopping power, so it is physically consistent, not a leak."""
 
 
+SUBSTEP_DEPOSIT_CAP = 1024
+"""Upper bound on pieces per half-substep, so a mis-specified resolution cannot
+explode the deposit count. Past it the deposit is coarser than asked — a resolution
+shortfall, not a correctness failure."""
+
+
+def substep_pieces(length: float, resolution: float) -> int:
+    """Pieces to split a half-substep of ``length`` cm into; ``resolution <= 0`` gives 1.
+
+    ``ceil(length / resolution)``, clamped to ``[1, SUBSTEP_DEPOSIT_CAP]``. Ceil, not
+    round: a piece *longer* than the requested resolution is the failure this exists
+    to prevent, so the count errs upward.
+
+    Non-positive ``resolution`` is the "one midpoint deposit" sentinel rather than an
+    error, because this is the form the Warp kernels compile (AGENTS.md 2.5) and a
+    kernel cannot raise; the host API's ``None`` maps onto it, and the engines
+    validate a caller's value before any launch. Keeping one function means host and
+    device cannot disagree about how many deposits a step becomes.
+    """
+    if resolution <= 0.0:
+        return 1
+    # math.ceil returns an int on the host; under Warp it is a float ceil, and the
+    # cast is what makes both return an index (as in point_axis_index).
+    n = int(math.ceil(length / resolution))  # noqa: RUF046
+    if n < 1:
+        return 1
+    if n > SUBSTEP_DEPOSIT_CAP:
+        return SUBSTEP_DEPOSIT_CAP
+    return n
+
+
+def substep_deposit_count(length: float, resolution: float | None) -> int:
+    """Host wrapper over :func:`substep_pieces`: ``None`` means one midpoint deposit.
+
+    Refuses a non-positive number, which is a caller error rather than a request for
+    the default; ``None`` is how the default is spelled.
+    """
+    if resolution is None:
+        return 1
+    if resolution <= 0.0:
+        raise ValueError(f"deposit resolution must be positive, got {resolution}")
+    return substep_pieces(length, resolution)
+
+
 def electron_steps(
     is_positron: bool,
     energy: float,
@@ -175,6 +222,7 @@ def electron_steps(
     deposit_weight: DepositWeightFn = unit_weight,
     step_energy_fraction: float | None = None,
     msc_model: str = "gs",
+    deposit_resolution_cm: float | None = None,
 ) -> float:
     """Transport one electron or positron; secondaries go to ``spawn``.
 
@@ -205,6 +253,20 @@ def electron_steps(
     **not applied** — it is a Gaussian-validity limit, and removing it is
     what lets the larger GS substep fraction actually grow the step.
 
+    ``deposit_resolution_cm`` is the longest piece a half-substep's continuous
+    energy loss may be filed as. ``None`` (the default) files the whole half-step
+    as one point deposit at its midpoint — the behaviour every existing result was
+    produced with, byte-identical. A value splits the half-step into equal pieces
+    no longer than it and deposits an equal share at each piece's midpoint.
+
+    This changes *where* energy is filed, never how much, and never the trajectory
+    or the random stream: the substep length, the hinge, the scattering and the
+    energy loss are all untouched, so a run with it set transports exactly the same
+    histories. It matters only when dose is scored below the transport voxel scale,
+    where the midpoint deposit prints the voxel lattice onto the dose profile (see
+    the module tests). Set it to the finest bin the scorer resolves; leave it None
+    when scoring at voxel resolution, where it would only cost time.
+
     ``step_energy_fraction`` overrides the per-model default
     (:func:`default_step_energy_fraction`; ``None`` resolves to the selected
     model's validated fraction) — a measurement instrument for substep
@@ -215,6 +277,11 @@ def electron_steps(
         raise ValueError(f"unknown msc_model {msc_model!r}; expected 'gaussian' or 'gs'")
     if step_energy_fraction is None:
         step_energy_fraction = default_step_energy_fraction(msc_model)
+    if deposit_resolution_cm is not None and deposit_resolution_cm <= 0.0:
+        raise ValueError(f"deposit resolution must be positive, got {deposit_resolution_cm}")
+    # One float carries the option from here down, matching what the kernels take:
+    # non-positive is the "single midpoint deposit" sentinel.
+    resolution = 0.0 if deposit_resolution_cm is None else deposit_resolution_cm
     escaped = 0.0
     e = energy
     w = weight
@@ -245,6 +312,33 @@ def electron_steps(
             deposit(px, py, pz, amount, factor * amount)
             return 0.0
         return amount
+
+    def deposit_spread(
+        px: float,
+        py: float,
+        pz: float,
+        dx: float,
+        dy: float,
+        dz: float,
+        length: float,
+        amount: float,
+        factor: float,
+    ) -> float:
+        """File one half-substep's loss along its path; returns escaped energy.
+
+        ``(px, py, pz)`` is the half-step's *start* and ``length`` its length. The
+        pieces are equal, and each piece's share is deposited at its midpoint, so a
+        single piece reproduces the plain midpoint deposit exactly (``length / 1.0``
+        is exact and ``0.5 * length`` equals ``length / 2.0`` in IEEE arithmetic).
+        """
+        n = substep_pieces(length, resolution)
+        share = amount / float(n)
+        piece = length / float(n)
+        out = 0.0
+        for k in range(n):
+            t = (float(k) + 0.5) * piece
+            out += deposit_or_escape(px + dx * t, py + dy * t, pz + dz * t, share, factor)
+        return out
 
     while True:
         if e <= ecut:
@@ -328,9 +422,7 @@ def electron_steps(
         d1 = continuous * (s1 / s) if s > 0.0 else 0.0
         d2 = continuous - d1
 
-        escaped += deposit_or_escape(
-            x + ux * s1 / 2.0, y + uy * s1 / 2.0, z + uz * s1 / 2.0, w * d1, substep_factor
-        )
+        escaped += deposit_spread(x, y, z, ux, uy, uz, s1, w * d1, substep_factor)
         e -= d1
         x += ux * s1
         y += uy * s1
@@ -366,9 +458,7 @@ def electron_steps(
                 escaped += deposit_or_escape(x, y, z, w * k, deposit_weight(k, material))
             e -= k
 
-        escaped += deposit_or_escape(
-            x + ux * s2 / 2.0, y + uy * s2 / 2.0, z + uz * s2 / 2.0, w * d2, substep_factor
-        )
+        escaped += deposit_spread(x, y, z, ux, uy, uz, s2, w * d2, substep_factor)
         e -= d2
         x += ux * s2
         y += uy * s2

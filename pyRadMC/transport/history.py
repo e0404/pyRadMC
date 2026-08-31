@@ -47,6 +47,7 @@ def transport_history(
     weight: float = 1.0,
     deposit_weight: DepositWeightFn = unit_weight,
     step_energy_fraction: float | None = None,
+    deposit_resolution_cm: float | None = None,
     msc_model: str = "gs",
 ) -> float:
     """Transport one primary and all its descendants; returns the escaped energy.
@@ -82,6 +83,10 @@ def transport_history(
         Maximum fraction of CSDA range per electron substep; ``None`` resolves
         to the selected ``msc_model``'s validated fraction
         (:func:`~pyRadMC.transport.electron.default_step_energy_fraction`).
+    deposit_resolution_cm
+        Longest piece a half-substep's continuous loss is filed as; ``None``
+        (default) is the single midpoint deposit. See
+        :func:`~pyRadMC.transport.electron.electron_steps`.
         See :func:`~pyRadMC.transport.electron.electron_steps`, also for
         ``msc_model`` (default ``"gs"``, the shipped configuration).
     """
@@ -139,6 +144,7 @@ def transport_history(
                 ecut,
                 deposit_weight=deposit_weight,
                 step_energy_fraction=step_energy_fraction,
+                deposit_resolution_cm=deposit_resolution_cm,
                 msc_model=msc_model,
             )
     return escaped

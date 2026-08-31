@@ -32,6 +32,16 @@ installed; touching it then raises an error naming the extra to install.
 
 ::: pyRadMC.scoring.grid.ScoringGrid
 
+::: pyRadMC.scoring.cylinder.CylindricalScoringGrid
+
+::: pyRadMC.scoring.cylinder.uniform_edges
+
+::: pyRadMC.scoring.cylinder.geometric_edges
+
+::: pyRadMC.scoring.cylinder.graded_edges
+
+::: pyRadMC.scoring.cylinder.common_bin_divisor
+
 ## Cross-sections and materials
 
 ::: pyRadMC.data.interface.CrossSectionSource

@@ -293,6 +293,62 @@ must be able to find out from this file whether the numbers should have moved.
   penumbra column is **not grid-converged** — at 2.5 mm voxels it reads up to 0.9 mm wider
   than the same physics at 1.25 mm, so it is comparative only.
 
+- **Sub-voxel deposit resolution**, `deposit_resolution_cm` on `ReferenceEngine.run`,
+  `WarpEngine.run` and both `run_dij`. A condensed-history substep is capped at the
+  transport voxel face and its collision loss is filed at the half-step midpoint, so
+  once a step is longer than a voxel every deposit lands near the voxel centre and
+  the *sub-voxel* dose profile becomes a tent — peaked at the centre, starved at the
+  faces. Measured on a 6 MeV pencil beam scored at a tenth of the voxel: 76 % peak-to-
+  trough at the voxel period, rising with energy as the substep outgrows the voxel
+  (1 % at 1 MeV, 21 % at 2, 78 % at 6, 104 % at 15). Setting this splits each
+  half-step into pieces no longer than it, which removes the modulation.
+
+  **The value must divide the scoring bin width.** Deposits sit at a fixed spacing
+  from the step start and step starts are pinned to voxel faces, so the point set is
+  locked to the lattice; a spacing that does not divide the bin width beats against
+  it, and the fixed phase makes that beat a standing ripple rather than noise.
+  Measured at 6 / 15 MeV over 0.025 cm bins: 0.010 cm (ratio 2.5) leaves 5.7 / 12.7 %,
+  0.005 cm (ratio 5) leaves 1.3 / 1.7 %, 0.0025 cm leaves 0.7 / 0.8 %. The scoring
+  geometries therefore suggest **half the largest common divisor of their bin
+  widths** as `deposit_resolution_cm`, not simply their finest bin.
+
+  **The default is unchanged and this fixes nothing on its own.** `None` is the
+  single midpoint deposit, byte-identical to every result produced before it
+  existed, and the artifact remains the default behaviour. The option is opt-in
+  because it costs roughly 1.4x (broad field) to 2x (pencil beam) at four pieces per
+  half-step, and buys nothing when dose is scored at voxel resolution — which is
+  every result the engine has produced so far. Energy is only ever moved *within* a
+  voxel: the books, and dose coarse-grained back to the voxel pitch, are unchanged
+  (test-pinned). `RunProvenance` records it, since it is not recoverable from the
+  dose array.
+
+- **Mono-energetic pencil-beam kernels.** A new cylindrical scoring geometry,
+  `CylindricalScoringGrid`, bins dose by depth and by radial shell about a beam axis —
+  the geometry a pencil-beam kernel is defined on. It is accepted by the `scoring_grid`
+  argument of `ReferenceEngine.run` and `WarpEngine.run`, so it works on the reference,
+  Warp CPU and Warp CUDA backends through one code path, with per-shell sigma from the
+  usual batch statistics. Shell edges are the caller's (`uniform_edges`,
+  `geometric_edges`, or any increasing array); per-shell mass is the analytic annulus
+  volume, and `for_grid` refuses a binned region the phantom does not cover or does not
+  fill uniformly rather than approximating it. Electron primaries work through the
+  existing `primary_kind="electron"` range instrument; electron beams as a clinical
+  modality remain out of scope. Demonstrated by `examples/pencil_kernel_demo.py`.
+
+  Both axes take arbitrary bin edges: `geometric_edges` for equal-ratio radial
+  shells, `graded_edges` for a depth schedule that is fine through the build-up
+  region and coarse in the tail (0.010/0.025/0.25/1.00 cm over 0-32 cm is 152 bins
+  where a uniform fine grid would need 3200). One `edge_bin_index` primitive serves
+  both, on host and device.
+- **Pencil-beam kernel database script**, `examples/pencil_kernel_database.py`:
+  sweeps a photon energy series and writes the kernels to a single `.npz` with bin
+  edges, per-bin sigma and run provenance. Reports achieved uncertainty per dose
+  band rather than as one global number, because the outermost shells are many
+  orders below the peak and no history count fixes that.
+
+  **This moves no dose.** Transport still runs on the rectilinear `VoxelGrid` and never
+  sees the scoring geometry: for a run scored on a grid, emitted and escaped energy are
+  bit-identical to before, and the Warp rectilinear deposit path is byte-identical
+  (both test-pinned).
 - **Concurrent forward batches on CUDA.** `WarpEngine.run(...,
   concurrent_batches=N)` can overlap independent statistical batches on private CUDA
   streams while preserving the same-device result bit for bit by folding batch dose maps

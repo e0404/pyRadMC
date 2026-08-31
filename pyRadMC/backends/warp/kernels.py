@@ -144,13 +144,32 @@ lookup_1d = _p.lookup_loglinear_1d
 lookup_2d = _p.lookup_loglinear_2d
 point_inside = _p.point_inside
 point_axis_index = _p.point_axis_index
+cylinder_contains = _p.cylinder_contains
+cylinder_radius_squared = _p.cylinder_radius_squared
+edge_bin_index = _p.edge_bin_index
+substep_pieces = _p.substep_pieces
 slab_entry_distance = _p.slab_entry_distance
 distance_to_voxel_boundary = _p.distance_to_voxel_boundary
 
 
 @wp.struct
 class GridInfo:
-    """Scalar grid metadata; the density/material arrays travel separately."""
+    """Scalar grid metadata; the density/material arrays travel separately.
+
+    Carries the transport grid (always ``mode == 0``) and the *scoring* geometry,
+    which may be rectilinear (``mode == 0``, the default) or a cylindrical
+    depth-by-radial-shell binning (``mode == 1``; see
+    :mod:`pyRadMC.scoring.cylinder`). One struct rather than two because the single
+    routing point that reads it — :func:`_scoring_index` — is the only place either
+    geometry is interpreted, and every kernel signature that carries a grid stays
+    unchanged.
+
+    In cylindrical mode ``z_lo``/``z_hi`` stay the depth extent and ``nz`` the depth
+    bin count, but the bins themselves are graded — a kernel database wants fine bins
+    through the build-up region and coarse ones in the tail — so their boundaries come
+    from ``z_edges`` rather than from a single ``sz``. The ``x_*``/``y_*`` fields are
+    unused; the lateral fields below replace them.
+    """
 
     x_lo: float
     y_lo: float
@@ -166,6 +185,15 @@ class GridInfo:
     nz: int
     n_voxels: int
     min_spacing: float
+    # --- cylindrical scoring (mode == 1); inert and unread when mode == 0 --------
+    mode: int
+    axis_x: float
+    axis_y: float
+    n_shells: int
+    r_inner_sq: float
+    r_outer_sq: float
+    r_edges_sq: wp.array(dtype=float)
+    z_edges: wp.array(dtype=float)
 
 
 @wp.struct
@@ -462,6 +490,50 @@ def _spr_factor(
 
 
 @wp.func
+def _scoring_index(si: GridInfo, x: float, y: float, z: float) -> int:
+    """Flat scoring-bin index for a position, or -1 when the geometry excludes it.
+
+    The in-kernel mirror of the host geometries' ``flat_index`` (see
+    :meth:`pyRadMC.scoring.grid.ScoringGrid.flat_index` and
+    :meth:`pyRadMC.scoring.cylinder.CylindricalScoringGrid.flat_index`), and the
+    single place either binning is interpreted on the device.
+
+    Both branches call the *same* shared scalar primitives the host calls
+    (``point_inside``/``point_axis_index``; ``cylinder_contains``/
+    ``edge_bin_index``), transplanted by :mod:`pyRadMC.backends.warp.physics`,
+    so a boundary convention cannot drift between targets. The rectilinear branch
+    is the identical arithmetic this function replaced, so the default scoring path
+    stays byte-identical.
+
+    ``si.mode`` is uniform across every thread of a launch — it comes from the host
+    scoring geometry, not from the particle — so the branch is free.
+
+    Written with early returns rather than by assigning one result variable inside
+    the branches: under Warp codegen a value written to a pre-declared variable
+    inside a nested conditional does not survive the block, and the silent effect
+    was a kernel that scored nothing at all. Every path returns explicitly.
+    """
+    if si.mode == 0:
+        if point_inside(x, y, z, si.x_lo, si.y_lo, si.z_lo, si.x_hi, si.y_hi, si.z_hi):
+            ix = point_axis_index(x, si.x_lo, si.sx, si.nx)
+            iy = point_axis_index(y, si.y_lo, si.sy, si.ny)
+            iz = point_axis_index(z, si.z_lo, si.sz, si.nz)
+            return (ix * si.ny + iy) * si.nz + iz
+        return -1
+    if cylinder_contains(
+        x, y, z, si.axis_x, si.axis_y, si.z_lo, si.z_hi, si.r_inner_sq, si.r_outer_sq
+    ):
+        depth = edge_bin_index(z, si.z_edges, si.nz)
+        shell = edge_bin_index(
+            cylinder_radius_squared(x, y, si.axis_x, si.axis_y),
+            si.r_edges_sq,
+            si.n_shells,
+        )
+        return depth * si.n_shells + shell
+    return -1
+
+
+@wp.func
 def _deposit(
     edep: wp.array(dtype=wp.int64),
     deposited: wp.array(dtype=wp.int64),
@@ -477,12 +549,13 @@ def _deposit(
 ):
     """Round-to-nearest fixed-point deposit at a position inside the transport grid.
 
-    Routes by position into the *scoring* grid ``si`` (decoupled dose grid),
-    mirroring ``BatchedDoseScorer.deposit_at``: the containing scoring
-    voxel of this particle's column, or the unscored ledger counter when the
-    scoring grid does not cover the position — never a clamped edge voxel, which
-    would corrupt edge dose. Quantization happens once, before routing, so
-    ``deposited + unscored`` is invariant to the scoring grid in exact quanta.
+    Routes by position into the *scoring* geometry ``si`` (decoupled dose grid,
+    rectilinear or cylindrical) via :func:`_scoring_index`, mirroring
+    ``BatchedDoseScorer.deposit_at``: the containing scoring bin of this particle's
+    column, or the unscored ledger counter when the geometry does not cover the
+    position — never a clamped edge bin, which would corrupt edge dose.
+    Quantization happens once, before routing, so ``deposited + unscored`` is
+    invariant to the scoring geometry in exact quanta.
 
     ``base`` is the flat offset of this particle's beamlet column
     (``beamlet * si.n_voxels``); zero for plain dose runs, whose ``edep`` is a
@@ -498,14 +571,12 @@ def _deposit(
     Under dose-to-medium the host derives deposited energy from ``edep``
     directly and the counter is skipped.
     """
-    if point_inside(x, y, z, si.x_lo, si.y_lo, si.z_lo, si.x_hi, si.y_hi, si.z_hi):
+    index = _scoring_index(si, x, y, z)
+    if index >= 0:
         quanta = wp.int64(
             wp.float64(energy) * wp.float64(factor) * wp.float64(_INV_QUANTUM) + wp.float64(0.5)
         )
-        ix = point_axis_index(x, si.x_lo, si.sx, si.nx)
-        iy = point_axis_index(y, si.y_lo, si.sy, si.ny)
-        iz = point_axis_index(z, si.z_lo, si.sz, si.nz)
-        wp.atomic_add(edep, base + (ix * si.ny + iy) * si.nz + iz, quanta)
+        wp.atomic_add(edep, base + index, quanta)
         if dose_to_water != 0:
             physical = wp.int64(wp.float64(energy) * wp.float64(_INV_QUANTUM) + wp.float64(0.5))
             wp.atomic_add(deposited, 0, physical)
@@ -555,6 +626,62 @@ def _deposit_or_escape(
         _deposit(edep, deposited, unscored, si, base, x, y, z, amount, factor, dose_to_water)
     else:
         _escape(escaped, amount)
+
+
+@wp.func
+def _deposit_spread(
+    edep: wp.array(dtype=wp.int64),
+    escaped: wp.array(dtype=wp.int64),
+    deposited: wp.array(dtype=wp.int64),
+    unscored: wp.array(dtype=wp.int64),
+    gi: GridInfo,
+    si: GridInfo,
+    base: int,
+    x: float,
+    y: float,
+    z: float,
+    ux: float,
+    uy: float,
+    uz: float,
+    length: float,
+    amount: float,
+    factor: float,
+    dose_to_water: int,
+    resolution: float,
+):
+    """File one half-substep's continuous loss along its path.
+
+    Mirror of the reference loop's ``deposit_spread`` closure: ``(x, y, z)`` is the
+    half-step's *start*, ``length`` its length, and the loss splits into equal pieces
+    no longer than ``resolution``, an equal share deposited at each piece's midpoint.
+    ``resolution <= 0`` is the single-midpoint sentinel, which reproduces the previous
+    deposit exactly (``length / 1.0`` is exact and ``0.5 * length`` equals
+    ``length / 2.0`` in IEEE arithmetic), so the default path is unchanged.
+
+    The piece count comes from the same transplanted
+    :func:`pyRadMC.transport.electron.substep_pieces` the host calls, so the two
+    targets cannot split a step differently.
+    """
+    n = substep_pieces(length, resolution)
+    share = amount / float(n)
+    piece = length / float(n)
+    for k in range(n):
+        t = (float(k) + 0.5) * piece
+        _deposit_or_escape(
+            edep,
+            escaped,
+            deposited,
+            unscored,
+            gi,
+            si,
+            base,
+            x + ux * t,
+            y + uy * t,
+            z + uz * t,
+            share,
+            factor,
+            dose_to_water,
+        )
 
 
 @wp.func
@@ -1420,6 +1547,7 @@ def electron_kernel(
     pcut: float,
     ecut: float,
     step_energy_fraction: float,
+    deposit_resolution: float,
     msc_model_gs: int,
     dose_to_water: int,
 ):
@@ -1602,7 +1730,7 @@ def electron_kernel(
             d1 = continuous * (s1 / s)
         d2 = continuous - d1
 
-        _deposit_or_escape(
+        _deposit_spread(
             edep,
             escaped,
             deposited,
@@ -1610,12 +1738,17 @@ def electron_kernel(
             gi,
             si,
             base,
-            x + ux * s1 / 2.0,
-            y + uy * s1 / 2.0,
-            z + uz * s1 / 2.0,
+            x,
+            y,
+            z,
+            ux,
+            uy,
+            uz,
+            s1,
             w * d1,
             substep_factor,
             dose_to_water,
+            deposit_resolution,
         )
         e -= d1
         x += ux * s1
@@ -1700,7 +1833,7 @@ def electron_kernel(
                 )
             e -= k
 
-        _deposit_or_escape(
+        _deposit_spread(
             edep,
             escaped,
             deposited,
@@ -1708,12 +1841,17 @@ def electron_kernel(
             gi,
             si,
             base,
-            x + ux * s2 / 2.0,
-            y + uy * s2 / 2.0,
-            z + uz * s2 / 2.0,
+            x,
+            y,
+            z,
+            ux,
+            uy,
+            uz,
+            s2,
             w * d2,
             substep_factor,
             dose_to_water,
+            deposit_resolution,
         )
         e -= d2
         x += ux * s2

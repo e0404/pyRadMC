@@ -164,6 +164,12 @@ if TYPE_CHECKING:
     )
     from pyRadMC.geometry.spectrum import ALI_ROGERS_BEAMS, Spectrum, ali_rogers_mv
     from pyRadMC.rng.host import HostRNG
+    from pyRadMC.scoring.cylinder import (
+        CylindricalScoringGrid,
+        geometric_edges,
+        graded_edges,
+        uniform_edges,
+    )
     from pyRadMC.scoring.dij import DijResult
     from pyRadMC.scoring.grid import ScoringGrid
 
@@ -178,6 +184,7 @@ _LAZY_EXPORTS: dict[str, str] = {
     "CompositeBeamletSource": "pyRadMC.geometry.source",
     "CompositeSource": "pyRadMC.geometry.source",
     "CrossSectionSource": "pyRadMC.data.interface",
+    "CylindricalScoringGrid": "pyRadMC.scoring.cylinder",
     "DijResult": "pyRadMC.scoring.dij",
     "GaussianSpotBeamSource": "pyRadMC.geometry.source",
     "GaussianSpotBeamletSource": "pyRadMC.geometry.source",
@@ -207,6 +214,9 @@ _LAZY_EXPORTS: dict[str, str] = {
     "WATER": "pyRadMC.data.materials",
     "WarpEngine": "pyRadMC.backends.warp.engine",
     "ali_rogers_mv": "pyRadMC.geometry.spectrum",
+    "geometric_edges": "pyRadMC.scoring.cylinder",
+    "graded_edges": "pyRadMC.scoring.cylinder",
+    "uniform_edges": "pyRadMC.scoring.cylinder",
 }
 
 # Third-party module whose absence means an optional extra is not installed -> the
@@ -265,6 +275,7 @@ __all__ = [
     "CompositeBeamletSource",
     "CompositeSource",
     "CrossSectionSource",
+    "CylindricalScoringGrid",
     "DijResult",
     "GaussianSpotBeamSource",
     "GaussianSpotBeamletSource",
@@ -291,4 +302,7 @@ __all__ = [
     "WarpEngine",
     "__version__",
     "ali_rogers_mv",
+    "geometric_edges",
+    "graded_edges",
+    "uniform_edges",
 ]

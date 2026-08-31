@@ -29,7 +29,7 @@ from pyRadMC.geometry.source import BeamletSource, Source
 from pyRadMC.progress import ProgressCallback, ProgressEmitter
 from pyRadMC.rng.interface import RNG
 from pyRadMC.scoring.dij import BatchedBeamletScorer, DijAssembler, DijResult
-from pyRadMC.scoring.dose import BatchedDoseScorer
+from pyRadMC.scoring.dose import BatchedDoseScorer, ScoringGeometry
 from pyRadMC.scoring.dose_to_water import validate_scoring_mode, water_spr
 from pyRadMC.scoring.grid import ScoringGrid
 from pyRadMC.transport.electron import default_step_energy_fraction
@@ -82,6 +82,7 @@ class ReferenceEngine:
         ecut: float,
         msc_model: str,
         step_energy_fraction: float | None,
+        deposit_resolution_cm: float | None,
     ) -> RunProvenance:
         """Record the configuration this run actually used.
 
@@ -103,6 +104,7 @@ class ReferenceEngine:
                 else step_energy_fraction
             ),
             cross_sections=self.cross_sections.provenance,
+            deposit_resolution_cm=deposit_resolution_cm,
         )
 
     def run(
@@ -115,9 +117,10 @@ class ReferenceEngine:
         ecut: float = ECUT_MEV,
         transport_electrons: bool = True,
         primary_kind: str = "photon",
-        scoring_grid: ScoringGrid | None = None,
+        scoring_grid: ScoringGeometry | None = None,
         scoring_mode: str = "dose_to_medium",
         step_energy_fraction: float | None = None,
+        deposit_resolution_cm: float | None = None,
         msc_model: str = "gs",
         progress: ProgressCallback | None = None,
         concurrent_batches: int = 1,
@@ -152,21 +155,44 @@ class ReferenceEngine:
             option exists for validating electron transport against ranges; electron
             *beams* as a clinical modality remain out of scope (AGENTS.md 6).
         scoring_grid
-            Dose grid to accumulate on (decoupled scoring). ``None``
+            Scoring geometry to accumulate dose on (decoupled scoring). ``None``
             (default) scores on the transport grid — byte-identical to the
             engine before scoring grids existed. Build a coarser, offset or
-            subregion grid with :meth:`pyRadMC.scoring.grid.ScoringGrid.rebin`
+            subregion grid with :meth:`pyRadMC.scoring.grid.ScoringGrid.rebin`, or
+            a depth-by-radial-shell pencil-beam kernel binning with
+            :meth:`pyRadMC.scoring.cylinder.CylindricalScoringGrid.for_grid`,
             **from the same transport grid handed to this engine**; deposits it
             does not cover are booked to ``TransportResult.energy_unscored``, so
             ``emitted == deposited + unscored + escaped`` stays exact. Transport
-            never sees this grid: the streams, and hence the physics, are
-            invariant to it.
+            never sees this geometry: the streams, and hence the physics, are
+            invariant to it — which is why a cylindrical binning is a readout
+            choice and not a physics flag (AGENTS.md 2.10).
         scoring_mode
             ``"dose_to_medium"`` (default) or ``"dose_to_water"`` — a
             scoring-OUTPUT selection (see :func:`_deposit_weight_for` and
             :mod:`pyRadMC.scoring.dose_to_water`): transport is identical, only
             the per-deposit tally weighting differs, and the energy books stay
             physical in both modes. Requires ``transport_electrons=True``.
+        deposit_resolution_cm
+            Longest piece a half-substep's continuous energy loss is filed as, in
+            cm. ``None`` (default) files it as one point deposit at the half-step
+            midpoint — byte-identical to every result produced before this
+            existed. A value splits the half-step into equal pieces no longer than
+            it, depositing an equal share at each piece's midpoint.
+
+            Set it when scoring **below the transport voxel scale**. There, the
+            midpoint deposit prints the voxel lattice onto the dose: substeps are
+            capped at voxel faces, so their midpoints pile at voxel centres and
+            the sub-voxel profile becomes a tent. A natural value is the finest
+            bin the scorer resolves — see
+            :attr:`pyRadMC.scoring.cylinder.CylindricalScoringGrid.finest_resolution_cm`
+            and :attr:`pyRadMC.scoring.grid.ScoringGrid.finest_resolution_cm`.
+            Leave it ``None`` when scoring at voxel resolution, where it buys
+            nothing and costs time.
+
+            It moves no energy and changes no trajectory or random stream — only
+            where a deposit is filed — so the energy books and the transported
+            histories are identical either way.
         step_energy_fraction
             Maximum fraction of CSDA range per electron substep; ``None``
             (default) resolves to the selected ``msc_model``'s validated
@@ -245,6 +271,7 @@ class ReferenceEngine:
                     weight=primary.weight,
                     deposit_weight=deposit_weight,
                     step_energy_fraction=step_energy_fraction,
+                    deposit_resolution_cm=deposit_resolution_cm,
                     msc_model=msc_model,
                 )
             scorer.end_batch(per_batch)
@@ -261,7 +288,9 @@ class ReferenceEngine:
             n_histories=n_histories,
             n_batches=n_batches,
             scoring_mode=scoring_mode,
-            provenance=self._provenance(seed, pcut, ecut, msc_model, step_energy_fraction),
+            provenance=self._provenance(
+                seed, pcut, ecut, msc_model, step_energy_fraction, deposit_resolution_cm
+            ),
         )
 
     def run_dij(
@@ -278,6 +307,7 @@ class ReferenceEngine:
         scoring_grid: ScoringGrid | None = None,
         scoring_mode: str = "dose_to_medium",
         step_energy_fraction: float | None = None,
+        deposit_resolution_cm: float | None = None,
         msc_model: str = "gs",
         progress: ProgressCallback | None = None,
     ) -> DijResult:
@@ -340,6 +370,11 @@ class ReferenceEngine:
         scoring_mode
             Tally weighting of the columns, as in :meth:`run`; recorded in
             ``DijResult.scoring_mode``.
+        deposit_resolution_cm
+            Sub-substep deposit resolution, as in :meth:`run`. Relevant only when
+            ``scoring_grid`` is finer than the transport grid, which for a Dij is
+            unusual — the dose grid is normally the memory lever and therefore
+            coarser, where the default ``None`` is both correct and cheaper.
         progress
             Optional callback, as in :meth:`run`. Ticks once per completed batch
             (``n_batches`` ticks total), each covering
@@ -400,6 +435,7 @@ class ReferenceEngine:
                         weight=primary.weight,
                         deposit_weight=deposit_weight,
                         step_energy_fraction=step_energy_fraction,
+                        deposit_resolution_cm=deposit_resolution_cm,
                         msc_model=msc_model,
                     )
             scorer.end_batch(per_batch)
@@ -414,7 +450,9 @@ class ReferenceEngine:
             truncation=truncation,
             correlated=correlated,
             scoring_mode=scoring_mode,
-            provenance=self._provenance(seed, pcut, ecut, msc_model, step_energy_fraction),
+            provenance=self._provenance(
+                seed, pcut, ecut, msc_model, step_energy_fraction, deposit_resolution_cm
+            ),
         )
         assembler.add_block(0, block.dose, block.sigma)
         return assembler.finalize(
