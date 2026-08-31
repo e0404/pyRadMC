@@ -186,9 +186,65 @@ The analytic parameterization is correct to a few percent and needs no data file
 accuracy work, compile the tabulated backend from the IAEA EPICS evaluations — see
 [cross-section data](data.md).
 
+## The examples
+
+Each script under `examples/` runs a small but physically meaningful problem and saves a
+figure beside itself that a physicist can sanity-check at a glance. They need the
+`examples` extra (matplotlib) and each runs in well under a minute:
+`reference_engine_demo.py` (scatter buildup against the primary-only exponential),
+`electron_transport_demo.py` (buildup vs the KERMA approximation, R50 tracking the CSDA
+range), `warp_backend_demo.py` (one physics source compiled three ways),
+`dij_demo.py` (a beamlet column, the fluence-sum identity, a wedge plan as
+`Dij @ weights`), `tabulated_demo.py` (EPDL/EEDL cross-sections), `materials_demo.py`
+(bone/lung heterogeneity), `ct_demo.py` (dose on a CT), `dose_grid_demo.py` (decoupled
+scoring grid and dose-to-water), `spectral_source_demo.py` (6 MV polyenergetic fan),
+`collimation_demo.py` (staircase MLC field), `virtual_source_demo.py`
+(measured-primary-fluence source model), `phasespace_demo.py` (IAEA phase-space source),
+`custom_source_demo.py`, `pencil_kernel_demo.py` and `pencil_kernel_database.py`
+(see [pencil-beam kernels](#pencil-beam-kernels)), and `noise_bias_study.py`
+(the correlated-sampling decision study).
+
+### The commissioning example
+
+![Central-axis depth doses for a sweep of square fields, and the rectangular output-factor matrix](assets/commissioning_vsm_example.png)
+
+`commissioning_vsm_example.py` runs a full beam-data commissioning session: a water phantom
+at a stated SSD, square fields, and the outputs a commissioning report carries — depth doses
+with dmax and PDD(10), lateral profiles in both principal directions at five depths, diagonals
+of the largest field, field widths and penumbrae, and a rectangular x-by-y output-factor
+matrix. Every error bar is the spread of independent replicates, so the nonlinear quantities
+carry one too. It is a [jupytext](https://jupytext.readthedocs.io/) percent notebook — open it
+as a notebook or run it as a script; the whole configuration is the parameters cell at the top.
+
+The head is **jawless with two stacked, staggered MLC layers** (29 and 28 leaf pairs of 1 cm
+projected pitch, offset by half of it), built from published data about the Varian Halcyon and
+driven by an unflattened beam. Leaf ends make the inplane edge and leaf *sides* make the
+crossplane one, so a symmetric field steps in 1 cm even though each edge lands on a 0.5 cm
+lattice. That machine was chosen because it leaves the collimator doing everything, with no
+jaw to hide behind. Two results it establishes: field widths reproduce to within 0.1 mm at the
+isocentre with **no fitted leaf-position offset**, from the rounded-end tangent geometry plus a
+solved radiation-edge correction (the tangent ray grazes the tip, so it marks full transmission
+rather than the 50 % edge — worth under 0.02 mm below a 10 x 10 field and 0.84 mm at 28 x 28);
+and on an unflattened beam the field edge must be taken at the profile's **inflection point**
+rather than at 50 % of the axis, because the classical construction reports a 40 mm penumbra
+that describes the cone rather than the collimator.
+
+**The source comes one of two ways.** By default it is the analytic model built in the notebook
+— a spectrum, a focal spot, a radial fluence, an extra-focal term and a contaminant-electron
+term — and needs no external data; most of that machine's geometry is unpublished, so the
+opening cell is an explicit inventory of what is stated, fitted, bounded or invented, and the
+fitted off-axis fluence table does *not* ship because it is derived from vendor measurements
+(`PRIMARY_FLUENCE_FILE` is the hook for one you fit against your own). Point `PHASESPACE` at an
+IAEA pair instead — or set `HALCYON_VSM_PHASESPACE` in the environment and run it unedited —
+and the whole source model arrives already sampled in the particles, leaving the notebook to
+supply only the collimator. That is the interesting comparison: a virtual source model fitted
+through some other code's simplified collimator, pushed through an explicit one. Before
+transporting anything that route rebuilds the model's *stated* spectrum and refuses the file if
+the records disagree by more than 50 keV in on-axis mean energy, because a phase space that
+contradicts its own documentation is a wasted run at best — a check that has already earned its
+place. No phase space ships with the repository.
+
 ## Where to go next
 
 - [Validation status](validation.md) — what has actually been gated, and against what.
 - [API reference](api.md) — the supported surface.
-- The `examples/` directory in the repository: each script solves a small but physically
-  meaningful problem and saves a figure a physicist can check at a glance.
