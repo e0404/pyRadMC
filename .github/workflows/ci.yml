@@ -1,8 +1,8 @@
 name: CI
 
-# Development happens on the DKFZ GitLab, which is not publicly visible; this mirror is
-# where CI, ReadTheDocs and the PyPI release run. Mirrored pushes to main and develop are
-# therefore the primary trigger, with pull_request kept for outside contributors.
+# GitHub is the primary remote (AGENTS.md 9): task branches squash-merge into develop
+# through pull requests, and releases merge rc/* into main. The DKFZ GitLab mirror runs
+# its own validate-only pipeline (.gitlab-ci.yml).
 on:
   push:
     branches: [main, develop]

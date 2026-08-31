@@ -1,7 +1,6 @@
 # ReadTheDocs build configuration.
 #
-# RTD builds from the GitHub mirror (github.com/e0404/pyRadMC), because the DKFZ GitLab
-# is not publicly visible and RTD must be able to reach the repository.
+# RTD builds from the primary remote, github.com/e0404/pyRadMC.
 version: 2
 
 build:

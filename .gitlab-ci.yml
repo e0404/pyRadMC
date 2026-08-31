@@ -1,10 +1,11 @@
-# GitLab CI for the DKFZ GitLab, which is the primary development remote.
+# GitLab CI for the DKFZ GitLab mirror. GitHub (github.com/e0404/pyRadMC) is the
+# primary remote (AGENTS.md 9): pull requests, reviews and releases happen there.
 #
 # This pipeline VALIDATES ONLY — there is deliberately no deploy stage. Releases
-# (PyPI, GitHub Releases) and the documentation build run from the public GitHub
-# mirror, where trusted publishing and ReadTheDocs are wired up; see
-# .github/workflows/release.yml. Keeping publication in exactly one place is what
-# prevents two pipelines racing to upload the same version.
+# (PyPI, GitHub Releases) and the documentation build run from GitHub, where trusted
+# publishing and ReadTheDocs are wired up; see .github/workflows/release.yml. Keeping
+# publication in exactly one place is what prevents two pipelines racing to upload the
+# same version.
 #
 # The validation tier is not here either: it needs the ~120 MB EPICS libraries and runs
 # on a schedule in .github/workflows/validation.yml.

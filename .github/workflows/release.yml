@@ -1,7 +1,7 @@
 name: Release
 
-# Tagging is the release action. Tags mirrored from the DKFZ GitLab trigger this just as
-# tags pushed here do.
+# Tagging is the release action: the tag lands on an rc/* merge commit on main, per the
+# release flow of AGENTS.md 9.4.
 on:
   push:
     tags: ["v*"]
