@@ -70,6 +70,9 @@ pip install "pyRadMC[warp]"      # production backend, CPU and CUDA
 pip install "pyRadMC[ct]"        # CT image reading (SimpleITK)
 ```
 
+Until the first tagged release reaches PyPI, install from a clone instead:
+`pip install -e ".[warp]"`.
+
 Warp is CUDA-only for GPU. If vendor-neutral GPU becomes a requirement, the physics layer is
 framework-agnostic and a Taichi backend is a port, not a rewrite.
 
@@ -170,6 +173,16 @@ transporting anything that route rebuilds the model's *stated* spectrum and refu
 the records disagree by more than 50 keV in on-axis mean energy, because a phase space that
 contradicts its own documentation is a wasted run at best — a check that has already earned its
 place. No phase space ships with the repository.
+
+![A photon pencil-beam kernel as a log-scale depth-radius map, radial profiles at three depths, and photon vs electron primaries](https://raw.githubusercontent.com/e0404/pyRadMC/main/docs/assets/pencil_kernel_demo.png)
+
+`pencil_kernel_demo.py` scores a mono-energetic pencil beam in cylindrical depth-by-radius
+shells — the geometry a pencil-beam kernel is defined on. The log-scale map shows the
+forward-leaning shape of secondary-electron transport; the radial profiles use equal-ratio
+shells that resolve the near-axis core at a per-shell sigma a Cartesian grid would need
+orders more histories to reach; and the photon kernel is set against an electron-primary
+kernel that stops at its CSDA range. `pencil_kernel_database.py` sweeps an energy series
+into a single `.npz` kernel table and reports the achieved statistics per dose band.
 
 The rest: `tabulated_demo.py` (EPDL/EEDL cross-sections), `materials_demo.py` (bone/lung
 heterogeneity), `ct_demo.py` (dose on a CT), `dose_grid_demo.py` (decoupled scoring grid and
