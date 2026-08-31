@@ -11,6 +11,9 @@ session-level workflow notes.
    touch. Several current defaults are the result of a measurement that came out negative;
    re-deriving one by guesswork is the most expensive mistake available here.
 3. Check that a failing test exists for what you are about to write. If not, write it.
+4. Work on a task branch cut from `develop`; nothing is committed directly to `develop`
+   or `main`. Commit messages follow `AGENTS.md` section 9 (`type(scope): subject`,
+   50/72); PR titles are held to it in review, task-branch commits by convention.
 
 ## The five things most often gotten wrong here
 

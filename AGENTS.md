@@ -236,7 +236,8 @@ This ordering was established empirically, not assumed. Do not reorder it withou
 
 ## 5. Working style
 
-- Small commits. One conceptual change each. Commit message states the physics, not the diff.
+- Small commits. One conceptual change each. Commit message states the physics, not the
+  diff, in the convention of section 9.
 - Type annotations everywhere outside kernels. `mypy --strict` gates non-kernel code.
   Warp kernels are exempt; mark them.
 - `ruff` for lint and format. No manual formatting debates.
@@ -288,12 +289,12 @@ runs the fast tiers on every push to `main` and `develop` (GitHub Actions and Gi
 and the validation tier on a schedule. Run `pytest` yourself before pushing; do not
 rely on the hook to catch a broken test.
 
-Releases are semantic-versioned from `pyRadMC.__version__` and cut by tagging; the release
-workflow refuses a tag that disagrees with `__version__` or with `CITATION.cff`. Before a
-release, `pytest -m ""` passes (including the validation tier), `CHANGELOG.md` records
-what changed, and anything in section 8 that the release resolves is struck from it.
-Publication happens only from the GitHub mirror — GitLab CI validates and never deploys,
-so two pipelines can never race to upload the same version.
+Releases are semantic-versioned from `pyRadMC.__version__` and cut by the release-candidate
+flow of section 9.4; the release workflow refuses a tag that disagrees with `__version__`
+or with `CITATION.cff`. Before a release, `pytest -m ""` passes (including the validation
+tier), `CHANGELOG.md` records what changed, and anything in section 8 that the release
+resolves is struck from it. Publication happens only from GitHub — the GitLab mirror's CI
+validates and never deploys, so two pipelines can never race to upload the same version.
 
 Historical decision records — including the measured negative results behind several
 current defaults — are in `docs/decisions.md`.
@@ -338,3 +339,70 @@ These outlive the work that produced them. Each is a live constraint, not histor
   Changing one needs a test demonstrating the dosimetric effect, on realistic spectral and
   heterogeneous geometry — never on an analytic monoenergetic homogeneous phantom, which
   has been measured to be roughly twice as forgiving.
+
+## 9. Git workflow and commit convention
+
+GitHub (`github.com/e0404/pyRadMC`) is the primary remote: pull requests, reviews and
+releases happen there. The DKFZ GitLab is a mirror whose CI validates and never deploys.
+
+### 9.1 Branches
+
+| Branch | Role |
+|---|---|
+| `main` | Releases only. Receives merge commits from `rc/*` branches, each then tagged. |
+| `develop` | Integration; the default branch. Every change lands as a squash merge from a task branch. |
+| task branches | One per task, cut from `develop`, short-lived, deleted after merging. Descriptive names (`gs-msc-step-rework`, not `fix2`). |
+| `rc/X.Y.Z` | Release candidate, cut from `develop` (section 9.4). |
+
+Nothing is committed directly to `main` or `develop`.
+
+### 9.2 Commit convention
+
+Conventional-Commits-style subjects with the classic 50/72 shape:
+
+```
+type(scope): imperative description of the change
+
+Body wrapped at 72 columns, separated from the subject by a blank
+line. States the physics and the why, not the diff (section 5);
+measurements that justify the change belong here.
+
+Co-Authored-By: Someone Else <someone@example.org>
+Refs: #123
+```
+
+- **Types**: `feat`, `fix`, `perf`, `refactor`, `docs`, `test`, `build`, `ci`, `chore`,
+  `revert`.
+- **Scope** is optional; when present it is usually the module: `physics`, `transport`,
+  `data`, `geometry`, `scoring`, `rng`, `ref`, `warp`, `dij`, `sources`, `adapters`,
+  `examples`, `study`, `api`, `agents`.
+- Subject: imperative, no trailing period. The description (the part after
+  `type(scope): `) is at most 50 characters; the whole line never exceeds 72.
+- Footers — co-authors, PR/issue references — come last, after a blank line, in
+  `Key: value` trailer form; they are exempt from the 72-column wrap.
+- One conceptual change per commit, as always.
+
+### 9.3 Where the rules bind
+
+On task branches the convention is *encouraged, not enforced* — those commits are
+squashed away. It matters where history is permanent:
+
+- **PR titles** — the squash-merge subject on `develop` — are held to it in review.
+- So are the version-bump and merge commits that reach `main` and `rc/*`.
+- `develop` accepts **squash merges only**; `main` accepts **merge commits from `rc/*`
+  only**. Both are protected: PR + green CI required, no force pushes.
+
+There is deliberately no automated message check; if drift ever makes one necessary,
+a `commit-msg` hook is the place for it.
+
+### 9.4 Releases
+
+1. Cut `rc/X.Y.Z` from `develop`; open a PR onto `main`.
+2. Iterate review and CI on the rc branch. `pytest -m ""` (validation tier included)
+   must pass — trigger the validation workflow manually if the schedule has not run.
+3. On the rc branch, bump `pyRadMC/__init__.py::__version__`, `CITATION.cff` and
+   `CHANGELOG.md` (`chore(release): vX.Y.Z`).
+4. Merge the PR with a **merge commit** (never squash — `main` keeps the release shape).
+5. Tag the merge commit `vX.Y.Z` and push the tag. The release workflow publishes to
+   PyPI and GitHub Releases, refusing any tag/version/citation mismatch.
+6. Merge `main` back into `develop` and push, so `develop` carries the release commit.
