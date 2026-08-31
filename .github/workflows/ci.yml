@@ -5,7 +5,8 @@ name: CI
 # its own validate-only pipeline (.gitlab-ci.yml).
 on:
   push:
-    branches: [main, develop]
+    # rc/** included so a release candidate builds its wheel even before the PR exists.
+    branches: [main, develop, "rc/**"]
   pull_request:
     branches: [main, develop]
   workflow_dispatch:

@@ -1,7 +1,8 @@
 name: Release
 
 # Tagging is the release action: the tag lands on an rc/* merge commit on main, per the
-# release flow of AGENTS.md 9.4.
+# release flow of AGENTS.md 9.4. A manual dispatch builds and verifies only — the
+# publish jobs are gated on a v* tag ref, so nothing can reach PyPI without one.
 on:
   push:
     tags: ["v*"]
@@ -73,6 +74,8 @@ jobs:
   publish:
     name: publish to PyPI
     needs: build
+    # Only ever from a version tag: a workflow_dispatch run stops after build.
+    if: success() && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     # Trusted publishing (OIDC): PyPI verifies this workflow's identity directly, so
     # there is no long-lived API token to store or rotate. Configure the publisher once
@@ -93,6 +96,7 @@ jobs:
   github-release:
     name: GitHub release
     needs: publish
+    if: success() && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
       contents: write
