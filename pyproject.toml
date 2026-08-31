@@ -108,7 +108,9 @@ filterwarnings = ["error"]
 # Typing. Warp kernels are exempt; see AGENTS.md 5.
 # ---------------------------------------------------------------------------
 [tool.mypy]
-python_version = "3.10"
+# No pinned python_version: modern numpy ships PEP 695 stubs that mypy refuses to parse
+# under 3.10 semantics. Types are checked under the interpreter mypy runs on; the 3.10
+# floor is guarded by ruff's target-version and the py3.10 job in the CI test matrix.
 strict = true
 warn_unreachable = true
 plugins = []
