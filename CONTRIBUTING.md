@@ -40,6 +40,27 @@ takes minutes, and a gate slow enough to be resented is a gate that gets bypasse
 Actions and GitLab CI both), and the validation tier on a schedule. **Run `pytest`
 yourself before pushing anything you care about.**
 
+## Branches and pull requests
+
+The branch model is `AGENTS.md` section 9. The short version:
+
+- Cut a **task branch from `develop`** — one task per branch, descriptive name. Nothing
+  is committed directly to `develop` or `main`; `main` carries releases only.
+- Open a pull request onto `develop`. After review and green CI it is **squash-merged**,
+  so **the PR title becomes the commit subject** and must follow the commit convention:
+
+  ```
+  type(scope): imperative description        # description ≤ 50; whole line ≤ 72
+  ```
+
+  Types: `feat` `fix` `perf` `refactor` `docs` `test` `build` `ci` `chore` `revert`.
+  Scope is optional, usually a module name (`transport`, `data`, `warp`, `dij`, ...).
+  The PR description becomes the commit body: state the physics and the why, wrapped at
+  72 columns after a blank line, with footers (`Co-Authored-By:`, `Refs: #123`) last.
+- On the task branch itself the convention is *encouraged, not enforced*; the PR title
+  is what is held to it in review.
+- Releases are cut by the maintainer from `rc/X.Y.Z` branches (`AGENTS.md` 9.4).
+
 ## The workflow
 
 1. **Write the failing test first.** Every change starts red. On a stochastic code this is

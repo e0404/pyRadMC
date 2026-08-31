@@ -258,7 +258,9 @@ mkdocs serve                # preview the docs
 ```
 
 Read [`AGENTS.md`](https://github.com/e0404/pyRadMC/blob/main/AGENTS.md) before contributing. It is the governing document, and it is
-written for both human and agentic contributors.
+written for both human and agentic contributors;
+[`CONTRIBUTING.md`](https://github.com/e0404/pyRadMC/blob/main/CONTRIBUTING.md) is the short version of the mechanics. Work lands on
+`develop` through squash-merged pull requests; `main` carries releases only.
 
 ## License
 
