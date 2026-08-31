@@ -2,6 +2,7 @@
 
 [![PyPI version](https://img.shields.io/pypi/v/pyRadMC.svg)](https://pypi.org/project/pyRadMC/)
 [![CI](https://github.com/e0404/pyRadMC/actions/workflows/ci.yml/badge.svg)](https://github.com/e0404/pyRadMC/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/e0404/pyRadMC/graph/badge.svg)](https://codecov.io/gh/e0404/pyRadMC)
 [![Documentation](https://readthedocs.org/projects/pyradmc/badge/?version=latest)](https://pyradmc.readthedocs.io/en/latest/)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)

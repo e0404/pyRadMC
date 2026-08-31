@@ -40,6 +40,7 @@ warp = ["warp-lang>=1.12"]
 dev = [
     "pytest>=8.0",
     "pytest-benchmark>=4.0",
+    "pytest-cov>=5.0",  # coverage upload to Codecov in CI. MIT.
     "hypothesis>=6.100",
     "mypy>=1.10",
     # Pinned to a minor line, not floated. ruff's formatter is a CI gate, and a gate
@@ -107,6 +108,14 @@ filterwarnings = ["error"]
 # ---------------------------------------------------------------------------
 # Typing. Warp kernels are exempt; see AGENTS.md 5.
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Coverage
+# ---------------------------------------------------------------------------
+
+[tool.coverage.run]
+# A bare `pytest --cov` (what CI runs) measures the package, not the test tree.
+source = ["pyradmc"]
+
 [tool.mypy]
 # No pinned python_version: modern numpy ships PEP 695 stubs that mypy refuses to parse
 # under 3.10 semantics. Types are checked under the interpreter mypy runs on; the 3.10

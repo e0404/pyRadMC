@@ -43,3 +43,9 @@ local_*
 *.log
 
 .vscode/
+
+# Coverage and test-result artifacts (pytest --cov / --junitxml, uploaded to Codecov in CI)
+.coverage
+.coverage.*
+coverage.xml
+junit.xml

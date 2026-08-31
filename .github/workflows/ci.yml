@@ -71,7 +71,17 @@ jobs:
       # Runners have no CUDA device: warp runs on CPU and the gpu-marked tests skip
       # themselves via wp.is_cuda_available(). The validation and perf tiers are
       # excluded by the default addopts; validation runs on its own schedule.
-      - run: pytest -q
+      - run: pytest -q --cov --junitxml=junit.xml -o junit_family=legacy
+      - name: Upload coverage to Codecov
+        if: ${{ !cancelled() }}
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+      - name: Upload test results to Codecov
+        if: ${{ !cancelled() }}
+        uses: codecov/test-results-action@v1
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
 
   docs:
     name: docs build
