@@ -28,8 +28,11 @@ must be able to find out from this file whether the numbers should have moved.
   half dmax goes from 0.95-0.97 to 0.99-1.01 of EGSnrc (1 / 6 / 15 MeV), the
   central-ray excess from +4 / +14 / +19 % to +3 / +2 / +7 % (TOPAS and EGSnrc
   themselves differ by 3-4 % there), and dmax moves shallower (6 MeV: 2.95 -> 2.75 cm,
-  onto EGSnrc). Beyond dmax on the central axis nothing moves (CPE); electron-beam
-  R50/R_CSDA falls (2 MeV ~0.77 -> ~0.72, 10 MeV ~0.90 -> ~0.84). **The tabulated
+  onto EGSnrc). Beyond dmax on the central axis nothing moves (CPE). Electron-beam
+  R50 falls onto EGS4 (Rogers & Bielajew 1986, Table III): 1.969 / 4.157 / 8.50 cm at
+  5 / 10 / 20 MeV vs 1.952 / 4.138 / 8.451, where Highland read 8-9 % long; the R50
+  validation gate is re-derived against that table (3 / 5 / 10 MeV, lateral-equilibrium
+  geometry, +-4 %) in place of the old R50/R_CSDA detour window. **The tabulated
   source moves too**: it now adds the same restricted soft-electron term to EEDL's
   nuclear-only elastic moment (build-up +1-1.5 % at half dmax, central ray -0.5 / -2 /
   -3 % at 1 / 6 / 15 MeV; 15 MeV axial excess +11 % -> +8 %), and compiled table

@@ -61,7 +61,11 @@ versus about 13 % removed at all energies by a nuclear-only `Z^2` approximation 
 Measured on monoenergetic pencil kernels in water against EGSnrc and TOPAS (1 mm voxels,
 1 mm axial shell): the integrated build-up at half dmax went from 0.95-0.97 of EGSnrc to
 0.99-1.01 and the central-ray excess from +4 / +14 / +19 % (1 / 6 / 15 MeV) to +3 / +2 /
-+7 %, inside the TOPAS-vs-EGSnrc spread; beyond dmax nothing moved (CPE). The tabulated
++7 %, inside the TOPAS-vs-EGSnrc spread; beyond dmax nothing moved (CPE). Broad-beam
+electron R50 now matches EGS4 (Rogers & Bielajew, Med. Phys. 13, 687 (1986), Table III)
+to +0.4-0.9 % at 5-20 MeV and +2.3 % at 3 MeV, where Highland read 8-9 % long — note that
+E0 = 2.33 R50 is the AAPM/ETRAN approximation, not the EGS relation, and would mis-set a
+gate by 3-8 % at 5-10 MeV. The tabulated
 implementation combines EEDL nuclear scattering with the same analytic subthreshold
 electron moment (its 15 MeV axial excess fell from +11 % to +8 %; at 6 MeV it now
 overscatters slightly, build-up 1.03, because EEDL's nuclear moment is interpolated

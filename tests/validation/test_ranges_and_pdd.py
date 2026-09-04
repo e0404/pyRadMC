@@ -40,31 +40,74 @@ def _electron_beam(
     return result, depth, xs.csda_range(energy, WATER)
 
 
-@pytest.mark.validation
-@pytest.mark.parametrize("energy", [2.0, 5.0, 10.0])
-def test_electron_r50_tracks_the_estar_csda_range(energy: float) -> None:
-    """R50 / R_CSDA sits in the detour-factor window across the clinical range.
+# R50 of broad parallel monoenergetic electron beams in water at infinite SSD, EGS4
+# with the 1983 Berger-Seltzer stopping powers: Rogers & Bielajew, Med. Phys. 13, 687
+# (1986), doi:10.1118/1.595831, Table III. Statistical uncertainties there are 0.5 %
+# or better. The stopping powers are the same ICRU-37 basis this engine uses.
+_RB86_R50_CM: dict[float, float] = {3.0: 1.097, 5.0: 1.952, 8.0: 3.265, 10.0: 4.138}
+_R50_TOLERANCE = 0.04
 
-    For broad monoenergetic MeV electron beams in water the ratio is ~0.8 (the
-    detour factor of multiple scattering); the window [0.72, 0.92] gates against
-    systematic over- or under-ranging while leaving room for the Gaussian-hinge
-    approximation. The CSDA range itself is ESTAR-pinned in the unit tier.
+
+def _equilibrated_electron_beam(
+    energy: float, n_z: int, n_histories: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """Broad-beam depth dose with lateral equilibrium: returns (depth, central dose).
+
+    24 cm phantom (12 x 12 voxels of 2 cm), 16 cm beam centred on it, the central
+    8 x 8 cm scored. The 4 cm margin exceeds the lateral spread of electrons up to
+    10 MeV, so out-scatter across the beam edge is replaced from outside and the
+    central depth dose is that of an infinitely broad beam. A beam filling the
+    phantom face (the historic geometry) has no such replacement and reads R50 low.
     """
-    result, depth, r_csda = _electron_beam(energy, depth_cm=1.5 * r_csda_estimate(energy), n_z=60)
-    dose_z = result.dose.mean(axis=(0, 1))
-    # R50 by linear interpolation of the half-maximum crossing. The previous
-    # last-bin-above-half estimator was systematically low by up to one bin
-    # (~0.025 R_CSDA at this n_z), which parked the 2 MeV point close enough to
-    # the window floor that any stream-changing transport edit flipped the test
-    # by seed luck — measured at 262k histories, the physics sits at ~0.75
-    # across stepping configurations. The window itself is unchanged.
+    r_csda = AnalyticCrossSections().csda_range(energy, WATER)
+    dz = 1.5 * r_csda / n_z
+    grid = VoxelGrid.uniform_water(shape=(12, 12, n_z), spacing=(2.0, 2.0, dz))
+    xs = AnalyticCrossSections(geometry_densities=grid.max_density_by_material())
+    source = ParallelBeamSource(energy=energy, z=-0.5, x_range=(4.0, 20.0), y_range=(4.0, 20.0))
+    engine = ReferenceEngine(grid=grid, cross_sections=xs, rng=HostRNG())
+    result = engine.run(
+        source, n_histories=n_histories, n_batches=8, seed=SEED, primary_kind="electron"
+    )
+    depth = (np.arange(n_z) + 0.5) * dz
+    return depth, result.dose[4:8, 4:8, :].mean(axis=(0, 1))
+
+
+def _r50(depth: np.ndarray, dose_z: np.ndarray) -> float:
+    """Half-maximum crossing by linear interpolation (the last-bin estimator was
+    systematically low by up to one bin)."""
     half = 0.5 * dose_z.max()
     i = int(np.nonzero(dose_z >= half)[0][-1])
     dz = float(depth[1] - depth[0])
     frac = float((dose_z[i] - half) / (dose_z[i] - dose_z[i + 1])) if i + 1 < dose_z.size else 0.5
-    r50 = float(depth[i]) + frac * dz
-    assert 0.72 * r_csda <= r50 <= 0.92 * r_csda, (
-        f"R50({energy} MeV) = {r50:.2f} cm vs R_CSDA = {r_csda:.2f} cm (ratio {r50 / r_csda:.2f})"
+    return float(depth[i]) + frac * dz
+
+
+@pytest.mark.validation
+@pytest.mark.parametrize("energy", [3.0, 5.0, 10.0])
+def test_electron_r50_matches_egs4_broad_beam(energy: float) -> None:
+    """R50 of a broad monoenergetic beam within 4 percent of EGS4 (Rogers & Bielajew 1986).
+
+    R50 is set by the end of the electron track, where multiple scattering is
+    strongest, so it is the depth-dose observable most sensitive to the
+    scattering-power anchor: the Highland core width shipped until 2026-09 read
+    +8-9 percent long at 5-10 MeV against Table III, the Class-II transport
+    moment reads +0.5 to +2.3 percent (warp, 4e5 histories: 1.123 / 1.969 / 4.157 cm
+    at 3 / 5 / 10 MeV). This replaces the earlier detour-factor window
+    [0.72, 0.92] on R50/R_CSDA, which was an empirical bracket of the code's own
+    behaviour rather than a reference, and which E0 = 2.33 R50 (the AAPM/ETRAN
+    approximation, not EGS) would have mis-set further.
+
+    Tolerance: the reference engine's seed scatter in this geometry is 1.1-2.2
+    percent (1 sigma) at 4000 histories; at 16000 it is about 1 percent, so 4
+    percent leaves the pinned seed a margin against stream-changing transport
+    edits while still catching a Highland-sized range error.
+    """
+    depth, dose_z = _equilibrated_electron_beam(energy, n_z=60, n_histories=16_000)
+    r50 = _r50(depth, dose_z)
+    reference = _RB86_R50_CM[energy]
+    assert abs(r50 / reference - 1.0) < _R50_TOLERANCE, (
+        f"R50({energy} MeV) = {r50:.3f} cm vs EGS4 {reference:.3f} cm "
+        f"(ratio {r50 / reference:.3f}; RB86 Table III)"
     )
 
 
