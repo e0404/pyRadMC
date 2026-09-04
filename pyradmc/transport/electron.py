@@ -124,14 +124,16 @@ the low-energy under-ranging the R50 validation gate caught when the historic
 half-voxel-edge cap (whose protection was an accident of voxel size; see the
 a6b6c07 revert) was removed without a replacement.
 
-**Where it binds — measured 2026-07-20, correcting an earlier claim here.** At
-the shipped ``STEP_ENERGY_FRACTION`` of 0.05 this cap is *inert* in every soft
-tissue: ``s_theta / s_E >= 1.02`` pointwise over 0.2-20 MeV in water, air, lung
-and adipose (the ratio is density-independent — it is a property of the
-medium), so the energy cap binds first everywhere except cortical bone below
-~2.5 MeV. The cap's protection matters for *fractions above* ~0.057, where it
-re-binds and clamps the effective step — the reason raising the fraction alone
-was measured to buy almost nothing under the Gaussian model.
+**Where it binds.** Measured 2026-07-20 under the Highland scattering power
+then in use: at the ``STEP_ENERGY_FRACTION`` of 0.05 the cap was *inert* in
+every soft tissue (``s_theta / s_E >= 1.02`` pointwise over 0.2-20 MeV in
+water, air, lung and adipose; the ratio is density-independent — it is a
+property of the medium), binding first only in cortical bone below ~2.5 MeV.
+With the Class-II transport-moment scattering power (2026-09),
+``s_theta / s_E`` in water is 0.96 at 0.2 MeV, 1.01 at 0.5 MeV and rises
+steeply above (about 4.8 at 10 MeV), so the angular cap binds only at the soft
+end of the transported range. It re-binds at higher energies only for larger
+fractions; the exact crossover is energy-dependent.
 
 **Not applied under ``msc_model="gs"`` — the shipped default**:
 Goudsmit-Saunderson samples the exact multiple-scattering angle for an
@@ -375,7 +377,9 @@ def electron_steps(
             # (maintainer decision 2026-07-21; validated with the cap lifted on
             # the R50/detour and PDD-gamma gates and the tabulated spectral
             # thorax). The Gaussian branch is unchanged to the bit.
-            s_theta = STEP_HINGE_THETA2_MAX / (cross_sections.scattering_power(e, material) * rho)
+            s_theta = STEP_HINGE_THETA2_MAX / (
+                cross_sections.scattering_power(e, material, ecut) * rho
+            )
             s_max = min(s_max, s_theta)
         # Cap at the next voxel face (plus the nudge across it) so the substep's
         # density and material stay those of the voxel it starts in.
@@ -430,7 +434,7 @@ def electron_steps(
         if not grid.contains(x, y, z):
             return escaped + w * (e + latent)
 
-        mean_square = cross_sections.scattering_power(e, material) * rho * s
+        mean_square = cross_sections.scattering_power(e, material, ecut) * rho * s
         # Both laws take the same <theta^2> and one uniform; see ``msc_model``.
         if msc_model == "gs":
             cos_hinge = cross_sections.sample_gs_cos_theta(mean_square, e, material, rng_state)

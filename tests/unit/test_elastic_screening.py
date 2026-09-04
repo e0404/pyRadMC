@@ -16,6 +16,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from pyradmc import ECUT_MEV
+
 
 class TestMoliereScreening:
     """The screening parameter itself."""
@@ -35,6 +37,23 @@ class TestMoliereScreening:
             assert duplicated == pytest.approx(single, rel=1.0e-12), (
                 f"Z={z}: splitting one element across two entries changed eta"
             )
+
+    def test_compound_weights_follow_the_full_scattering_strength(self) -> None:
+        """The effective eta uses the Moliere ``w Z(Z+1)/A`` weights."""
+        from pyradmc.data.goudsmit_saunderson import moliere_screening
+        from pyradmc.data.materials import MATERIALS, STANDARD_ATOMIC_WEIGHT, WATER
+
+        energy = 1.0
+        composition = MATERIALS[WATER].composition
+        weighted_log = 0.0
+        weight_sum = 0.0
+        for z, fraction in composition:
+            weight = fraction * z * (z + 1) / STANDARD_ATOMIC_WEIGHT[z]
+            weighted_log += weight * np.log(moliere_screening(((z, 1.0),), energy))
+            weight_sum += weight
+
+        expected = np.exp(weighted_log / weight_sum)
+        assert moliere_screening(composition, energy) == pytest.approx(expected, rel=1.0e-12)
 
     def test_screening_falls_with_energy_and_rises_with_z(self) -> None:
         r"""``eta ~ (Z^{1/3}/pc)^2``: monotone down in energy, up in Z.
@@ -100,7 +119,9 @@ class TestFermiEygesAnchoringContract:
         for label, source, materials in self._sources():
             for material in materials:
                 for energy in (0.25, 1.0, 6.0, 18.0):
-                    t_rho_s = source.scattering_power(energy, material) * rho * step_cm  # type: ignore[attr-defined]
+                    t_rho_s = (
+                        source.scattering_power(energy, material, ECUT_MEV) * rho * step_cm  # type: ignore[attr-defined]
+                    )
                     eta = source.elastic_screening(energy, material)  # type: ignore[attr-defined]
                     g1 = first_transport_moment(eta)
                     # Anchoring: Lambda G_1 = <theta^2>/2 by construction of sigma_el.
@@ -130,7 +151,7 @@ class TestFermiEygesAnchoringContract:
         rho = 1.0
         for energy in (0.25, 1.0, 6.0):
             step_cm = STEP_ENERGY_FRACTION * source.csda_range(energy, WATER) / rho
-            t_rho_s = source.scattering_power(energy, WATER) * rho * step_cm
+            t_rho_s = source.scattering_power(energy, WATER, ECUT_MEV) * rho * step_cm
             g1 = first_transport_moment(source.elastic_screening(energy, WATER))
             lam = 0.5 * t_rho_s / g1
             assert lam > 20.0, (

@@ -13,6 +13,27 @@ must be able to find out from this file whether the numbers should have moved.
 
 ### Changed
 
+- **Electron multiple-scattering strength is now the Class-II transport moment of
+  the Moliere-screened Rutherford law** (`AnalyticCrossSections.scattering_power`,
+  via `goudsmit_saunderson.transport_moment_scattering_power`), replacing the
+  Rossi-Greisen/Highland core width `(14.1/pv)^2 / X_0`. The strength is
+  `2(N_A/A)[Z^2 sigma_tr + Z(sigma_tr - sigma_tr,M^hard(E, ECUT))]`: nuclear elastic
+  scattering plus the atomic-electron moment below ECUT, with the moment of explicit
+  hard Moller events removed. Highland lacks the energy-growing logarithm of the true
+  moment; the restricted result is 1.25x Highland at 1 MeV, 1.68x at 10 MeV and 1.77x
+  at 15 MeV in water; the hard-event correction is 0.4-4.2 % of the unrestricted
+  `Z(Z+1)` strength over 0.5-15 MeV. **Dose moves in the build-up and laterally.**
+  Measured on monoenergetic pencil kernels in water against EGSnrc/TOPAS (1 mm
+  voxels, 1 mm axial shell, 1e6 histories): the laterally integrated build-up at
+  half dmax goes from 0.95-0.97 to 0.99-1.01 of EGSnrc (1 / 6 / 15 MeV), the
+  central-ray excess from +4 / +14 / +19 % to +3 / +2 / +7 % (TOPAS and EGSnrc
+  themselves differ by 3-4 % there), and dmax moves shallower (6 MeV: 2.95 -> 2.75 cm,
+  onto EGSnrc). Beyond dmax on the central axis nothing moves (CPE); electron-beam
+  R50/R_CSDA falls (2 MeV ~0.77 -> ~0.72, 10 MeV ~0.90 -> ~0.84). **The tabulated
+  source moves too**: it now adds the same restricted soft-electron term to EEDL's
+  nuclear-only elastic moment (build-up +1-1.5 % at half dmax, central ray -0.5 / -2 /
+  -3 % at 1 / 6 / 15 MeV; 15 MeV axial excess +11 % -> +8 %), and compiled table
+  format version 2 prevents older nuclear-only tables from loading silently.
 - **The import name is now lowercase: `import pyradmc`**, following PEP 8 package
   naming. Every module path changes with it (`pyradmc.data`, `pyradmc.geometry`, ...),
   as do the default EPICS cache directory (`~/.cache/pyradmc/epics`) and the leading

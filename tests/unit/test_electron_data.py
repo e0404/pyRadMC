@@ -33,7 +33,7 @@ pytest.importorskip(
     reason="analytic backend must exist",
 )
 
-from pyradmc import ELECTRON_MASS_MEV
+from pyradmc import ECUT_MEV, ELECTRON_MASS_MEV
 from pyradmc.data.analytic import AnalyticCrossSections
 from pyradmc.data.materials import WATER
 
@@ -198,13 +198,13 @@ def test_scattering_power_magnitude_and_trend(xs: AnalyticCrossSections) -> None
     Sanity bounds, not a precision pin: T/rho for water at 1 MeV is of order a few
     rad^2 cm^2/g (Rossi formula with X0 = 36.08 g/cm^2), and falls roughly as 1/(p v)^2.
     """
-    t_1mev = xs.scattering_power(1.0, WATER)
-    t_10mev = xs.scattering_power(10.0, WATER)
+    t_1mev = xs.scattering_power(1.0, WATER, ECUT_MEV)
+    t_10mev = xs.scattering_power(10.0, WATER, ECUT_MEV)
     assert 1.0 < t_1mev < 20.0
     assert t_10mev < t_1mev / 10.0
 
     energies = np.geomspace(0.2, 20.0, 30)
-    values = [xs.scattering_power(float(e), WATER) for e in energies]
+    values = [xs.scattering_power(float(e), WATER, ECUT_MEV) for e in energies]
     assert all(a > b for a, b in itertools.pairwise(values))
 
 

@@ -85,13 +85,16 @@ def test_dtype_is_selectable_at_compile_time(tmp_path: Path) -> None:
     )
 
 
-def test_version_mismatch_is_rejected(tmp_path: Path) -> None:
+@pytest.mark.parametrize("unsupported_version", [1, 999])
+def test_version_mismatch_is_rejected(tmp_path: Path, unsupported_version: int) -> None:
     p = save_tables(synthetic_tables(), tmp_path / "w")
     # Corrupt the stored version.
     with np.load(p, allow_pickle=False) as npz:
         arrays = dict(npz.items())
     arrays["_manifest"] = np.array(
-        arrays["_manifest"].item().replace(f'"version": {FORMAT_VERSION}', '"version": 999'),
+        arrays["_manifest"]
+        .item()
+        .replace(f'"version": {FORMAT_VERSION}', f'"version": {unsupported_version}'),
     )
     with p.open("wb") as f:
         np.savez(f, **arrays)

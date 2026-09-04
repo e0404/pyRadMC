@@ -81,10 +81,13 @@ __all__ = [
     "gs_cumulative",
     "gs_scaled_deflection_table",
     "gs_window_from_tables",
+    "hard_moller_transport_cross_section",
     "mean_square_angle",
     "moliere_screening",
     "screened_rutherford_cos_theta",
     "screened_rutherford_moments",
+    "subthreshold_moller_scattering_power",
+    "transport_moment_scattering_power",
 ]
 
 _log = logging.getLogger(__name__)
@@ -93,6 +96,7 @@ _ELECTRON_MASS_MEV: float = 0.51099895
 _HBAR_C_MEV_FM: float = 197.3269804
 _BOHR_RADIUS_FM: float = 5.29177210903e4
 _FINE_STRUCTURE: float = 7.2973525693e-3
+_CLASSICAL_ELECTRON_RADIUS_CM: float = 2.8179403262e-13
 
 _THOMAS_FERMI_MEV: float = _HBAR_C_MEV_FM / (0.885 * _BOHR_RADIUS_FM)
 """``hbar c / (0.885 a_0)`` in MeV: the momentum scale of the screening angle.
@@ -150,10 +154,9 @@ def moliere_screening(composition: tuple[tuple[int, float], ...], energy: float)
     Bethe, Phys. Rev. 89, 1256 (1953), doi:10.1103/PhysRev.89.1256.
 
     For a compound the elemental screening angles combine as a **geometric mean
-    weighted by ``w_i Z_i (Z_i + 1) / A_i``** — the per-unit-mass elastic
-    scattering strength, the same ``Z(Z+1)/A`` weighting the compiled scattering
-    powers are validated against. This is Bethe's compound prescription, and it
-    is exact for a single element (test-pinned).
+    weighted by ``w_i Z_i (Z_i + 1) / A_i``** — the Moliere nuclear-plus-electron
+    scattering strength. This is exact for a single element and matches the
+    unrestricted law before its hard Moller moment is removed (test-pinned).
 
     **Stated approximation.** A single effective screening parameter cannot
     represent a mixture whose elements screen at genuinely different angles; the
@@ -185,7 +188,7 @@ def moliere_screening(composition: tuple[tuple[int, float], ...], energy: float)
     weight_sum = 0.0
     log_sum = 0.0
     for z, fraction in composition:
-        # Elastic strength per unit mass: Rutherford scales as Z(Z+1) per atom.
+        # Moliere strength per unit mass: nuclear plus electron scattering.
         weight = fraction * z * (z + 1) / STANDARD_ATOMIC_WEIGHT[z]
         chi_0 = _THOMAS_FERMI_MEV * z ** (1.0 / 3.0) / momentum
         correction = 1.13 + 3.76 * (_FINE_STRUCTURE * z / beta) ** 2
@@ -233,6 +236,167 @@ def first_transport_moment(eta: float) -> float:
     ``2 eta (ln(1/eta) - 1)``.
     """
     return float(2.0 * eta * (1.0 + eta) * np.log((1.0 + eta) / eta) - 2.0 * eta)
+
+
+def _moller_transport_antiderivative(cos_theta: float, tau: float) -> float:
+    """Dimensionless antiderivative for the hard-Moller first transport moment."""
+    u = cos_theta
+    c = tau + 2.0
+    denominator = tau * u * u - c
+    root = math.sqrt(tau * c)
+    return (
+        2.0 * tau * c / (tau + 1.0) ** 2 * (u - 1.0) / denominator
+        + 2.0 * root / (tau + 1.0) ** 2 * math.atanh(math.sqrt(tau / c) * u)
+        + 2.0 / (c * (u + 1.0))
+        - math.log(1.0 - u) / c
+        + (5.0 * tau * tau + 12.0 * tau + 5.0) / ((tau + 1.0) ** 2 * c) * math.log(u + 1.0)
+        - 2.0 * (2.0 * tau + 1.0) / (tau + 1.0) ** 2 * math.log(u)
+        + c / u
+        - c / (2.0 * u * u)
+    )
+
+
+def hard_moller_transport_cross_section(energy: float, delta_cut: float) -> float:
+    r"""First transport cross-section of explicit Moller events, cm^2/electron.
+
+    .. math::
+
+        \sigma_{tr,M}^{hard}(T,\Delta) =
+        \int_{\Delta}^{T/2}\!\frac{d\sigma_M}{dW}
+        \left[1-\cos\theta_p(T,W)\right]dW,
+
+    where ``d sigma_M/dW`` is the Moller differential cross-section and
+    ``theta_p`` is the exact deflection of the higher-energy outgoing electron.
+    The expression below is the closed-form antiderivative after substituting
+    ``u = cos(theta_p)``; a direct numerical quadrature independently pins it.
+
+    This is the angular moment already delivered by the explicit Class-II event
+    and therefore subtracted from the condensed electron contribution. Moller
+    (1932), doi:10.1002/andp.19324060506; PENELOPE-2018, sec. 3.2,
+    doi:10.1787/32da5043-en.
+    """
+    if energy <= 0.0:
+        raise ValueError(f"non-positive electron kinetic energy {energy} MeV")
+    if delta_cut <= 0.0:
+        raise ValueError(f"non-positive delta_cut {delta_cut} MeV")
+    if energy <= 2.0 * delta_cut:
+        return 0.0
+
+    tau = energy / _ELECTRON_MASS_MEV
+    beta_sq = tau * (tau + 2.0) / (tau + 1.0) ** 2
+
+    def primary_cosine(transfer: float) -> float:
+        remaining = energy - transfer
+        return math.sqrt(
+            remaining
+            * (energy + 2.0 * _ELECTRON_MASS_MEV)
+            / (energy * (remaining + 2.0 * _ELECTRON_MASS_MEV))
+        )
+
+    u_cut = primary_cosine(delta_cut)
+    u_half = primary_cosine(0.5 * energy)
+    dimensionless = _moller_transport_antiderivative(u_cut, tau) - _moller_transport_antiderivative(
+        u_half, tau
+    )
+    prefactor = (
+        2.0 * math.pi * _CLASSICAL_ELECTRON_RADIUS_CM**2 * _ELECTRON_MASS_MEV / (beta_sq * energy)
+    )
+    return max(0.0, prefactor * dimensionless)
+
+
+def _unit_screened_rutherford_transport_cross_section(
+    composition: tuple[tuple[int, float], ...], energy: float
+) -> float:
+    """Unit-charge screened-Rutherford first transport cross-section, cm^2."""
+    eta = moliere_screening(composition, energy)
+    tau = energy / _ELECTRON_MASS_MEV
+    pv = _ELECTRON_MASS_MEV * tau * (tau + 2.0) / (tau + 1.0)
+    sigma_el = (
+        math.pi
+        * _CLASSICAL_ELECTRON_RADIUS_CM**2
+        * (_ELECTRON_MASS_MEV / pv) ** 2
+        / (eta * (1.0 + eta))
+    )
+    return sigma_el * first_transport_moment(eta)
+
+
+def subthreshold_moller_scattering_power(
+    composition: tuple[tuple[int, float], ...], energy: float, delta_cut: float
+) -> float:
+    r"""Mass scattering power from Moller transfers below ``delta_cut``.
+
+    The unrestricted atomic-electron transport moment is represented by the
+    unit-charge screened-Rutherford law. Subtracting
+    :func:`hard_moller_transport_cross_section` leaves exactly the part not
+    delivered by explicit Moller events. The factor two converts the first
+    transport moment ``<1-cos(theta)>`` to the space-angle convention.
+    """
+    from pyradmc.data.materials import AVOGADRO, STANDARD_ATOMIC_WEIGHT
+
+    unrestricted = _unit_screened_rutherford_transport_cross_section(composition, energy)
+    hard = hard_moller_transport_cross_section(energy, delta_cut)
+    soft = max(0.0, unrestricted - hard)
+    electrons_per_gram = sum(
+        fraction * AVOGADRO / STANDARD_ATOMIC_WEIGHT[z] * z for z, fraction in composition
+    )
+    return 2.0 * electrons_per_gram * soft
+
+
+def transport_moment_scattering_power(
+    composition: tuple[tuple[int, float], ...], energy: float, delta_cut: float
+) -> float:
+    r"""Class-II mass angular scattering power, in rad^2 cm^2/g.
+
+    .. math::
+
+        \frac{T}{\rho} = 2 \sum_i w_i \frac{N_A}{A_i}
+        \left[Z_i^2\sigma_{tr}(\eta)
+        + Z_i\left(\sigma_{tr}(\eta)-\sigma_{tr,M}^{hard}(T,\Delta)\right)\right],
+
+    with ``sigma_tr(eta)`` the unit-charge screened-Rutherford first transport
+    cross-section. The first term is nuclear elastic scattering; the second is
+    electron scattering below the Moller production threshold. Subtracting the
+    hard Moller moment avoids double counting the exact deflection applied by the
+    transport loop.
+
+    This is the *only* strength consistent with the Goudsmit-Saunderson shape
+    the tables are built from: GS pins ``<cos theta> = exp(-s N sigma_el G_1)``
+    exactly, so the small-step ``<theta^2> = T rho s`` the transport loop hands
+    the sampler must be ``2 N sigma_tr s``. For small ``eta`` this is
+    ``T ~ (1/pv)^2 [ln(1/eta) - 1]``: the Rossi-Greisen/Highland
+    ``(14.1/pv)^2 / X_0`` that anchored the engine until 2026-09 is a fit to
+    the width of the Moliere *core* with that logarithm frozen at a
+    thin-target value, and since ``eta ~ 1/p^2`` the two diverge with energy —
+    1.25x at 1 MeV, 1.68x at 10 MeV and 1.77x at 15 MeV in water for the
+    default 0.2 MeV cut.
+
+    **Stated approximations.** Pure screened Rutherford: no Mott
+    (spin-relativistic) factor, which at ``beta -> 1`` lowers the transport
+    moment of low-Z media by a few percent; and a single compound screening
+    parameter (see :func:`moliere_screening`). Bethe, Phys. Rev. 89, 1256 (1953),
+    doi:10.1103/PhysRev.89.1256; Goudsmit & Saunderson, Phys. Rev. 57, 24
+    (1940), doi:10.1103/PhysRev.57.24; PENELOPE-2018, sec. 3.2,
+    doi:10.1787/32da5043-en.
+
+    Parameters
+    ----------
+    composition
+        ``((Z, mass_fraction), ...)`` as carried by
+        :class:`~pyradmc.data.materials.MaterialData`.
+    energy
+        Electron kinetic energy in MeV.
+    delta_cut
+        Delta-ray production threshold in MeV. Electron transfers below this
+        cut contribute here; harder transfers are transported explicitly.
+    """
+    from pyradmc.data.materials import AVOGADRO, STANDARD_ATOMIC_WEIGHT
+
+    sigma_transport = _unit_screened_rutherford_transport_cross_section(composition, energy)
+    nuclear_atoms = sum(
+        fraction * AVOGADRO / STANDARD_ATOMIC_WEIGHT[z] * z * z for z, fraction in composition
+    )
+    nuclear = 2.0 * nuclear_atoms * sigma_transport
+    return nuclear + subthreshold_moller_scattering_power(composition, energy, delta_cut)
 
 
 def screened_rutherford_moments(eta: float, l_max: int) -> np.ndarray:

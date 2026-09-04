@@ -52,6 +52,7 @@ from pyradmc.data.berger_seltzer import (
     CLASSICAL_ELECTRON_RADIUS_CM,
     moller_dcs_per_electron,
 )
+from pyradmc.data.goudsmit_saunderson import transport_moment_scattering_power
 from pyradmc.data.interface import CrossSectionSource, PhotonProcess
 from pyradmc.data.materials import MATERIALS, WATER
 
@@ -113,10 +114,6 @@ def _klein_nishina_total_cm2(energy_mev: float) -> float:
     return 2.0 * math.pi * CLASSICAL_ELECTRON_RADIUS_CM**2 * bracket
 
 
-_HIGHLAND_CONSTANT_MEV: float = 14.1
-_WATER_RADIATION_LENGTH_G_CM2: float = 36.08
-
-
 class AnalyticCrossSections(CrossSectionSource):
     """Closed-form photon cross-sections; see the module docstring.
 
@@ -150,9 +147,9 @@ class AnalyticCrossSections(CrossSectionSource):
     def n_materials(self) -> int:
         """Water only, permanently.
 
-        The photoelectric anchor, pair calibration, I-value, density effect,
-        radiative fit and radiation length are all water-specific. The registry may
-        grow past water; this source does not.
+        The photoelectric anchor, pair calibration, I-value, density effect and
+        radiative fit are all water-specific. The registry may grow past water;
+        this source does not.
         """
         return 1
 
@@ -259,27 +256,24 @@ class AnalyticCrossSections(CrossSectionSource):
         log_e = math.log(energy)
         return float(np.interp(log_e, self._range_log_energies, self._range_values))
 
-    def scattering_power(self, energy: float, material: int) -> float:
+    def scattering_power(self, energy: float, material: int, delta_cut: float) -> float:
         r"""Mass angular scattering power, in rad^2 cm^2/g.
 
-        Rossi-Greisen form with the Highland constant:
-
-        .. math::
-
-            T/\rho = \left(\frac{14.1\,\mathrm{MeV}}{p v}\right)^2 \frac{1}{X_0},
-            \qquad X_0(\text{water}) = 36.08\ \mathrm{g/cm^2}.
-
-        Rossi & Greisen, Rev. Mod. Phys. 13, 240 (1941),
-        doi:10.1103/RevModPhys.13.240; Highland, NIM 129, 497 (1975),
-        doi:10.1016/0029-554X(75)90743-0. The step-length logarithmic correction of
-        Highland's formula is neglected — a stated approximation, adequate for
-        depth-dose observables; revisit before trusting penumbra shapes.
+        The Class-II first transport moment of the Moliere-screened Rutherford law,
+        ``T = 2 (N_A/A) [Z^2 sigma_tr + Z(sigma_tr - sigma_tr,M^hard)]``,
+        from the material's composition
+        (:func:`pyradmc.data.goudsmit_saunderson.transport_moment_scattering_power`).
+        That is the strength Goudsmit-Saunderson theory pins for the shape the GS
+        tables are built from; the Rossi-Greisen/Highland ``(14.1/pv)^2 / X_0`` core
+        width used until 2026-09 lacked its energy-growing logarithm and
+        under-scattered multi-MeV electrons. Atomic-electron scattering below
+        ``delta_cut`` remains condensed; the hard Moller transport moment above
+        the cut is removed because the transport loop applies it explicitly.
         """
         self._check_electron_args(energy, material)
-        tau = energy / ELECTRON_MASS_MEV
-        # p*v = p^2 c^2 / E_total, in MeV.
-        pv = ELECTRON_MASS_MEV * tau * (tau + 2.0) / (tau + 1.0)
-        return (_HIGHLAND_CONSTANT_MEV / pv) ** 2 / _WATER_RADIATION_LENGTH_G_CM2
+        if delta_cut <= 0.0:
+            raise ValueError(f"non-positive delta_cut {delta_cut} MeV")
+        return transport_moment_scattering_power(MATERIALS[material].composition, energy, delta_cut)
 
     def _check_electron_args(self, energy: float, material: int) -> None:
         """Shared validation for the electron accessors."""

@@ -191,7 +191,7 @@ class TestElectronParity:
         ("stopping_radiative", lambda xs, e, m: xs.radiative_stopping_power(e, m)),
         ("moller", lambda xs, e, m: xs.moller_cross_section(e, m, ECUT_MEV)),
         ("csda_range", lambda xs, e, m: xs.csda_range(e, m)),
-        ("scattering_power", lambda xs, e, m: xs.scattering_power(e, m)),
+        ("scattering_power", lambda xs, e, m: xs.scattering_power(e, m, ECUT_MEV)),
     )
 
     def test_electron_lookups_match_host(self, xs, tables) -> None:

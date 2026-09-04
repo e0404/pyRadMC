@@ -159,18 +159,21 @@ class TestElectronQueries:
         e = float(data.electron_energies[k])
         assert src.radiative_stopping_power(e, 0) == pytest.approx(0.01 * e, rel=1e-6)
         assert src.csda_range(e, 0) == pytest.approx(0.5 * e, rel=1e-6)
-        assert src.scattering_power(e, 0) == pytest.approx(1.0 / e, rel=1e-6)
+        assert src.scattering_power(e, 0, DELTA_CUT) == pytest.approx(1.0 / e, rel=1e-6)
 
-    def test_restricted_and_moller_require_the_compiled_cut(self) -> None:
+    def test_restricted_quantities_require_the_compiled_cut(self) -> None:
         src = _source()
         # 1.0 MeV is not a grid node, so allow log-linear interpolation error; the
         # point of this test is that the compiled cut is honoured and mismatches raise.
         assert src.restricted_stopping_power(1.0, 0, DELTA_CUT) == pytest.approx(2.0, rel=2e-2)
         assert src.moller_cross_section(1.0, 0, DELTA_CUT) == pytest.approx(0.1, rel=2e-2)
+        assert src.scattering_power(1.0, 0, DELTA_CUT) == pytest.approx(1.0, rel=2e-2)
         with pytest.raises(ValueError, match="delta_cut"):
             src.restricted_stopping_power(1.0, 0, 0.05)
         with pytest.raises(ValueError, match="delta_cut"):
             src.moller_cross_section(1.0, 0, 0.05)
+        with pytest.raises(ValueError, match="delta_cut"):
+            src.scattering_power(1.0, 0, 0.05)
 
 
 def test_round_trips_through_build_cross_section_tables() -> None:

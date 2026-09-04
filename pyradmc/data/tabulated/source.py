@@ -7,9 +7,9 @@ Both energy grids must be geometric (uniform in log energy); the precompiler emi
 them that way.
 
 The electron quantities that depend on the delta-ray cut (restricted stopping,
-Moller) are tabulated at one ``delta_cut``: a query at a different cut raises rather
-than returning a silently wrong restriction, so tables must be compiled at the run's
-ECUT.
+Moller, and Class-II scattering power) are tabulated at one ``delta_cut``: a query
+at a different cut raises rather than returning a silently wrong restriction, so
+tables must be compiled at the run's ECUT.
 """
 
 from __future__ import annotations
@@ -186,8 +186,9 @@ class TabulatedCrossSections(CrossSectionSource):
         """Continuous-slowing-down range, in g/cm^2."""
         return self._electron_lookup("csda_range", energy, material)
 
-    def scattering_power(self, energy: float, material: int) -> float:
-        """Multiple-scattering power, in rad^2 cm^2/g."""
+    def scattering_power(self, energy: float, material: int, delta_cut: float) -> float:
+        """Class-II multiple-scattering power at the compiled cut, rad^2 cm^2/g."""
+        self._check_delta_cut(delta_cut)
         return self._electron_lookup("scattering_power", energy, material)
 
     # -- sub-grid product integration (AGENTS.md 2.7) -----------------------

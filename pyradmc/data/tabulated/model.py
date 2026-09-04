@@ -24,9 +24,9 @@ class TabulatedData:
     registry (:data:`pyradmc.data.materials.MATERIALS`); ``materials`` records the
     names in that order so a loaded table can be checked against the registry it
     will be used with. Electron quantities that depend on the delta-ray production
-    threshold (``restricted_stopping``, ``moller``) are tabulated *at* ``delta_cut``;
-    a source built from this data rejects a query at a different cut rather than
-    silently returning the wrong restriction.
+    threshold (``restricted_stopping``, ``moller``, ``scattering_power``) are
+    tabulated *at* ``delta_cut``; a source built from this data rejects a query at
+    a different cut rather than silently returning the wrong restriction.
     """
 
     photon_energies: np.ndarray  # (n_photon,) MeV
@@ -36,7 +36,7 @@ class TabulatedData:
     radiative_stopping: np.ndarray  # (n_materials, n_electron), MeV cm^2/g
     moller: np.ndarray  # (n_materials, n_electron), cm^2/g, at delta_cut
     csda_range: np.ndarray  # (n_materials, n_electron), g/cm^2
-    scattering_power: np.ndarray  # (n_materials, n_electron), rad^2 cm^2/g
+    scattering_power: np.ndarray  # (n_materials, n_electron), rad^2 cm^2/g, at delta_cut
     delta_cut: float  # MeV; the cut the restricted quantities were integrated at
     materials: tuple[str, ...]  # material names, aligned with the array rows
     provenance: str  # human-readable source citation, carried for auditability
