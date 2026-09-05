@@ -46,10 +46,11 @@ def _electron_beam(
 # or better. The stopping powers are the same ICRU-37 basis this engine uses.
 _RB86_R50_CM: dict[float, float] = {3.0: 1.097, 5.0: 1.952, 8.0: 3.265, 10.0: 4.138}
 _R50_TOLERANCE = 0.04
+_R50_REPLICATES = 8
 
 
 def _equilibrated_electron_beam(
-    energy: float, n_z: int, n_histories: int
+    energy: float, n_z: int, n_histories: int, seed: int = SEED
 ) -> tuple[np.ndarray, np.ndarray]:
     """Broad-beam depth dose with lateral equilibrium: returns (depth, central dose).
 
@@ -66,7 +67,7 @@ def _equilibrated_electron_beam(
     source = ParallelBeamSource(energy=energy, z=-0.5, x_range=(4.0, 20.0), y_range=(4.0, 20.0))
     engine = ReferenceEngine(grid=grid, cross_sections=xs, rng=HostRNG())
     result = engine.run(
-        source, n_histories=n_histories, n_batches=8, seed=SEED, primary_kind="electron"
+        source, n_histories=n_histories, n_batches=8, seed=seed, primary_kind="electron"
     )
     depth = (np.arange(n_z) + 0.5) * dz
     return depth, result.dose[4:8, 4:8, :].mean(axis=(0, 1))
@@ -80,6 +81,36 @@ def _r50(depth: np.ndarray, dose_z: np.ndarray) -> float:
     dz = float(depth[1] - depth[0])
     frac = float((dose_z[i] - half) / (dose_z[i] - dose_z[i + 1])) if i + 1 < dose_z.size else 0.5
     return float(depth[i]) + frac * dz
+
+
+def _r50_with_uncertainty(
+    energy: float, n_z: int, n_histories: int, n_replicates: int = _R50_REPLICATES
+) -> tuple[float, float]:
+    """R50 of the pooled depth dose and the standard error of that estimate, in cm.
+
+    ``n_histories`` is split across ``n_replicates`` independently seeded runs, so the
+    uncertainty costs no extra transport: the pooled curve is the average of the
+    replicate curves, carrying the full history budget, and the scatter of the
+    per-replicate R50 values is the batch-means estimate of its standard error.
+
+    Per-voxel ``dose_sigma`` cannot serve here, which is why the replicates exist.
+    R50 is a nonlinear functional of the whole curve — a half-maximum crossing, with
+    the maximum itself estimated from the same noisy data — and the voxel sigmas of a
+    single run are correlated through the shared histories, so no quadrature over them
+    is a valid uncertainty on the crossing depth. Taking R50 on the pooled curve rather
+    than averaging the replicate R50 values also keeps the point estimate free of the
+    upward bias ``dose_z.max()`` acquires at low statistics.
+    """
+    per_replicate = n_histories // n_replicates
+    curves = [
+        _equilibrated_electron_beam(energy, n_z=n_z, n_histories=per_replicate, seed=SEED + k)
+        for k in range(n_replicates)
+    ]
+    depth = curves[0][0]
+    doses = np.asarray([dose_z for _, dose_z in curves])
+    replicate_r50 = np.asarray([_r50(depth, dose_z) for dose_z in doses])
+    standard_error = float(replicate_r50.std(ddof=1) / np.sqrt(n_replicates))
+    return _r50(depth, doses.mean(axis=0)), standard_error
 
 
 @pytest.mark.validation
@@ -97,17 +128,25 @@ def test_electron_r50_matches_egs4_broad_beam(energy: float) -> None:
     behaviour rather than a reference, and which E0 = 2.33 R50 (the AAPM/ETRAN
     approximation, not EGS) would have mis-set further.
 
-    Tolerance: the reference engine's seed scatter in this geometry is 1.1-2.2
-    percent (1 sigma) at 4000 histories; at 16000 it is about 1 percent, so 4
-    percent leaves the pinned seed a margin against stream-changing transport
-    edits while still catching a Highland-sized range error.
+    Tolerance: 4 percent, which still catches a Highland-sized range error (8-9
+    percent) but leaves room for the statistical uncertainty of the estimate. That
+    uncertainty is measured in the run rather than quoted from an offline seed scan
+    (AGENTS.md 2.4): the first assertion is the noise budget, and it fails the test
+    if the estimator ever becomes imprecise enough that a fluctuation could move the
+    verdict on its own.
     """
-    depth, dose_z = _equilibrated_electron_beam(energy, n_z=60, n_histories=16_000)
-    r50 = _r50(depth, dose_z)
+    r50, sem = _r50_with_uncertainty(energy, n_z=60, n_histories=16_000)
     reference = _RB86_R50_CM[energy]
+    assert 2.0 * sem < _R50_TOLERANCE * reference, (
+        f"R50({energy} MeV) standard error {sem:.3f} cm is too large for a "
+        f"{_R50_TOLERANCE:.0%} gate on {reference:.3f} cm: the gate is noise-limited "
+        f"rather than physics-limited, so a pass would not constrain the scattering "
+        f"power. Diagnose the added variance; do not open the tolerance."
+    )
     assert abs(r50 / reference - 1.0) < _R50_TOLERANCE, (
-        f"R50({energy} MeV) = {r50:.3f} cm vs EGS4 {reference:.3f} cm "
-        f"(ratio {r50 / reference:.3f}; RB86 Table III)"
+        f"R50({energy} MeV) = {r50:.3f} +- {sem:.3f} cm vs EGS4 {reference:.3f} cm "
+        f"(ratio {r50 / reference:.3f}, deviation {abs(r50 - reference) / sem:.1f} "
+        f"sigma; RB86 Table III)"
     )
 
 
