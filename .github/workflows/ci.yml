@@ -55,6 +55,14 @@ jobs:
         os: [ubuntu-latest]
         python: ["3.10", "3.11", "3.12", "3.13"]
         include:
+          # Coverage on one job, not five. Codecov consumes a single report, and the
+          # measurement below makes the duplicates expensive: on the full fast suite,
+          # `pytest --cov` took 637 s against 304 s for `pytest` (2.09x, two
+          # interleaved rounds each). Merged into the existing ubuntu/3.13 job rather
+          # than adding one, since every include key here matches that combination.
+          - os: ubuntu-latest
+            python: "3.13"
+            coverage: true
           # The maintainer develops on Windows, and several past bugs were
           # Windows-specific (path handling, subprocess behaviour). One job keeps that
           # platform honest without quadrupling the matrix.
@@ -71,9 +79,17 @@ jobs:
       # Runners have no CUDA device: warp runs on CPU and the gpu-marked tests skip
       # themselves via wp.is_cuda_available(). The validation and perf tiers are
       # excluded by the default addopts; validation runs on its own schedule.
-      - run: pytest -q --cov --junitxml=junit.xml -o junit_family=legacy
+      # COVERAGE_CORE=sysmon puts coverage.py on CPython's sys.monitoring (3.12+)
+      # instead of its C tracer, which is what makes measuring on one job cheap
+      # rather than merely cheaper: same suite, 630 s under the tracer against 308 s
+      # under sysmon and 304 s with no coverage at all — 2.09x overhead down to
+      # 1.01x. Set at job level and inert on the jobs that pass no --cov; the
+      # coverage job is 3.13, so the pre-3.12 jobs never ask for a core they lack.
+      - env:
+          COVERAGE_CORE: sysmon
+        run: pytest -q ${{ matrix.coverage && '--cov' || '' }} --junitxml=junit.xml -o junit_family=legacy
       - name: Upload coverage to Codecov
-        if: ${{ !cancelled() }}
+        if: ${{ matrix.coverage && !cancelled() }}
         uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
