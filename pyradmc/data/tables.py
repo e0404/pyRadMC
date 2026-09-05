@@ -293,7 +293,9 @@ def build_cross_section_tables(
             )
             electron_tables["moller"][material, j] = source.moller_cross_section(e, material, ecut)
             electron_tables["csda_range"][material, j] = source.csda_range(e, material)
-            electron_tables["scattering_power"][material, j] = source.scattering_power(e, material)
+            electron_tables["scattering_power"][material, j] = source.scattering_power(
+                e, material, ecut
+            )
             log_eta[material, j] = math.log(source.elastic_screening(e, material))
 
     # Restricted-range forward map on the electron grid, plus its inverse on one

@@ -14,10 +14,11 @@ are a registry *prefix* so that material indices in the geometry index the table
 unchanged; the loader enforces this.
 
 Two data sources are provenance-fixed regardless of strategy: **photons** come from
-EPDL (validated sub-percent against NIST XCOM) and **elastic scattering power** from
-EEDL (the transported large-angle moment; better than the analytic Highland form and
-free of the delta-ray-restriction subtlety below). The strategy governs only the
-electron **stopping**:
+EPDL (validated sub-percent against NIST XCOM), while the nuclear part of the
+**elastic scattering power** comes from EEDL. The condensed atomic-electron part is
+the Moliere-screened transport moment below ``delta_cut``; its above-cutoff moment
+is excluded because those Moller deflections are transported explicitly. The
+strategy governs only the electron **stopping**:
 
 ``berger-seltzer`` (default)
     Collision (restricted) from the Berger-Seltzer form with the material's ICRU-37
@@ -45,6 +46,7 @@ import numpy as np
 
 from pyradmc import ECUT_MEV, PCUT_MEV, RAYLEIGH_MOMENTUM_TRANSFER_PER_MEV
 from pyradmc.data import berger_seltzer
+from pyradmc.data.goudsmit_saunderson import subthreshold_moller_scattering_power
 from pyradmc.data.materials import MATERIALS, STANDARD_ATOMIC_WEIGHT, MaterialData
 from pyradmc.data.tables import TABLE_POINTS
 from pyradmc.data.tabulated import eedl, epdl
@@ -125,9 +127,9 @@ def compile_materials(
         ]
     )
 
-    # -- elastic scattering power: EEDL, mixed by mass fraction ---------------
+    # -- Class-II scattering: EEDL nuclear + subthreshold atomic electrons -----
     scattering_elements = eedl.element_scattering_power(eedl_text, elements=elements)
-    scattering = np.stack(
+    nuclear_scattering = np.stack(
         [
             eedl.material_scattering_power(
                 scattering_elements, dict(m.composition), electron_energies
@@ -135,6 +137,16 @@ def compile_materials(
             for m in materials
         ]
     )
+    soft_electron_scattering = np.stack(
+        [
+            _evaluate(
+                lambda e, m=m: subthreshold_moller_scattering_power(m.composition, e, cut),
+                electron_energies,
+            )
+            for m in materials
+        ]
+    )
+    scattering = nuclear_scattering + soft_electron_scattering
 
     # -- electron stopping ----------------------------------------------------
     # Moller (discrete channel) and CSDA range stay Berger-Seltzer under both
@@ -203,7 +215,8 @@ def compile_materials(
         delta_cut=cut,
         materials=tuple(m.name for m in materials),
         provenance=(
-            f"EPDL2023 photons + coherent form factors + EEDL2023 elastic scattering; "
+            f"EPDL2023 photons + coherent form factors + EEDL2023 nuclear elastic "
+            f"+ restricted Moliere electron scattering; "
             f"electron stopping: {strategy.value} ({stopping_provenance}); "
             f"Moller + CSDA Berger-Seltzer; delta_cut={cut} MeV; "
             f"materials: {', '.join(m.name for m in materials)}"

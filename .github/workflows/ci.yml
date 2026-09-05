@@ -55,11 +55,26 @@ jobs:
         os: [ubuntu-latest]
         python: ["3.10", "3.11", "3.12", "3.13"]
         include:
+          # Coverage wherever it is nearly free, which is every job on 3.12+: the
+          # sysmon core below costs 1.01x, so these keep measuring (Codecov merges
+          # the uploads for a commit). It is dropped only from 3.10 and 3.11, where
+          # sys.monitoring does not exist and coverage.py falls back to the C tracer
+          # -- measured at 2.09x on the full fast suite, which is what made running
+          # it on all five jobs expensive. These merge into the matrix combinations
+          # they name rather than adding jobs, since every key here matches one.
+          - os: ubuntu-latest
+            python: "3.12"
+            coverage: true
+          - os: ubuntu-latest
+            python: "3.13"
+            coverage: true
           # The maintainer develops on Windows, and several past bugs were
           # Windows-specific (path handling, subprocess behaviour). One job keeps that
-          # platform honest without quadrupling the matrix.
+          # platform honest without quadrupling the matrix -- and it carries coverage
+          # so that a Windows-only branch still reaches the report.
           - os: windows-latest
             python: "3.13"
+            coverage: true
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -71,9 +86,18 @@ jobs:
       # Runners have no CUDA device: warp runs on CPU and the gpu-marked tests skip
       # themselves via wp.is_cuda_available(). The validation and perf tiers are
       # excluded by the default addopts; validation runs on its own schedule.
-      - run: pytest -q --cov --junitxml=junit.xml -o junit_family=legacy
+      # COVERAGE_CORE=sysmon puts coverage.py on CPython's sys.monitoring (3.12+)
+      # instead of its C tracer, which is what makes coverage affordable at all here:
+      # same suite, 630 s under the tracer against 308 s under sysmon and 304 s with
+      # no coverage — 2.09x overhead down to 1.01x. Set at job level and inert on the
+      # jobs that pass no --cov, which are exactly the pre-3.12 ones, so no job ever
+      # asks for a core it lacks. (No branch coverage is configured; that is the one
+      # feature the sysmon core does not support.)
+      - env:
+          COVERAGE_CORE: sysmon
+        run: pytest -q ${{ matrix.coverage && '--cov' || '' }} --junitxml=junit.xml -o junit_family=legacy
       - name: Upload coverage to Codecov
-        if: ${{ !cancelled() }}
+        if: ${{ matrix.coverage && !cancelled() }}
         uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}

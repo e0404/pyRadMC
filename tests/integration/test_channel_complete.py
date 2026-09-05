@@ -48,7 +48,7 @@ class CoherentOnlySource(CrossSectionSource):
     def csda_range(self, energy: float, material: int) -> float:
         raise AssertionError("no charged particles exist in a coherent-only medium")
 
-    def scattering_power(self, energy: float, material: int) -> float:
+    def scattering_power(self, energy: float, material: int, delta_cut: float) -> float:
         raise AssertionError("no charged particles exist in a coherent-only medium")
 
 

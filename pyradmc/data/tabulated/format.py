@@ -20,7 +20,10 @@ from pyradmc.data.tabulated.model import TabulatedData
 
 __all__ = ["FORMAT_VERSION", "load_tables", "save_tables"]
 
-FORMAT_VERSION = 1
+# Version 2 changes ``scattering_power`` from an unrestricted EEDL elastic
+# moment to the Class-II total at ``delta_cut``. Reject version-1 files rather
+# than silently omitting the condensed soft-electron contribution.
+FORMAT_VERSION = 2
 
 _ELECTRON_FIELDS = (
     "restricted_stopping",

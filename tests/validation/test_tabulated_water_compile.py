@@ -4,7 +4,7 @@ Compiles liquid water from the real EPDL and EEDL libraries under the default
 berger-seltzer strategy, then checks the whole path the engine will use: the assembled
 :class:`TabulatedData` loads through :class:`TabulatedCrossSections`, its photon totals
 reproduce NIST XCOM, its electron stopping quantities match the analytic ICRU-37 backend
-they are compiled from, its scattering power tracks Highland, and it survives a
+they are compiled from, its scattering power tracks the transport moment, and it survives a
 save/load round trip through the on-disk format and flattens through ``build_tables``.
 
 Needs both ``PYRADMC_EPDL_PATH`` and ``PYRADMC_EEDL_PATH``; otherwise it skips.
@@ -91,12 +91,21 @@ def test_compiled_electron_stopping_matches_analytic(water: TabulatedData) -> No
 
 
 @pytest.mark.validation
-def test_compiled_scattering_tracks_highland(water: TabulatedData) -> None:
-    """Scattering power (EEDL) sits within a factor of two of analytic Highland."""
+def test_compiled_scattering_tracks_the_transport_moment(water: TabulatedData) -> None:
+    """Scattering power (EEDL) sits within a factor of two of the analytic transport moment.
+
+    EEDL supplies the tabulated source's nuclear moment and neglects an unresolved
+    forward tail (``element_scattering_power``), reaching ~11 % at 20 MeV. Both
+    sources add the same below-ECUT electron moment and exclude hard Moller events.
+    Measured 2026-09-04, tabulated / analytic: 1.10 at 1 MeV, 1.12 at 6 MeV, 0.87 at
+    20 MeV.
+    """
     xs = TabulatedCrossSections(water)
     analytic = AnalyticCrossSections()
     for energy in (1.0, 6.0, 20.0):
-        ratio = xs.scattering_power(energy, WATER) / analytic.scattering_power(energy, WATER)
+        ratio = xs.scattering_power(energy, WATER, ECUT) / analytic.scattering_power(
+            energy, WATER, ECUT
+        )
         assert 0.7 < ratio < 2.0
 
 

@@ -221,10 +221,19 @@ class CrossSectionSource(ABC):
         """
 
     @abstractmethod
-    def scattering_power(self, energy: float, material: int) -> float:
+    def scattering_power(self, energy: float, material: int, delta_cut: float) -> float:
         """Mass angular scattering power, in rad^2 cm^2/g.
 
-        Drives the multiple-elastic-scattering hinge deflection.
+        Drives the multiple-elastic-scattering hinge deflection: ``T rho s`` is
+        the small-step ``<theta^2>`` handed to the sampler. Because
+        Goudsmit-Saunderson pins ``<cos theta> = exp(-s N sigma_tr)`` exactly,
+        this must be the *first transport moment* ``2 (N_A/A) sigma_el G_1`` of
+        the screened scattering law — a core-width fit such as Highland's is not the same
+        quantity and under-scatters at high energy (the analytic source's
+        docstring records the approximation). ``delta_cut`` partitions the
+        electron-electron moment: transfers below it remain condensed here,
+        while the moment of above-cutoff Moller events is excluded because those
+        deflections are transported explicitly by the Class-II loop.
         """
 
     def elastic_screening(self, energy: float, material: int) -> float:

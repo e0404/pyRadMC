@@ -9,10 +9,40 @@ computed dose is listed under `Changed` or `Fixed` even when it is an improvemen
 the measured size of the effect where one was taken. A user re-running last month's plan
 must be able to find out from this file whether the numbers should have moved.
 
-## [Unreleased]
+## [0.2.0] — 2026-09-05
+
+First public release: the first version published to PyPI and tagged on GitHub.
 
 ### Changed
 
+- **Electron multiple-scattering strength is now the Class-II transport moment of
+  the Moliere-screened Rutherford law** (`AnalyticCrossSections.scattering_power`,
+  via `goudsmit_saunderson.transport_moment_scattering_power`), replacing the
+  Rossi-Greisen/Highland core width `(14.1/pv)^2 / X_0`. The strength is
+  `2(N_A/A)[Z^2 sigma_tr + Z(sigma_tr - sigma_tr,M^hard(E, ECUT))]`: nuclear elastic
+  scattering plus the atomic-electron moment below ECUT, with the moment of explicit
+  hard Moller events removed. Highland lacks the energy-growing logarithm of the true
+  moment; the restricted result is 1.25x Highland at 1 MeV, 1.68x at 10 MeV and 1.77x
+  at 15 MeV in water; the hard-event correction is 0.4-4.2 % of the unrestricted
+  `Z(Z+1)` strength over 0.5-15 MeV. **Dose moves in the build-up and laterally.**
+  Measured on monoenergetic pencil kernels in water against EGSnrc/TOPAS (1 mm
+  voxels, 1 mm axial shell, 1e6 histories): the laterally integrated build-up at
+  half dmax goes from 0.95-0.97 to 0.99-1.01 of EGSnrc (1 / 6 / 15 MeV), the
+  central-ray excess from +4 / +14 / +19 % to +3 / +2 / +7 % (TOPAS and EGSnrc
+  themselves differ by 3-4 % there), and dmax moves shallower (6 MeV: 2.95 -> 2.75 cm,
+  onto EGSnrc). Beyond dmax on the central axis nothing moves (CPE). Electron-beam
+  R50 falls onto EGS4 (Rogers & Bielajew 1986, Table III): 1.969 / 4.157 / 8.50 cm at
+  5 / 10 / 20 MeV vs 1.952 / 4.138 / 8.451, where Highland read 8-9 % long; the R50
+  validation gate is re-derived against that table (3 / 5 / 10 MeV, lateral-equilibrium
+  geometry, +-4 %) in place of the old R50/R_CSDA detour window. **The tabulated
+  source moves too**: it now adds the same restricted soft-electron term to EEDL's
+  nuclear-only elastic moment (build-up +1-1.5 % at half dmax, central ray -0.5 / -2 /
+  -3 % at 1 / 6 / 15 MeV; 15 MeV axial excess +11 % -> +8 %), and compiled table
+  format version 2 prevents older nuclear-only tables from loading silently.
+  The moment is evaluated per substep and costs runtime: electron transport on the
+  reference backend measured **~12 % slower** than the previous Highland width
+  (interleaved A/B on `tests/integration/test_boundary_truncation.py`, 149-155 s
+  before against 169.9 s after).
 - **The import name is now lowercase: `import pyradmc`**, following PEP 8 package
   naming. Every module path changes with it (`pyradmc.data`, `pyradmc.geometry`, ...),
   as do the default EPICS cache directory (`~/.cache/pyradmc/epics`) and the leading
@@ -479,9 +509,11 @@ must be able to find out from this file whether the numbers should have moved.
   no published result needs re-running; any dose computed from a preset on `main` before
   this commit is wrong by the amounts above.
 
-## [0.1.0] — unreleased
+## 0.1.0 — never released
 
-First public release.
+Prepared as the first release and never tagged, so no `v0.1.0` exists to install or
+compare against. Everything below ships in 0.2.0; it is kept as its own section because
+it is the record of what the engine could already do before that release's changes.
 
 ### Added
 
@@ -537,5 +569,5 @@ See `AGENTS.md` section 8 for the full list. The two most likely to bite:
 - The depth-dose validation gate is 5 %/3 mm, not 2 %/2 mm. The limiter is the reference
   benchmark's missing geometry and transport metadata, not the cross-section data.
 
-[Unreleased]: https://github.com/e0404/pyRadMC/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/e0404/pyRadMC/releases/tag/v0.1.0
+[Unreleased]: https://github.com/e0404/pyRadMC/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/e0404/pyRadMC/releases/tag/v0.2.0

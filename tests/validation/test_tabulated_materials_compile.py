@@ -149,33 +149,32 @@ def test_compiled_electron_stopping_matches_berger_seltzer(compiled: TabulatedDa
 
 @pytest.mark.validation
 def test_scattering_power_orders_physically(compiled: TabulatedData) -> None:
-    """Per-material scattering powers sit at their Z(Z+1)/A ratios to water.
+    """Per-material scattering powers follow their screened charge moments.
 
-    The elastic transport moment scales to leading order with ``sum_i w_i Z_i(Z_i+1)/A_i``
-    (the Rutherford prefactor; the per-element screening logarithm moves the ratio only
-    weakly). From the registry compositions that predicts, relative to water (4.22):
-    cortical bone 1.38, adipose 0.84, air 0.99, lung 1.00. Measured EEDL ratios
+    The nuclear EEDL term scales roughly as ``sum_i w_i Z_i^2/A_i`` and the restricted
+    soft-electron term adds less than the full ``sum_i w_i Z_i/A_i`` contribution.
+    The per-element screening logarithm moves the ratios weakly. Measured EEDL nuclear ratios
     (2026-07-13): bone 1.26-1.45, adipose 0.81-0.86, air 0.98-1.00, lung 0.98-0.99 over
     0.5-10 MeV. Bounds bracket both with margin; the *magnitude* convention is pinned by
-    the water Highland gate. (Do not widen toward the radiation-length ratio ~2.2 for
+    the water transport-moment gate. (Do not widen toward the radiation-length ratio ~2.2 for
     bone: X0 folds in screening much more strongly than the large-angle transport
-    moment does, and 1.38 is the correct leading-order expectation here.)
+    moment does.)
     """
     xs = TabulatedCrossSections(compiled)
     for energy in (0.5, 2.0, 10.0):
-        water = xs.scattering_power(energy, WATER)
-        assert 1.15 < xs.scattering_power(energy, CORTICAL_BONE) / water < 1.65
-        assert 0.70 < xs.scattering_power(energy, ADIPOSE) / water < 0.95
-        assert 0.90 < xs.scattering_power(energy, AIR) / water < 1.10
-        assert 0.90 < xs.scattering_power(energy, LUNG) / water < 1.10
-        # Tungsten: sum w_i Z_i(Z_i+1)/A_i = 30.19, i.e. 7.15x water's 4.22. Measured
+        water = xs.scattering_power(energy, WATER, ECUT)
+        assert 1.15 < xs.scattering_power(energy, CORTICAL_BONE, ECUT) / water < 1.65
+        assert 0.70 < xs.scattering_power(energy, ADIPOSE, ECUT) / water < 0.95
+        assert 0.90 < xs.scattering_power(energy, AIR, ECUT) / water < 1.10
+        assert 0.90 < xs.scattering_power(energy, LUNG, ECUT) / water < 1.10
+        # Tungsten's nuclear Z^2/A term dominates its much smaller electron term. Measured
         # EEDL ratios (2026-07-15): 7.14 / 5.24 / 9.69 at 0.5 / 2 / 10 MeV — centred
         # on the prediction, but swinging +-35% with energy because the sparse EEDL
         # angular-shape grid (one 0.256->10 MeV gap) moves the interpolated <1-mu>
         # moment much more for W than for the tissue media. The bracket spans the
         # measurement; this is a mixing sanity gate, the magnitude convention is
-        # pinned by the water Highland gate.
-        assert 4.0 < xs.scattering_power(energy, TUNGSTEN) / water < 12.0
+        # pinned by the water transport-moment gate.
+        assert 4.0 < xs.scattering_power(energy, TUNGSTEN, ECUT) / water < 12.0
 
 
 @pytest.mark.validation
