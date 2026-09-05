@@ -13,8 +13,8 @@ authors:
     email: n.wahl@dkfz-heidelberg.de
     affiliation: German Cancer Research Center (DKFZ)
     orcid: "https://orcid.org/0000-0002-1451-223X"
-version: 0.1.0
-date-released: "2026-07-26"
+version: 0.2.0
+date-released: "2026-09-05"
 license: Apache-2.0
 repository-code: "https://github.com/e0404/pyRadMC"
 url: "https://pyradmc.readthedocs.io"

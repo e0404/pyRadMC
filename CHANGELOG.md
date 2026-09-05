@@ -9,7 +9,9 @@ computed dose is listed under `Changed` or `Fixed` even when it is an improvemen
 the measured size of the effect where one was taken. A user re-running last month's plan
 must be able to find out from this file whether the numbers should have moved.
 
-## [Unreleased]
+## [0.2.0] — 2026-09-05
+
+First public release: the first version published to PyPI and tagged on GitHub.
 
 ### Changed
 
@@ -37,6 +39,10 @@ must be able to find out from this file whether the numbers should have moved.
   nuclear-only elastic moment (build-up +1-1.5 % at half dmax, central ray -0.5 / -2 /
   -3 % at 1 / 6 / 15 MeV; 15 MeV axial excess +11 % -> +8 %), and compiled table
   format version 2 prevents older nuclear-only tables from loading silently.
+  The moment is evaluated per substep and costs runtime: electron transport on the
+  reference backend measured **~12 % slower** than the previous Highland width
+  (interleaved A/B on `tests/integration/test_boundary_truncation.py`, 149-155 s
+  before against 169.9 s after).
 - **The import name is now lowercase: `import pyradmc`**, following PEP 8 package
   naming. Every module path changes with it (`pyradmc.data`, `pyradmc.geometry`, ...),
   as do the default EPICS cache directory (`~/.cache/pyradmc/epics`) and the leading
@@ -503,9 +509,11 @@ must be able to find out from this file whether the numbers should have moved.
   no published result needs re-running; any dose computed from a preset on `main` before
   this commit is wrong by the amounts above.
 
-## [0.1.0] — unreleased
+## 0.1.0 — never released
 
-First public release.
+Prepared as the first release and never tagged, so no `v0.1.0` exists to install or
+compare against. Everything below ships in 0.2.0; it is kept as its own section because
+it is the record of what the engine could already do before that release's changes.
 
 ### Added
 
@@ -561,5 +569,5 @@ See `AGENTS.md` section 8 for the full list. The two most likely to bite:
 - The depth-dose validation gate is 5 %/3 mm, not 2 %/2 mm. The limiter is the reference
   benchmark's missing geometry and transport metadata, not the cross-section data.
 
-[Unreleased]: https://github.com/e0404/pyRadMC/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/e0404/pyRadMC/releases/tag/v0.1.0
+[Unreleased]: https://github.com/e0404/pyRadMC/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/e0404/pyRadMC/releases/tag/v0.2.0
