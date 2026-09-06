@@ -9,7 +9,10 @@ computed dose is listed under `Changed` or `Fixed` even when it is an improvemen
 the measured size of the effect where one was taken. A user re-running last month's plan
 must be able to find out from this file whether the numbers should have moved.
 
-## [Unreleased]
+## [0.2.1] — 2026-09-06
+
+Startup and caching only. No dose value, cutoff or tolerance changes; a plan re-run
+under 0.2.1 reproduces its 0.2.0 numbers exactly on the same backend and seed.
 
 ### Changed
 
@@ -587,5 +590,6 @@ See `AGENTS.md` section 8 for the full list. The two most likely to bite:
 - The depth-dose validation gate is 5 %/3 mm, not 2 %/2 mm. The limiter is the reference
   benchmark's missing geometry and transport metadata, not the cross-section data.
 
-[Unreleased]: https://github.com/e0404/pyRadMC/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/e0404/pyRadMC/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/e0404/pyRadMC/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/e0404/pyRadMC/releases/tag/v0.2.0
