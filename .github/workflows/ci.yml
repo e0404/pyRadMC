@@ -27,8 +27,8 @@ jobs:
     name: lint, format, types
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
           cache: pip
@@ -36,7 +36,7 @@ jobs:
       # The warp extra is installed for mypy: it type-checks the engine modules that
       # import warp, even though the kernels themselves are exempt (AGENTS.md 5).
       - run: pip install -e ".[warp,dev]"
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: ~/.cache/pre-commit
           key: pre-commit-${{ hashFiles('.pre-commit-config.yaml') }}
@@ -76,8 +76,8 @@ jobs:
             python: "3.13"
             coverage: true
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python }}
           cache: pip
@@ -96,7 +96,7 @@ jobs:
               print(f"identity={_grid_cache_file(Path()).stem}", file=output)
           PY
       - name: Cache physics data
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/pyradmc
           # No restore-key fallback across construction identities. The source hash
@@ -117,14 +117,14 @@ jobs:
         run: pytest -q ${{ matrix.coverage && '--cov' || '' }} --junitxml=junit.xml -o junit_family=legacy
       - name: Upload coverage to Codecov
         if: ${{ matrix.coverage && !cancelled() }}
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
       # Same action twice: codecov deprecated test-results-action@v1 in favor of
       # codecov-action with report_type, run once per report kind.
       - name: Upload test results to Codecov
         if: ${{ !cancelled() }}
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v7
         with:
           report_type: test_results
           token: ${{ secrets.CODECOV_TOKEN }}
@@ -133,8 +133,8 @@ jobs:
     name: docs build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
           cache: pip
@@ -149,8 +149,8 @@ jobs:
     name: build distributions
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
           cache: pip
@@ -171,7 +171,7 @@ jobs:
           assert pyradmc.VoxelGrid is not None
           print('public names:', len(pyradmc.__all__))
           "
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: distributions
           path: dist/
