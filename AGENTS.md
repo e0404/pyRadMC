@@ -349,12 +349,18 @@ releases happen there. The DKFZ GitLab is a mirror whose CI validates and never 
 
 | Branch | Role |
 |---|---|
-| `main` | Releases only. Receives merge commits from `rc/*` branches, each then tagged. |
-| `develop` | Integration; the default branch. Every change lands as a squash merge from a task branch. |
+| `main` | Releases only, and the repository's **default branch**. Receives merge commits from `rc/*` branches, each then tagged. |
+| `develop` | Integration, and the base of nearly every pull request. Every change lands as a squash merge from a task branch. |
 | task branches | One per task, cut from `develop`, short-lived, deleted after merging. Descriptive names (`gs-msc-step-rework`, not `fix2`). |
 | `rc/X.Y.Z` | Release candidate, cut from `develop` (section 9.4). |
 
 Nothing is committed directly to `main` or `develop`.
+
+**`main` is the default branch and stays that way**, even though `develop` is where the
+work lands: the default is what a visitor lands on, what `git clone` checks out and what
+tooling reads when nothing tells it otherwise, so it has to be release-grade. Anything
+that defaults to the default branch and should instead follow the work — Dependabot's
+`target-branch`, a PR base, a docs build — names `develop` explicitly.
 
 ### 9.2 Commit convention
 
