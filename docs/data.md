@@ -83,6 +83,15 @@ window. Builds made
 through `build_gs_grid` with explicit grid-constant overrides remain in memory. A
 cache write failure in either backend logs a warning and retains the tables in memory.
 
+**Nothing evicts a superseded identity.** A changed construction version, build
+constant or NumPy feature release writes a new file and leaves the previous one in
+place, so the directory accumulates one grid per identity a machine has ever used.
+A grid is as large as the coverage asked of it — about 20 MB in the measured
+workload, potentially larger as materials, energies or step lengths widen the
+window. Delete any `gs-grid-*.npz` at any time: the only cost is rebuilding the
+nodes a later run asks for. Reading a stale file is not a risk, because a grid is
+only ever read back under the identity that wrote it.
+
 Writes share the eager builder's thread lock and use atomic replacement, with temporary
 files removed after failed saves. Concurrent processes can duplicate deterministic
 work, with the last completed file winning;

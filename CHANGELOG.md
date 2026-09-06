@@ -11,7 +11,7 @@ must be able to find out from this file whether the numbers should have moved.
 
 ## [Unreleased]
 
-### Fixed
+### Changed
 
 - Reference electron transport now reuses and incrementally extends the persisted
   Goudsmit-Saunderson grid shared with Warp. Fresh processes no longer rebuild
@@ -19,6 +19,12 @@ must be able to find out from this file whether the numbers should have moved.
   Brackets extend in one save, and both builders share column parallelism and
   recover from cache write failures. Cache identity includes inverse-CDF resolution;
   compatible existing 4096-bin grids remain readable.
+- Because that identity changed, the first extension after upgrading writes a new
+  `~/.cache/pyradmc/gs-grid/gs-grid-*.npz` and leaves the file written by 0.2.0 in
+  place. Nothing has ever evicted a superseded identity, so the directory accumulates
+  one grid per identity a machine has used — about 20 MB in the measured workload,
+  potentially larger as coverage grows. Any of them can be deleted at any time; the
+  only cost is rebuilding nodes a later run asks for.
 - CI caches physics data by construction identity, source hash, OS and Python version.
 
 ## [0.2.0] — 2026-09-05
