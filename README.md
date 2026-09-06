@@ -61,6 +61,10 @@ device is present. The two backends are validated against each other statistical
 GPU results are never bit-identical, but each is bit-reproducible on its own device for a
 given seed.
 
+Both backends reuse deterministic Goudsmit-Saunderson tables from
+`~/.cache/pyradmc/gs-grid`. The reference sampler loads existing nodes and grows
+the stored window on demand, so fresh processes reuse previous table builds.
+
 ## Quick start
 
 ```python

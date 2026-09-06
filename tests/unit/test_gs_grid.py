@@ -1,11 +1,11 @@
 r"""The eager Goudsmit-Saunderson grid: the device backend's table precompute.
 
-The reference backend builds deflection tables lazily, one ``(eta, <theta^2>)``
-node at a time, memoized per source (``CrossSectionSource.sample_gs_cos_theta``).
-A device backend cannot: a mid-transport host build was measured at 86 s, and a
-lazy dict is not safe across the ``devices=[...]`` shard threads. So the Warp
-port precomputes the **full rectangle of grid nodes** host-side before the first
-launch and uploads it flat.
+The reference backend requests deflection tables lazily, memoized per source
+(``CrossSectionSource.sample_gs_cos_theta``) and backed by the persisted grid.
+A device kernel cannot consult that host cache: a mid-transport host build was
+measured at 86 s. So the Warp port precomputes the **full rectangle of grid
+nodes** host-side before the first launch and uploads it flat. Both cache paths
+share the grid's write lock across ``devices=[...]`` shard threads.
 
 These tests pin the properties that make that precompute a *re-packaging* of the
 reference construction rather than a second implementation:

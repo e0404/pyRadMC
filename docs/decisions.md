@@ -108,6 +108,105 @@ fully specified benchmark exists. See `AGENTS.md` section 8.
 *are* the cross-sections; a corrupted cache or a silent upstream revision would surface as
 unexplained drift in a dose gate rather than as an error.
 
+## Reference GS startup
+
+**The reference sampler shares the existing persisted GS grid, growing its requested
+rectangle on demand.** On 2026-09-05, the existing 21 MB, 5,148-node Warp cache covered
+all 494 nodes requested by the collimated Dij ledger test and all 914 requested by the
+boundary-truncation test. Loading it solves their repeated construction cost without a
+new format or construction-version bump. Cold reference runs grow a dense rectangle;
+this can build unrequested interior nodes, but preserves compatibility with the eager
+reader. Owned, immutable rows enter the existing node memo so source caches do not
+retain obsolete grid allocations. Both grid writers share the existing thread lock.
+
+**Eager reference initialization loses badly on short cold runs.** Interleaved lazy /
+eager / lazy / eager measurements on Windows, Python 3.13.14, NumPy 2.4.6, using the
+6 MeV analytic-water window and unchanged production build constants:
+
+| Cold workload | Lazy persistence | Eager initialization | Nodes, lazy / eager |
+|---|---:|---:|---:|
+| One GS sample at 1 MeV, theta-squared 0.003 | 0.587 / 0.613 s | 30.27 / 32.49 s | 4 / 3,562 |
+| Collimated Dij, 900 histories | 93.95 / 96.73 s | 32.30 / 31.17 s | 777 / 3,562 |
+
+These initial measurements predate the shared rectangle filler described below.
+The lazy rectangle adds some first-run cost relative to the original memory-only
+constructor, but avoids a mandatory roughly 31-second startup for even one sample.
+This favors lazy persistence (option b); a separate node-store format is unnecessary.
+
+**Sharing column parallelism does not by itself accelerate incremental cold fills.**
+The review follow-up factors both builders through `_fill_rectangle`, preserving the
+existing threshold of 256 **new** nodes per fill and the 16-worker cap. The reference
+sampler requests a whole 2x2 bracket under one lock and saves once. It also returns
+immediately when a defensive disk re-read finds coverage. Both writers recover from
+save failures and clean up temporary files. Inverse-CDF resolution now participates
+in disk and memory identities; existing version-1 grids remain readable only at their
+historical 4096-bin resolution. Construction and format are unchanged, so version 1
+remains appropriate.
+
+Interleaved before/after/before/after cold measurements against the initial persisted
+implementation, with the same production constants and 900-history Dij:
+
+| Cold workload | Before review fixes | After review fixes |
+|---|---:|---:|
+| One GS sample | 0.615 / 0.599 s | 0.592 / 0.595 s |
+| Collimated Dij, 900 histories | 91.81 / 93.30 s | 95.91 / 93.75 s |
+| Dij nodes built | 777 | 777 |
+| Dij saves / bytes written | 14 / 18,163,256 | 11 / 18,032,692 |
+
+The largest revised extension adds 180 nodes, so **none starts a pool**. These results
+do not demonstrate a cold transport speedup and do not recover eager initialization's
+roughly 31-second result. A single sample drops from three saves to one; most later
+growth events already extend only one axis. Larger extensions now share eager
+parallelism, with serial/parallel reconstruction pinned byte-equal after clearing
+the node memo. Changing worker-selection policy would need a separate measurement.
+
+Warm review comparisons also ran before/after/before/after in fresh processes against
+the same stored grid. Direct 900-history Dij invocations took 1.014/0.982 s before and
+1.006/0.997 s after; direct calls to `test_interface_voxel_is_not_spiked` took
+61.69/61.12 s before and 60.83/60.92 s after. All made zero node builds and zero saves.
+These direct timings exclude pytest initialization and are distinct from the original
+pytest timings below.
+
+The review's full fast-suite comparison ran A/B/A: 193.70 s (A), 200.13 s (B),
+191.81 s (A), all passing. A runs the 1,292 common tests, excluding the cache-specific
+test files; B runs all 1,312 tests, including the twenty cache cases (ten added by
+this review). These wall times include pytest startup. Windows reported 2,200 MHz;
+they remain laptop measurements with warm transport-grid coverage. Production-dose,
+column-sigma and CSC bytes also matched each target's prior result on reference,
+Warp CPU and CUDA independently.
+The Warp CPU check also extended a four-node reference cache by 3,558 nodes through
+the shared parallel filler, then CUDA read that completed grid without rebuilding;
+both reproduced their own baseline dose, sigma and CSC bytes.
+
+**Fresh processes reuse the cached nodes without changing dose.** A restores the
+original `gs_scaled_deflection_table(exp(i / bins), exp(j / bins), n_u=nodes)` reference
+lookup; B uses the persistent lookup. Each measurement starts a fresh interpreter,
+with the same existing grid available to Warp in both cases. Times below measure
+`pytest.main`, including its initialization. Histories, seeds and tolerances are
+unchanged. The named tests ran A/B/A/B; successful full-suite runs ran B/A/B. An earlier
+full baseline affected by a competing solve and a pytest-cache shutdown permission
+error was excluded. Windows reported nominal clock states of 1,466–2,200 MHz; these
+interleaved measurements are not controlled-power hardware baselines.
+
+| Fast workload | Before | After |
+|---|---:|---:|
+| Full suite | 330.17 s, 1,292 passed | 214.33 s, 1,292 passed; 219.70 s, 1,302 passed |
+| `test_weighted_column_ledger_closes` | 76.67 / 91.90 s | 1.606 / 1.451 s |
+| `test_interface_voxel_is_not_spiked` | 195.24 / 171.28 s | 67.23 / 63.50 s |
+
+The last full run includes all ten added cache tests. Named-test median paired speedups
+are 55.5x and 2.80x, with zero node rebuilds in either cached test. These are standalone
+test timings: the boundary test's earlier roughly 84-second *in-suite* profile could
+reuse nodes from preceding tests; a standalone cold process builds all 914.
+
+The production 900-history Dij's dose, column sigma and CSC structure were byte-equal
+between uncached reference construction, a warm grid, and both cold grid strategies.
+Warp CPU and CUDA each reproduced their own prior dose, sigma and CSC bytes when
+reading a reference-generated grid; the CPU check extended its partial rectangle
+before upload. No comparison requires equality across targets. The fast suite,
+strict mypy, ruff, pre-commit and strict documentation build passed. Cutoffs, step
+fractions, truncation and node construction are unchanged.
+
 ## Scoring and interfaces
 
 **The dose grid is decoupled from the transport grid.** Any origin, spacing or shape,

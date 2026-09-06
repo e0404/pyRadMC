@@ -9,6 +9,18 @@ computed dose is listed under `Changed` or `Fixed` even when it is an improvemen
 the measured size of the effect where one was taken. A user re-running last month's plan
 must be able to find out from this file whether the numbers should have moved.
 
+## [Unreleased]
+
+### Fixed
+
+- Reference electron transport now reuses and incrementally extends the persisted
+  Goudsmit-Saunderson grid shared with Warp. Fresh processes no longer rebuild
+  covered nodes. Table construction and dose values are unchanged.
+  Brackets extend in one save, and both builders share column parallelism and
+  recover from cache write failures. Cache identity includes inverse-CDF resolution;
+  compatible existing 4096-bin grids remain readable.
+- CI caches physics data by construction identity, source hash, OS and Python version.
+
 ## [0.2.0] — 2026-09-05
 
 First public release: the first version published to PyPI and tagged on GitHub.
