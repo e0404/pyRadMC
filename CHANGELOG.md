@@ -9,6 +9,27 @@ computed dose is listed under `Changed` or `Fixed` even when it is an improvemen
 the measured size of the effect where one was taken. A user re-running last month's plan
 must be able to find out from this file whether the numbers should have moved.
 
+## [0.2.1] — 2026-09-06
+
+Startup and caching only. No dose value, cutoff or tolerance changes; a plan re-run
+under 0.2.1 reproduces its 0.2.0 numbers exactly on the same backend and seed.
+
+### Changed
+
+- Reference electron transport now reuses and incrementally extends the persisted
+  Goudsmit-Saunderson grid shared with Warp. Fresh processes no longer rebuild
+  covered nodes. Table construction and dose values are unchanged.
+  Brackets extend in one save, and both builders share column parallelism and
+  recover from cache write failures. Cache identity includes inverse-CDF resolution;
+  compatible existing 4096-bin grids remain readable.
+- Because that identity changed, the first extension after upgrading writes a new
+  `~/.cache/pyradmc/gs-grid/gs-grid-*.npz` and leaves the file written by 0.2.0 in
+  place. Nothing has ever evicted a superseded identity, so the directory accumulates
+  one grid per identity a machine has used — about 20 MB in the measured workload,
+  potentially larger as coverage grows. Any of them can be deleted at any time; the
+  only cost is rebuilding nodes a later run asks for.
+- CI caches physics data by construction identity, source hash, OS and Python version.
+
 ## [0.2.0] — 2026-09-05
 
 First public release: the first version published to PyPI and tagged on GitHub.
@@ -569,5 +590,6 @@ See `AGENTS.md` section 8 for the full list. The two most likely to bite:
 - The depth-dose validation gate is 5 %/3 mm, not 2 %/2 mm. The limiter is the reference
   benchmark's missing geometry and transport metadata, not the cross-section data.
 
-[Unreleased]: https://github.com/e0404/pyRadMC/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/e0404/pyRadMC/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/e0404/pyRadMC/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/e0404/pyRadMC/releases/tag/v0.2.0

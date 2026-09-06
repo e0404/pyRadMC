@@ -61,6 +61,48 @@ The check is fail-closed and deliberately awkward to bypass:
 Updating a pinned digest is not maintenance — it changes the cross-sections. Re-run the
 validation tier against the new library and record the outcome first.
 
+## Multiple-scattering table cache
+
+Reference and Warp transport share the deterministic Goudsmit-Saunderson grid at
+`~/.cache/pyradmc/gs-grid`. Warp precomputes its reachable rectangle; the reference
+sampler reads that file on its first node request and retains it in memory. With no
+stored coverage, it builds the smallest rectangle containing the requested nodes and
+the stored window, reusing every existing node. Short reference runs therefore do
+not initialize the full reachable grid. A rectangle can include unrequested interior
+nodes; the tradeoff preserves the existing dense format and its eager-grid reader.
+The reference sampler requests its four interpolation rows together, extending and
+saving once per bracket. Both builders use the same column workers when an extension
+adds at least 256 nodes; smaller extensions stay serial.
+
+The cache changes startup cost only: node construction, transport seeds, cutoffs and
+dose values are unchanged. The construction version, build constants and NumPy feature
+version identify the file, including the inverse-CDF grid resolution. Existing version-1
+files that implicitly used 4096 inverse-CDF bins remain readable at that resolution;
+extensions save under the explicit identity. Geometry and source changes extend its
+window. Builds made
+through `build_gs_grid` with explicit grid-constant overrides remain in memory. A
+cache write failure in either backend logs a warning and retains the tables in memory.
+
+**Nothing evicts a superseded identity.** A changed construction version, build
+constant or NumPy feature release writes a new file and leaves the previous one in
+place, so the directory accumulates one grid per identity a machine has ever used.
+A grid is as large as the coverage asked of it — about 20 MB in the measured
+workload, potentially larger as materials, energies or step lengths widen the
+window. Delete any `gs-grid-*.npz` at any time: the only cost is rebuilding the
+nodes a later run asks for. Reading a stale file is not a risk, because a grid is
+only ever read back under the identity that wrote it.
+
+Writes share the eager builder's thread lock and use atomic replacement, with temporary
+files removed after failed saves. Concurrent processes can duplicate deterministic
+work, with the last completed file winning;
+this affects cache coverage, never node values. CI caches `~/.cache/pyradmc` under the
+construction identity and source hash, separated by OS and Python version.
+Ordinary reference tests also use this home-directory cache; only tests that redirect
+the private cache directory are isolated. Warm-suite timings therefore depend on its
+stored coverage.
+The [startup measurements](decisions.md#reference-gs-startup) document coverage and
+the tradeoff between lazy and eager initialization.
+
 ## Licence and provenance
 
 The EPICS libraries are the IAEA's. Their terms of use apply to you as the person who

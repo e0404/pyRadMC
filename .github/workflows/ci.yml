@@ -83,6 +83,25 @@ jobs:
           cache: pip
           cache-dependency-path: pyproject.toml
       - run: pip install -e ".[warp,dev]"
+      - name: Identify the GS table construction
+        id: gs-cache
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          from pyradmc.data.goudsmit_saunderson import _grid_cache_file
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              print(f"identity={_grid_cache_file(Path()).stem}", file=output)
+          PY
+      - name: Cache physics data
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pyradmc
+          # No restore-key fallback across construction identities. The source hash
+          # also guards changes made before an explicit cache-version bump.
+          key: physics-${{ runner.os }}-py${{ matrix.python }}-${{ steps.gs-cache.outputs.identity }}-${{ hashFiles('pyradmc/data/goudsmit_saunderson.py') }}
       # Runners have no CUDA device: warp runs on CPU and the gpu-marked tests skip
       # themselves via wp.is_cuda_available(). The validation and perf tiers are
       # excluded by the default addopts; validation runs on its own schedule.

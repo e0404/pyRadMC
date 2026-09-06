@@ -284,8 +284,11 @@ class CrossSectionSource(ABC):
         safe because the table is normalized in a scaled deflection: the
         rescaling by this call's exact ``<1 - cos theta>`` restores the first
         moment exactly, so the grid resolution perturbs only the shape.
+        Missing rows consult the persistent GS grid shared with Warp; a cold
+        cache grows to the rectangle of requested nodes without eagerly
+        constructing the full transport window.
         """
-        from pyradmc.data.goudsmit_saunderson import gs_scaled_deflection_table
+        from pyradmc.data.goudsmit_saunderson import gs_grid_nodes
         from pyradmc.physics.gs import sample_gs_cos_theta_bilinear
 
         if mean_square_angle <= 0.0:
@@ -312,12 +315,14 @@ class CrossSectionSource(ABC):
         def row(i: int, j: int) -> npt.NDArray[np.float64]:
             table = cache.get((i, j))
             if table is None:
-                table = gs_scaled_deflection_table(
-                    math.exp(i / _GS_BINS_PER_LOG),
-                    math.exp(j / _GS_BINS_PER_LOG),
-                    n_u=_GS_TABLE_NODES,
-                )
-                cache[(i, j)] = table
+                rows = gs_grid_nodes(ix, iy)
+                (
+                    cache[(ix, iy)],
+                    cache[(ix + 1, iy)],
+                    cache[(ix, iy + 1)],
+                    cache[(ix + 1, iy + 1)],
+                ) = rows
+                table = cache[(i, j)]
             return table
 
         return sample_gs_cos_theta_bilinear(

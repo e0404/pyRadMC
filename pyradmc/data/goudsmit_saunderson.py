@@ -640,11 +640,17 @@ its own lazy cache, multiplying the ~0.1 s per node across dozens of sources
 once Goudsmit-Saunderson became the default. Deliberately unlocked: the
 reference loop is single-threaded, and a concurrent duplicate build writes the
 identical deterministic array. Cached arrays are frozen read-only, since one
-array is now shared by every consumer."""
+array is now shared by every consumer. Persistent grid reads also populate this
+memo with owned rows, so source caches do not retain obsolete grid rectangles
+after an extension."""
+
+
+_GS_TABLE_MU_BINS: int = 4096
+"""Inverse-CDF grid resolution used to construct a GS node."""
 
 
 def gs_scaled_deflection_table(
-    eta: float, theta2: float, n_u: int = 512, n_mu: int = 4096
+    eta: float, theta2: float, n_u: int = 512, n_mu: int = _GS_TABLE_MU_BINS
 ) -> np.ndarray:
     r"""Tabulate the scaled deflection ``w = (1 - mu) / <1 - mu>`` in ``n_u`` bins.
 
@@ -784,11 +790,12 @@ def mean_square_angle(lam: float, g1: float) -> float:
 class GSGridTables:
     """The full rectangle of scaled-deflection tables, precomputed for upload.
 
-    The reference backend memoizes tables lazily per ``(eta, <theta^2>)`` node
-    key; a device backend precomputes the whole reachable window before the
-    first launch instead — a mid-transport host build was measured at 86 s, and
-    a lazily-growing dict is not shareable across ``devices=[...]`` shard
-    threads. Every entry is built by :func:`gs_scaled_deflection_table` at the
+    The reference backend looks up tables lazily per ``(eta, <theta^2>)`` node
+    key in the persistent grid; a device backend precomputes the whole reachable
+    window before the first launch because kernels cannot consult a host cache
+    mid-transport. Both paths guard grid extension with the same lock across
+    ``devices=[...]`` shard threads. Every entry is built by
+    :func:`gs_scaled_deflection_table` at the
     identical node parameters and fixed build seed the lazy cache uses, so the
     two backends sample bit-identical tables (float64, before any device cast).
 
@@ -816,18 +823,19 @@ class GSGridTables:
     bins_per_log: float
 
 
-_grid_cache: dict[tuple[int, int, int, int, int, float, int], GSGridTables] = {}
+_grid_cache: dict[tuple[int, int, int, int, int, float, int, int], GSGridTables] = {}
 _grid_cache_lock = threading.Lock()
 
 
 _GS_GRID_CACHE_VERSION: int = 1
-"""Version of the table construction, for the persistent grid cache key.
+"""Version of the table construction and stored format, for the grid cache key.
 
-**Bump this with any commit that changes what a node's table contains**: the
+**Bump this when the stored format or a node's table contents change**: the
 fixed build seed or sample count, the series/composition split
-(:data:`_SERIES_MIN_LAMBDA`), the moment quadrature or Legendre order, the
-bin-average condensation, or the screened-Rutherford single-scattering model
-itself. Nothing else invalidates the cache — node values are pure functions of
+(:data:`_SERIES_MIN_LAMBDA`), the moment quadrature or Legendre order, the inverse-CDF
+grid resolution (:data:`_GS_TABLE_MU_BINS`), the bin-average condensation, or
+the screened-Rutherford single-scattering model itself. Nothing else invalidates
+the cache — node values are pure functions of
 the node coordinates and this algorithm, so materials, geometries, cutoffs,
 sources and even the screening/scattering-power *data* only move the requested
 window, which the cache handles by extension, not rebuild.
@@ -835,6 +843,96 @@ window, which the cache handles by extension, not rebuild.
 
 _GS_GRID_CACHE_DIR: Path = Path.home() / ".cache" / "pyradmc" / "gs-grid"
 """Default home of the persistent grid, beside the EPICS library cache."""
+
+
+_lazy_grid_cache: dict[Path, GSGridTables] = {}
+"""Reference windows, guarded by ``_grid_cache_lock`` along with disk writes."""
+
+
+def _memo_grid_node(grid: GSGridTables, ix: int, iy: int) -> npt.NDArray[np.float64]:
+    """Share an owned node array without pinning obsolete grid allocations."""
+    key = (
+        math.exp(ix / grid.bins_per_log),
+        math.exp(iy / grid.bins_per_log),
+        grid.n_u,
+        _GS_TABLE_MU_BINS,
+        _RAW_SAMPLES,
+    )
+    table = _node_cache.get(key)
+    if table is None:
+        table = grid.values[ix - grid.ix0, iy - grid.iy0].copy()
+        table.flags.writeable = False
+        _node_cache[key] = table
+    return table
+
+
+def gs_grid_node(ix: int, iy: int) -> npt.NDArray[np.float64]:
+    """Read one immutable node, extending the shared persistent rectangle."""
+    with _grid_cache_lock:
+        return _memo_grid_node(_reference_grid(ix, ix, iy, iy), ix, iy)
+
+
+def gs_grid_nodes(
+    ix: int,
+    iy: int,
+) -> tuple[
+    npt.NDArray[np.float64],
+    npt.NDArray[np.float64],
+    npt.NDArray[np.float64],
+    npt.NDArray[np.float64],
+]:
+    """Read a bilinear bracket in one locked pass, saving at most once.
+
+    Returns the immutable rows in (00, 10, 01, 11) interpolation order.
+    Cold runs grow only the containing rectangle, using the eager builder's
+    column parallelism for sufficiently large extensions. The common grid
+    lock serializes reads, extension and writes with device shard threads.
+    """
+    with _grid_cache_lock:
+        grid = _reference_grid(ix, ix + 1, iy, iy + 1)
+        return (
+            _memo_grid_node(grid, ix, iy),
+            _memo_grid_node(grid, ix + 1, iy),
+            _memo_grid_node(grid, ix, iy + 1),
+            _memo_grid_node(grid, ix + 1, iy + 1),
+        )
+
+
+def _reference_grid(ix0: int, ix1: int, iy0: int, iy1: int) -> GSGridTables:
+    """Ensure rectangle coverage; caller must hold ``_grid_cache_lock``."""
+    from pyradmc.data.interface import _GS_BINS_PER_LOG, _GS_TABLE_NODES
+
+    def covers(grid: GSGridTables) -> bool:
+        return (
+            grid.ix0 <= ix0
+            and ix1 < grid.ix0 + grid.values.shape[0]
+            and grid.iy0 <= iy0
+            and iy1 < grid.iy0 + grid.values.shape[1]
+        )
+
+    path = _grid_cache_file(_GS_GRID_CACHE_DIR)
+    stored = _lazy_grid_cache.get(path)
+    if stored is not None and covers(stored):
+        return stored
+    # An eager build (or another process) may have extended the file since
+    # our first read. Re-read before writing, including a coverage early-out.
+    latest = _load_grid_cache(path)
+    if latest is not None:
+        stored = latest
+        stored.values.flags.writeable = False
+        _lazy_grid_cache[path] = stored
+        if covers(stored):
+            _log.info("loaded the reference Goudsmit-Saunderson grid from %s", path)
+            return stored
+    if stored is not None:
+        ix0, iy0 = min(ix0, stored.ix0), min(iy0, stored.iy0)
+        ix1 = max(ix1, stored.ix0 + stored.values.shape[0] - 1)
+        iy1 = max(iy1, stored.iy0 + stored.values.shape[1] - 1)
+    values = _fill_rectangle(ix0, ix1, iy0, iy1, stored, _GS_TABLE_NODES, _GS_BINS_PER_LOG)
+    grid = GSGridTables(values, ix0, iy0, _GS_TABLE_NODES, _GS_BINS_PER_LOG)
+    _lazy_grid_cache[path] = grid
+    _try_save_grid_cache(path, grid)
+    return grid
 
 
 def _grid_cache_key() -> tuple[float | int | str, ...]:
@@ -861,6 +959,7 @@ def _grid_cache_key() -> tuple[float | int | str, ...]:
         _QUADRATURE_POINTS,
         _SERIES_CUTOFF,
         numpy_feature,
+        _GS_TABLE_MU_BINS,
     )
 
 
@@ -872,11 +971,19 @@ def _grid_cache_file(cache_dir: Path) -> Path:
 
 def _load_grid_cache(path: Path) -> GSGridTables | None:
     """Read a stored grid, or None on absence, corruption, or key mismatch."""
+    key = _grid_cache_key()
+    # Before the resolution entered the key, construction always used 4096.
+    # Read that identity only at its original version/resolution; subsequent
+    # writes use the explicit key without changing format or node contents.
+    if not path.is_file() and _GS_GRID_CACHE_VERSION == 1 and _GS_TABLE_MU_BINS == 4096:
+        key = key[:-1]
+        digest = hashlib.sha256(repr(key).encode()).hexdigest()[:16]
+        path = path.parent / f"gs-grid-{digest}.npz"
     if not path.is_file():
         return None
     try:
         with np.load(path, allow_pickle=False) as stored:
-            if str(stored["key"]) != repr(_grid_cache_key()):
+            if str(stored["key"]) != repr(key):
                 return None
             from pyradmc.data.interface import _GS_BINS_PER_LOG, _GS_TABLE_NODES
 
@@ -900,26 +1007,102 @@ def _save_grid_cache(path: Path, grid: GSGridTables) -> None:
     and the last replace wins.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(f".partial-{os.getpid()}")
-    np.savez(
-        temporary,
-        values=grid.values,
-        ix0=grid.ix0,
-        iy0=grid.iy0,
-        key=repr(_grid_cache_key()),
-    )
-    # savez appends .npz to the handed name.
-    temporary.with_suffix(temporary.suffix + ".npz").replace(path)
+    temporary = path.with_suffix(f".partial-{os.getpid()}.npz")
+    try:
+        np.savez(
+            temporary,
+            values=grid.values,
+            ix0=grid.ix0,
+            iy0=grid.iy0,
+            key=repr(_grid_cache_key()),
+        )
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _try_save_grid_cache(path: Path, grid: GSGridTables) -> None:
+    """Keep both reference and eager grids usable when persistence fails."""
+    try:
+        _save_grid_cache(path, grid)
+    except OSError:
+        _log.warning("cannot write GS grid cache at %s; using memory", path)
 
 
 _PARALLEL_BUILD_THRESHOLD: int = 256
-"""Window size (tables) below which the build stays serial: thread-pool spin-up
+"""New tables per fill below which construction stays serial: thread-pool spin-up
 is pure overhead on the small windows tests construct."""
 
 _BUILD_WORKER_CAP: int = 16
 """Upper bound on build threads. The table construction releases the GIL in its
 large-array NumPy phases (measured ~3x at 4 workers) but not everywhere, so
 unbounded oversubscription past the physical cores buys nothing."""
+
+
+def _fill_rectangle(
+    ix0: int,
+    ix1: int,
+    iy0: int,
+    iy1: int,
+    stored: GSGridTables | None,
+    nodes: int,
+    bins: float,
+    max_workers: int | None = None,
+) -> npt.NDArray[np.float64]:
+    """Fill a rectangle containing ``stored``, reusing its rows bit-for-bit.
+
+    Both callers hold the grid lock. Workers build separate eta columns;
+    deterministic nodes make scheduling independent of the returned values.
+    """
+    n_columns = ix1 - ix0 + 1
+    n_rows = iy1 - iy0 + 1
+
+    def build_column(column: int) -> npt.NDArray[np.float64]:
+        i = ix0 + column
+        eta = math.exp(i / bins)
+        result = np.empty((n_rows, nodes))
+        for row in range(n_rows):
+            j = iy0 + row
+            if (
+                stored is not None
+                and 0 <= i - stored.ix0 < stored.values.shape[0]
+                and 0 <= j - stored.iy0 < stored.values.shape[1]
+            ):
+                result[row] = stored.values[i - stored.ix0, j - stored.iy0]
+            else:
+                result[row] = gs_scaled_deflection_table(
+                    eta, math.exp(j / bins), n_u=nodes, n_mu=_GS_TABLE_MU_BINS
+                )
+        return result
+
+    new_cells = n_columns * n_rows
+    if stored is not None:
+        new_cells -= stored.values.shape[0] * stored.values.shape[1]
+    workers = max_workers
+    if workers is None:
+        small = new_cells < _PARALLEL_BUILD_THRESHOLD
+        workers = 1 if small else min(n_columns, os.cpu_count() or 1, _BUILD_WORKER_CAP)
+
+    started = time.perf_counter()
+    if workers > 1:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            columns = list(pool.map(build_column, range(n_columns)))
+    else:
+        columns = [build_column(column) for column in range(n_columns)]
+    values = np.stack(columns)
+    _log.info(
+        "built the Goudsmit-Saunderson grid: %d x %d tables of %d bins "
+        "(%d new, %d reused) in %.1f s (%d workers)",
+        n_columns,
+        n_rows,
+        nodes,
+        new_cells,
+        n_columns * n_rows - new_cells,
+        time.perf_counter() - started,
+        workers,
+    )
+    values.flags.writeable = False
+    return values
 
 
 def build_gs_grid(
@@ -991,7 +1174,7 @@ def build_gs_grid(
     iy_top = math.floor(math.log(theta2_max) * bins) + 1
 
     use_disk = theta2_min is None and n_u is None and bins_per_log is None
-    key = (ix0, ix_top, iy0, iy_top, nodes, bins, _RAW_SAMPLES)
+    key = (ix0, ix_top, iy0, iy_top, nodes, bins, _RAW_SAMPLES, _GS_TABLE_MU_BINS)
     with _grid_cache_lock:
         cached = _grid_cache.get(key)
         if cached is not None:
@@ -1028,54 +1211,10 @@ def build_gs_grid(
                 ix_top = max(ix_top, s_ix_top)
                 iy_top = max(iy_top, s_iy_top)
 
-        n_columns = ix_top - ix0 + 1
-        n_rows = iy_top - iy0 + 1
-
-        def build_column(column: int) -> npt.NDArray[np.float64]:
-            i = ix0 + column
-            eta = math.exp(i / bins)
-            result = np.empty((n_rows, nodes))
-            for row in range(n_rows):
-                j = iy0 + row
-                if (
-                    stored is not None
-                    and 0 <= i - stored.ix0 < stored.values.shape[0]
-                    and 0 <= j - stored.iy0 < stored.values.shape[1]
-                ):
-                    result[row] = stored.values[i - stored.ix0, j - stored.iy0]
-                else:
-                    result[row] = gs_scaled_deflection_table(eta, math.exp(j / bins), n_u=nodes)
-            return result
-
-        new_cells = n_columns * n_rows
-        if stored is not None:
-            new_cells -= stored.values.shape[0] * stored.values.shape[1]
-        workers = max_workers
-        if workers is None:
-            small = new_cells < _PARALLEL_BUILD_THRESHOLD
-            workers = 1 if small else min(n_columns, os.cpu_count() or 1, _BUILD_WORKER_CAP)
-
-        started = time.perf_counter()
-        if workers > 1:
-            with ThreadPoolExecutor(max_workers=workers) as pool:
-                columns = list(pool.map(build_column, range(n_columns)))
-        else:
-            columns = [build_column(column) for column in range(n_columns)]
-        values = np.stack(columns)
-        _log.info(
-            "built the Goudsmit-Saunderson grid: %d x %d tables of %d bins "
-            "(%d new, %d reused) in %.1f s (%d workers)",
-            n_columns,
-            n_rows,
-            nodes,
-            new_cells,
-            n_columns * n_rows - new_cells,
-            time.perf_counter() - started,
-            workers,
-        )
+        values = _fill_rectangle(ix0, ix_top, iy0, iy_top, stored, nodes, bins, max_workers)
         grid = GSGridTables(values=values, ix0=ix0, iy0=iy0, n_u=nodes, bins_per_log=bins)
         if cache_file is not None:
-            _save_grid_cache(cache_file, grid)
+            _try_save_grid_cache(cache_file, grid)
         _grid_cache[key] = grid
         return grid
 
