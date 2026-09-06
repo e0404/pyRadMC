@@ -14,7 +14,7 @@ from __future__ import annotations
 import importlib
 from typing import TYPE_CHECKING, Any
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 
 # --- accuracy-defining defaults ------------------------------------------------
 # Changing any of these requires a test demonstrating the dosimetric effect.

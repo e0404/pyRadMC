@@ -49,7 +49,7 @@ the cheapest sanity check available, and worth keeping in your own scripts.
 
 ```python
 print(result.provenance.summary())
-# pyradmc 0.2.0 ref/cpu seed=20260726 pcut=0.05 ecut=0.2 msc=gs step=0.2 xs=[analytic ...]
+# pyradmc 0.2.1 ref/cpu seed=20260726 pcut=0.05 ecut=0.2 msc=gs step=0.2 xs=[analytic ...]
 ```
 
 A dose array outlives the process that made it. `result.provenance` records the version,
