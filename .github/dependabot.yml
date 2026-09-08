@@ -1,0 +1,67 @@
+# Dependabot keeps the CI action versions and the pre-commit hook revs current.
+#
+# The `pip` ecosystem is deliberately excluded: this is a dose engine whose
+# numbers depend on NumPy's `Generator` streams and SciPy's quadrature, so a
+# runtime dependency bump is a physics change that has to be argued and measured
+# (AGENTS.md 8), not merged because a bot opened it. The Goudsmit-Saunderson grid
+# cache keys itself on the NumPy feature version for exactly this reason.
+version: 2
+
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+
+    # Dependabot targets the repository's default branch, which is `main` — and
+    # `main` accepts merge commits from `rc/*` only (AGENTS.md 9.3). Send these
+    # to the integration branch instead, where every other change lands.
+    target-branch: develop
+
+    # One PR for all of them. These move together, they are verified by the same
+    # CI run, and a separate PR per action would be five reviews of one decision.
+    groups:
+      actions:
+        patterns: ["*"]
+
+    # `ci(deps): bump ...`, the convention of AGENTS.md 9.2. The PR title is the
+    # squash-merge subject on `develop`, so it is held to that shape in review.
+    commit-message:
+      prefix: ci
+      include: scope
+
+    labels:
+      - dependencies
+      - ci
+    open-pull-requests-limit: 5
+
+  # The revs in .pre-commit-config.yaml are the single authority for the lint and
+  # format gates -- CI runs `pre-commit run --all-files` rather than re-listing the
+  # tools -- so today they move only when someone runs `pre-commit autoupdate` on
+  # their own machine. A pull request puts that change in front of a green CI run
+  # instead.
+  - package-ecosystem: pre-commit
+    directory: /
+    schedule:
+      interval: weekly
+    target-branch: develop
+
+    # Deliberately NOT grouped. The two hook repos have very different blast
+    # radius: a pre-commit-hooks bump is housekeeping, while a ruff bump can
+    # reformat the tree (one once graduated Markdown formatting out of preview and
+    # rewrote the README). Keeping ruff in its own pull request makes "the format
+    # gate moved" the whole subject of that review.
+    #
+    # Note for whoever takes a ruff bump: pyproject.toml carries a paired
+    # `ruff>=0.15.1,<0.16` bound so a local ruff stays in step with the rev.
+    # Dependabot does not know the two are coupled -- raise that bound by hand in
+    # the same pull request, or they drift.
+
+    commit-message:
+      prefix: ci
+      include: scope
+
+    labels:
+      - dependencies
+      - ci
+    open-pull-requests-limit: 5
