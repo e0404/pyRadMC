@@ -195,7 +195,9 @@ figure beside itself that a physicist can sanity-check at a glance. They need th
 `electron_transport_demo.py` (buildup vs the KERMA approximation, R50 tracking the CSDA
 range), `warp_backend_demo.py` (one physics source compiled three ways),
 `dij_demo.py` (a beamlet column, the fluence-sum identity, a wedge plan as
-`Dij @ weights`), `tabulated_demo.py` (EPDL/EEDL cross-sections), `materials_demo.py`
+`Dij @ weights`), `dij_plan_sigma_demo.py` (plan-dose sigma from the column variances:
+exact for independent columns, a lower bound for correlated ones, against a direct
+forward run), `tabulated_demo.py` (EPDL/EEDL cross-sections), `materials_demo.py`
 (bone/lung heterogeneity), `ct_demo.py` (dose on a CT), `dose_grid_demo.py` (decoupled
 scoring grid and dose-to-water), `spectral_source_demo.py` (6 MV polyenergetic fan),
 `collimation_demo.py` (staircase MLC field), `virtual_source_demo.py`

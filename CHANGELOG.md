@@ -9,6 +9,28 @@ computed dose is listed under `Changed` or `Fixed` even when it is an improvemen
 the measured size of the effect where one was taken. A user re-running last month's plan
 must be able to find out from this file whether the numbers should have moved.
 
+## [Unreleased]
+
+No dose value, cutoff or tolerance changes.
+
+### Added
+
+- `examples/dij_plan_sigma_demo.py`: plan-dose uncertainty from the Dij, three ways —
+  quadrature of the column variances from an independent Dij, the same from a correlated
+  Dij, and a direct forward simulation — against the seed-to-seed spread of the plan
+  dose, at 2, 1 and 0.5 cm beamlet pitch. The quadrature is exact for independent columns
+  and equals the direct run's batch sigma; for correlated columns (the shipped default)
+  it under-reports the plan variance by a measured 1.02 / 1.07 / 1.4 at those pitches,
+  because the positive cross-column covariance is not carried. Pinned on the reference
+  engine in `tests/dij/test_dij_correlated.py`.
+
+### Changed
+
+- The correlated-columns constraint (AGENTS.md section 8, validation page) is now
+  quantified as above rather than stated as a blanket prohibition; the
+  `DijResult.variance_csc` caveat says what the quadrature omits and points at the
+  measurement. The export itself is unchanged.
+
 ## [0.2.1] — 2026-09-06
 
 Startup and caching only. No dose value, cutoff or tolerance changes; a plan re-run

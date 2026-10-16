@@ -303,12 +303,18 @@ current defaults — are in `docs/decisions.md`.
 
 These outlive the work that produced them. Each is a live constraint, not history.
 
-- **Never combine Dij column sigmas in quadrature.** Under correlated sampling — the
-  shipped default — columns are statistically *dependent*. Per-column sigmas stay valid
-  (per-beamlet QA is unaffected), but a sum across columns, i.e. a plan dose, must not
-  quadrature-combine them. A valid plan-dose sigma needs per-batch scoring, which
-  `DijResult` does not carry and therefore does not expose. `variance_csc()` exports
-  per-column variance and warns. Do not reintroduce a quadrature plan-dose sigma anywhere.
+- **A quadrature plan-dose sigma from a correlated Dij is a lower bound, not an
+  estimate.** Under correlated sampling — the shipped default — columns are statistically
+  *dependent*, with positive covariance at the beamlet pitch. Per-column sigmas stay valid
+  (per-beamlet QA is unaffected) and `variance_csc()` exports them with a warning, but
+  `variance @ w**2` for a plan omits that covariance and under-reports the plan's noise by
+  a factor that grows with beamlet resolution: measured 1.02 (2 cm beamlets), 1.07 (1 cm)
+  and 1.4 (0.5 cm) in variance, 6 MeV in water (`examples/dij_plan_sigma_demo.py`; pinned
+  on the reference engine in `tests/dij/test_dij_correlated.py`). The same quadrature
+  from an *independent* Dij (`correlated=False`) is exact, and equals the batch sigma of
+  a direct forward run. The library therefore does not combine columns itself: choosing
+  between an independent Dij, a direct forward run of the plan, or per-batch scoring
+  (which `DijResult` does not carry) is the adapter's decision, made knowing this.
 - **The 2 %/2 mm PDD gate is blocked on the benchmark, not on the data layer.** The
   validation tier gates at 5 %/3 mm against the EGSnrc curves. 2 %/2 mm was measured and is
   not reachable against this file: the limiter is the benchmark's missing geometry and

@@ -15,13 +15,15 @@ backend follows, exactly like the ``h`` mapping fixed in
 from the noise/bias study); ``correlated=False`` is the sanctioned test
 instrument (AGENTS.md 2.10) that the fluence-sum identity needs. A correlated
 Dij's columns are *not* statistically independent: per-column sigmas stay valid,
-but sigmas must never be combined across columns in quadrature. The result
-carries ``correlated`` so downstream code can tell.
+but their quadrature across columns under-reports a plan's noise
+(:class:`TestPlanVarianceQuadrature`). The result carries ``correlated`` so
+downstream code can tell.
 """
 
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from pyradmc.backends.ref.engine import ReferenceEngine
 from pyradmc.data.analytic import AnalyticCrossSections
@@ -263,3 +265,89 @@ class TestDifferenceVarianceCollapses:
         assert np.count_nonzero(mask) > 100, "mask too small to detect anything"
         ratio = var_corr[mask].sum() / var_ind[mask].sum()
         assert ratio < 0.25, f"difference-variance ratio {ratio:.3f}: correlation buys too little"
+
+
+class TestPlanVarianceQuadrature:
+    """What the column variances say about a plan's noise, in each mode.
+
+    The plan ``Dij @ w`` has the obvious variance estimate ``variance @ w**2``
+    (the quadrature of the column sigmas, the path a planning consumer takes
+    through ``variance_csc``). Measured against the seed-to-seed spread of the
+    plan dose itself:
+
+    - with **independent** columns the quadrature is exact — the columns are
+      independent estimators, so their variances add;
+    - with **correlated** columns it under-reports. Shared streams make the
+      corresponding histories of neighbouring beamlets translates of each other,
+      so their deposits in one voxel are *positively* correlated; that inflates
+      the variance of a sum by the covariance the quadrature cannot see, exactly
+      as it deflates the variance of a difference
+      (:class:`TestDifferenceVarianceCollapses`). The marginal column variances
+      do not change between modes, so the quadrature is numerically the *same*
+      estimate in both; only its meaning does.
+
+    The covariance lives at the beamlet pitch, so the pin uses fine beamlets
+    (0.5 cm) with electron transport on (a photon-only history deposits at a few
+    points and shows little of it). Measured on this configuration over four
+    disjoint 12-seed sets: independent 0.999 +- 0.041 (range 0.96-1.06),
+    correlated 1.16 +- 0.05 (range 1.10-1.22); at demo scale
+    (``examples/dij_plan_sigma_demo.py``, 40x40 beamlets, CUDA) the correlated
+    ratio reaches 1.4. Seeds are fixed, so the assertion is deterministic; the
+    windows sit outside every measured set.
+    """
+
+    N_SEEDS = 12
+    N_X = 4
+    PITCH = 0.5
+
+    def _plan_and_quadrature(self, correlated: bool) -> tuple[np.ndarray, np.ndarray]:
+        grid = VoxelGrid.uniform_water(shape=(16, 8, 12), spacing=(0.5, 1.0, 0.5))
+        xs = AnalyticCrossSections(geometry_densities=grid.max_density_by_material())
+        engine = ReferenceEngine(grid=grid, cross_sections=xs, rng=HostRNG())
+        lattice = BeamletGridSource(
+            energy=ENERGY,
+            z=Z0,
+            x_range=(3.0, 3.0 + self.N_X * self.PITCH),
+            y_range=(1.0, 7.0),
+            n_x=self.N_X,
+            n_y=1,
+        )
+        weights = np.full(self.N_X, 1.0 / self.N_X)
+        plans, quads = [], []
+        for s in range(self.N_SEEDS):
+            dij = engine.run_dij(
+                lattice,
+                n_histories_per_beamlet=200,
+                n_batches=4,
+                seed=SEED + s,
+                truncation=0.0,
+                correlated=correlated,
+            )
+            assert dij.correlated is correlated
+            plans.append(dij.dose_for_weights(weights))
+            if correlated:
+                with pytest.warns(UserWarning, match="statistically dependent"):
+                    variance = dij.variance_csc()
+            else:
+                variance = dij.variance_csc()  # no caveat: filterwarnings=error would trip
+            quads.append(np.asarray(variance @ weights**2).reshape(dij.grid_shape))
+        return np.stack(plans), np.stack(quads)
+
+    def _ratio(self, correlated: bool) -> float:
+        plans, quads = self._plan_and_quadrature(correlated)
+        var_empirical = np.var(plans, axis=0, ddof=1)
+        var_quadrature = quads.mean(axis=0)
+        # Field footprint x 3..5 cm -> ix 6..9, y 1..7 cm -> iy 1..6, below the surface.
+        mask = np.zeros(var_empirical.shape, dtype=bool)
+        mask[6 : 6 + self.N_X, 1:7, 1:] = True
+        mask &= var_quadrature > 0.0
+        assert np.count_nonzero(mask) > 200, "mask too small to detect anything"
+        return float(var_empirical[mask].sum() / var_quadrature[mask].sum())
+
+    def test_quadrature_is_exact_for_independent_columns(self) -> None:
+        ratio = self._ratio(correlated=False)
+        assert 0.85 < ratio < 1.15, f"empirical/quadrature plan variance {ratio:.3f} != 1"
+
+    def test_quadrature_under_reports_correlated_plan_noise(self) -> None:
+        ratio = self._ratio(correlated=True)
+        assert ratio > 1.08, f"empirical/quadrature plan variance {ratio:.3f}: no covariance seen"
