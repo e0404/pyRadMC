@@ -97,6 +97,15 @@ docs/decisions.md for the full record and the emission-time-splitting alternativ
 ELECTRON_MASS_MEV: float = 0.510_998_950_69
 """Electron rest mass energy in MeV (CODATA 2022)."""
 
+MEV_C_PER_TESLA_CM: float = 2.997_924_58
+"""Magnetic rigidity unit: ``p[MeV/c] = this * B[T] * r[cm]`` for unit charge.
+
+Exact by SI definition: ``p = e B r`` with ``p`` in MeV/c is ``p[MeV/c] = c B r / 1e6``
+with ``c = 299 792 458 m/s`` and ``r`` in metres, i.e. ``2.99792458 B[T] r[cm]``. Used
+by :mod:`pyradmc.physics.lorentz` for the gyroradius of electrons and positrons in a
+static field; it lives here, next to the electron mass, so the two constants that fix
+the curvature scale are in one place."""
+
 GY_PER_MEV_PER_G: float = 1.602_176_634e-10
 """Absolute-dose calibration: 1 MeV/g = this many gray.
 
@@ -261,6 +270,7 @@ __all__ = [
     "GY_PER_MEV_PER_G",
     "LUNG",
     "MATERIALS",
+    "MEV_C_PER_TESLA_CM",
     "PCUT_MEV",
     "PHOTON_ROULETTE_MEV",
     "PHOTON_ROULETTE_SURVIVAL",

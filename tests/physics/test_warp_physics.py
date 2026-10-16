@@ -311,3 +311,160 @@ class TestDeterministicParity:
         )
         np.testing.assert_allclose(device_samples[:, 13], want_prob, rtol=self.RTOL)
         np.testing.assert_allclose(device_samples[:, 14], want_local, rtol=self.RTOL)
+
+
+# --- Lorentz-force primitives --------------------------------------------------
+# Deterministic closed forms, so the twin is host float64 on the *same float32
+# inputs* the device saw, at float32 tolerance. Inputs are generated on the host
+# from the fixed seed: no RNG is involved in the functions themselves.
+
+N_LORENTZ = 4_096
+LORENTZ_B_TESLA = 1.5
+
+
+@pytest.fixture(scope="module", params=DEVICES)
+def lorentz_device_values(request):
+    """The Lorentz primitives evaluated on each device over seeded float32 inputs."""
+    device = request.param
+    if device.startswith("cuda") and not wp.is_cuda_available():
+        pytest.skip("no CUDA device")
+
+    from pyradmc.backends.warp.physics import warp_physics
+
+    p = warp_physics()
+    momentum = p.momentum_mev_c
+    gyroradius = p.gyroradius_cm
+    rotate = p.rotate_about_axis
+    angle = p.lorentz_rotation_angle
+
+    rng = np.random.default_rng(SEED)
+    energy = np.exp(rng.uniform(np.log(0.05), np.log(20.0), N_LORENTZ)).astype(np.float32)
+    u = rng.normal(size=(N_LORENTZ, 3))
+    u /= np.linalg.norm(u, axis=1, keepdims=True)
+    a = rng.normal(size=(N_LORENTZ, 3))
+    a /= np.linalg.norm(a, axis=1, keepdims=True)
+    theta = rng.uniform(-np.pi, np.pi, N_LORENTZ)
+    theta[::8] = 0.0  # every eighth lane exercises the exact no-op guard
+    u = u.astype(np.float32)
+    a = a.astype(np.float32)
+    theta = theta.astype(np.float32)
+    chord = rng.uniform(1e-3, 0.5, N_LORENTZ).astype(np.float32)
+
+    @wp.kernel
+    def probe(
+        e_kin: wp.array(dtype=float),
+        ux: wp.array(dtype=float),
+        uy: wp.array(dtype=float),
+        uz: wp.array(dtype=float),
+        ax: wp.array(dtype=float),
+        ay: wp.array(dtype=float),
+        az: wp.array(dtype=float),
+        th: wp.array(dtype=float),
+        s: wp.array(dtype=float),
+        out: wp.array2d(dtype=float),
+    ):
+        tid = wp.tid()
+        out[tid, 0] = momentum(e_kin[tid])
+        r_g = gyroradius(e_kin[tid], LORENTZ_B_TESLA)
+        out[tid, 1] = r_g
+        vx, vy, vz = rotate(ux[tid], uy[tid], uz[tid], ax[tid], ay[tid], az[tid], th[tid])
+        out[tid, 2] = vx
+        out[tid, 3] = vy
+        out[tid, 4] = vz
+        # Rotate back: the inverse must undo the rotation in float32 too.
+        bx, by, bz = rotate(vx, vy, vz, ax[tid], ay[tid], az[tid], -th[tid])
+        out[tid, 5] = bx
+        out[tid, 6] = by
+        out[tid, 7] = bz
+        out[tid, 8] = angle(s[tid], r_g, False)
+        out[tid, 9] = angle(s[tid], r_g, tid >= 0)  # a runtime bool, as in the kernel
+
+    columns = (energy, *u.T, *a.T, theta, chord)
+    arrays = [wp.array(np.ascontiguousarray(c), dtype=float, device=device) for c in columns]
+    out = wp.zeros((N_LORENTZ, 10), dtype=float, device=device)
+    wp.launch(probe, dim=N_LORENTZ, inputs=arrays, outputs=[out], device=device)
+    wp.synchronize_device(device)
+    return {
+        "energy": energy.astype(np.float64),
+        "u": u.astype(np.float64),
+        "a": a.astype(np.float64),
+        "theta": theta.astype(np.float64),
+        "chord": chord.astype(np.float64),
+        "out": out.numpy().astype(np.float64),
+    }
+
+
+class TestLorentzParity:
+    """float32 device values of the Lorentz primitives against float64 host values."""
+
+    RTOL = 3e-5  # float32 arithmetic on well-conditioned closed forms
+    ATOL_DIRECTION = 4e-6  # a few float32 ulps of a unit-vector component
+
+    def test_momentum_matches_host(self, lorentz_device_values: dict) -> None:
+        from pyradmc.physics.lorentz import momentum_mev_c
+
+        e = lorentz_device_values["energy"]
+        want = np.array([momentum_mev_c(float(ei)) for ei in e])
+        np.testing.assert_allclose(lorentz_device_values["out"][:, 0], want, rtol=self.RTOL)
+
+    def test_gyroradius_matches_host(self, lorentz_device_values: dict) -> None:
+        from pyradmc.physics.lorentz import gyroradius_cm
+
+        e = lorentz_device_values["energy"]
+        want = np.array([gyroradius_cm(float(ei), LORENTZ_B_TESLA) for ei in e])
+        np.testing.assert_allclose(lorentz_device_values["out"][:, 1], want, rtol=self.RTOL)
+
+    def test_rotation_matches_host(self, lorentz_device_values: dict) -> None:
+        from pyradmc.physics.lorentz import rotate_about_axis
+
+        u = lorentz_device_values["u"]
+        a = lorentz_device_values["a"]
+        theta = lorentz_device_values["theta"]
+        want = np.array(
+            [rotate_about_axis(*ui, *ai, float(ti)) for ui, ai, ti in zip(u, a, theta, strict=True)]
+        )
+        got = lorentz_device_values["out"][:, 2:5]
+        np.testing.assert_allclose(got, want, rtol=self.RTOL, atol=self.ATOL_DIRECTION)
+
+    def test_rotation_preserves_unit_norm(self, lorentz_device_values: dict) -> None:
+        v = lorentz_device_values["out"][:, 2:5]
+        assert np.all(np.abs(np.einsum("ij,ij->i", v, v) - 1.0) < 1e-5)
+
+    def test_rotation_preserves_axial_component(self, lorentz_device_values: dict) -> None:
+        u = lorentz_device_values["u"]
+        a = lorentz_device_values["a"]
+        v = lorentz_device_values["out"][:, 2:5]
+        np.testing.assert_allclose(
+            np.einsum("ij,ij->i", a, v), np.einsum("ij,ij->i", a, u), atol=1e-5
+        )
+
+    def test_zero_angle_is_bit_exact_on_device(self, lorentz_device_values: dict) -> None:
+        """The B = 0 guard must return the input floats untouched in float32 too."""
+        zero = lorentz_device_values["theta"] == 0.0
+        assert np.count_nonzero(zero) == N_LORENTZ // 8
+        u = lorentz_device_values["u"][zero]
+        v = lorentz_device_values["out"][zero, 2:5]
+        assert np.array_equal(u, v)
+
+    def test_inverse_rotation_undoes_in_float32(self, lorentz_device_values: dict) -> None:
+        u = lorentz_device_values["u"]
+        back = lorentz_device_values["out"][:, 5:8]
+        np.testing.assert_allclose(back, u, atol=1e-5)
+
+    def test_rotation_angle_matches_host_and_sign(self, lorentz_device_values: dict) -> None:
+        from pyradmc.physics.lorentz import lorentz_rotation_angle
+
+        s = lorentz_device_values["chord"]
+        r_g = lorentz_device_values["out"][:, 1]
+        electron = lorentz_device_values["out"][:, 8]
+        positron = lorentz_device_values["out"][:, 9]
+        want = np.array(
+            [
+                lorentz_rotation_angle(float(si), float(ri), False)
+                for si, ri in zip(s, r_g, strict=True)
+            ]
+        )
+        np.testing.assert_allclose(electron, want, rtol=self.RTOL)
+        np.testing.assert_allclose(positron, -want, rtol=self.RTOL)
+        assert np.all(electron > 0.0)
+        assert np.all(positron < 0.0)

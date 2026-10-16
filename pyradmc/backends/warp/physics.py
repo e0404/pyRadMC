@@ -55,6 +55,7 @@ _KERNEL_MODULES: dict[str, tuple[str, ...] | None] = {
     "pyradmc.physics.brems": None,
     "pyradmc.physics.rayleigh": None,
     "pyradmc.physics.roulette": None,
+    "pyradmc.physics.lorentz": None,
     "pyradmc.data.tables": ("lookup_loglinear_1d", "lookup_loglinear_2d"),
     "pyradmc.geometry.grid": (
         "point_inside",
