@@ -41,13 +41,23 @@ gate, and do not expect a different data layer to close the gap.
 
 ### Correlated columns are statistically dependent
 
-Under the shipped default, per-column Dij sigmas may **not** be combined in quadrature to
-form a plan-dose sigma. A valid plan-dose sigma requires per-batch scoring, which
-`DijResult` does not carry and therefore does not expose. `variance_csc()` exports
-per-column variance and warns.
+Under the shipped default, per-column Dij sigmas combined in quadrature
+(`variance @ weights**2`) give a **lower bound** on a plan's noise, not an estimate of
+it. Shared streams make corresponding histories of neighbouring beamlets translates of
+each other, so their deposits in one voxel are positively correlated; that covariance
+inflates the variance of a sum exactly as it deflates the variance of a difference, and
+the quadrature cannot see it. Measured against the seed-to-seed spread of the plan dose
+(`examples/dij_plan_sigma_demo.py`, 6 MeV, water, uniform weights), the true plan variance
+exceeds the quadrature by a factor of 1.02 at 2 cm beamlets, 1.07 at 1 cm and 1.4 at
+0.5 cm. The same quadrature from an *independent* Dij (`correlated=False`) is exact at
+every pitch and matches the batch sigma of a direct forward run. `variance_csc()` exports
+per-column variance and warns on a correlated Dij; the reference engine pins both
+statements in `tests/dij/test_dij_correlated.py`.
 
 This is a correctness trap rather than an inaccuracy: the individual numbers are right,
-and combining them the obvious way is wrong.
+and the numerically identical quadrature means something different in each mode. A
+plan-dose sigma from batch-resolved scoring, which `DijResult` does not carry, would be
+exact in either; the choice among the routes belongs to the planning adapter.
 
 ### Soft-spectrum columns are not gated against the analytic backend
 

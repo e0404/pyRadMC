@@ -199,11 +199,14 @@ class DijResult:
     voxels that survived truncation; ``sigma`` is the matching per-entry standard
     error. Voxel indices are flat C-order over ``grid_shape``.
 
-    ``correlated`` records the stream mapping the Dij was computed under
-    . When True, columns share random streams and are statistically
-    *dependent*: each per-entry ``sigma`` stays valid on its own, but sigmas
-    must never be combined across columns in quadrature — cross-column
-    covariance is not carried here.
+    ``correlated`` records the stream mapping the Dij was computed under.
+    When True, columns share random streams and are statistically
+    *dependent*: each per-entry ``sigma`` stays valid on its own, but their
+    quadrature across columns (``variance @ weights**2``) omits the positive
+    cross-column covariance, which is not carried here, and so under-reports a
+    plan's noise — increasingly at fine beamlet pitch (measured in
+    ``examples/dij_plan_sigma_demo.py``). From an independent Dij the same
+    quadrature is exact.
     """
 
     grid_shape: tuple[int, int, int]
@@ -282,21 +285,25 @@ class DijResult:
 
         The export a planning consumer stores as its dose-influence variance
         matrix (pyRadPlan's ``physical_dose_var``). Each entry is valid on its
-        own, but when the Dij was computed under **correlated sampling** (the
-        shipped default) the columns are statistically *dependent*, so any
-        cross-column combination of these variances — ``variance @ weights``, a
-        quadrature plan-dose sigma — is invalid (AGENTS.md section 8).
-        That known downstream use is why this export carries a
-        :func:`warnings.warn` result caveat when ``correlated`` is True; compute
-        a plan-dose sigma from batch-resolved data or an independent-columns run
-        instead.
+        own. When the Dij was computed under **correlated sampling** (the
+        shipped default) the columns are statistically *dependent* with positive
+        covariance, so the cross-column quadrature ``variance @ weights**2`` is a
+        *lower bound* on a plan's variance, not an estimate of it: the shortfall
+        is a measured factor of 1.02 / 1.07 / 1.4 at 2 / 1 / 0.5 cm beamlet pitch
+        (AGENTS.md section 8, ``examples/dij_plan_sigma_demo.py``). That known
+        downstream use is why this export carries a :func:`warnings.warn` result
+        caveat when ``correlated`` is True. From an independent-columns Dij
+        (``correlated=False``) the same quadrature is exact; a direct forward run
+        of the plan is exact in either mode.
         """
         if self.correlated:
             warnings.warn(
                 "this Dij was sampled with correlated columns: per-entry variances "
-                "are valid within a column, but combining them across columns "
-                "(e.g. a quadrature plan-dose variance) is invalid because the "
-                "columns are statistically dependent",
+                "are valid within a column, but the columns are statistically "
+                "dependent, so combining them across columns (e.g. a quadrature "
+                "plan-dose variance) omits their positive covariance and "
+                "under-reports the plan's noise, increasingly at fine beamlet pitch "
+                "(see examples/dij_plan_sigma_demo.py)",
                 UserWarning,
                 stacklevel=2,
             )

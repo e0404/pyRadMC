@@ -18,6 +18,18 @@ on a second, independent ground truth across six statistics levels, in water and
 a heterogeneity (`examples/noise_bias_study.py`). `correlated=False` survives only as a
 test instrument.
 
+**Correlated sampling makes plan sums noisier, not only differences quieter.** The
+covariance that collapses the variance of a column difference is positive, so it adds to
+the variance of a plan sum — and the quadrature of the column variances,
+`variance @ w**2`, cannot see it. Measured against the seed-to-seed spread of an
+open-field plan at uniform weights (`examples/dij_plan_sigma_demo.py`, 6 MeV, water,
+0.4 cm voxels): true variance / quadrature = 1.02 at 2 cm beamlets, 1.07 at 1 cm, 1.4 at
+0.5 cm; 1.00 at every pitch for independent columns, where the quadrature also equals a
+direct forward run's batch variance. The quadrature is numerically the *same* number in
+both modes (marginal column variances are mode-invariant); only its meaning changes. The
+library exports the column variances with a warning and leaves the plan-sigma route to
+the adapter: an independent Dij, a direct forward run, or batch-resolved scoring.
+
 **Compton splitting ships off** (`PHOTON_SPLIT_N = 1`). Built, unbiased, test-pinned at
 N = 2 — and dormant. Efficiency `1/(σ²·time)` came out below 1 on the analytic-water Dij,
 then again on a phase-space source at **0.75 / 0.48 / 0.28 for N = 2 / 4 / 8** — worse,
