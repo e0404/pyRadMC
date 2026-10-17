@@ -14,6 +14,10 @@ than the passes.
 | Central-axis depth dose, water | EGSnrc (maintainer-supplied) | **5 %/3 mm gamma** | passes |
 | Backend vs backend, device vs device | reference oracle | chi-squared detection oracle | passes |
 | Dij column truncation | DVH endpoints D2/D50/D98 | < 0.5 % | passes |
+| Charged-particle gyration in a magnetic field | analytic helix (Bielajew 1988) | radius within 1.5 %, handedness, straight along B | 0.1 % |
+| Backend vs backend, field on (water slabs, electron beam, tabulated spectral thorax at 1.5 T) | reference oracle | chi-squared detection oracle | passes |
+| Fano test in a field, 0.1 density ratio, 0.5 and 1 MeV, 0 / 0.35 / 1.5 T | Fano theorem (Bouchard et al. 2015) | gap-to-wall dose per mass within 1 % | 0.994-1.002; the field moves it by < 0.7 % |
+| Electron return effect, water / light gap / water | qualitative sign (Raaijmakers 2005) | gain before the gap, loss behind it, lateral push toward the Lorentz force | passes |
 
 Variance reduction is unbiased **by construction** and test-pinned as such against a
 roulette-free run; the validation gates pass with it active.
@@ -64,6 +68,31 @@ exact in either; the choice among the routes belongs to the planning adapter.
 Below ~1 MeV the analytic cross-section layer is an explicitly few-percent
 parameterization (Klein-Nishina without binding, a crude photoelectric power law, no
 Rayleigh). Use the tabulated backend where the soft spectrum matters.
+
+### Magnetic-field dose is not yet gated against published benchmarks
+
+The Lorentz step is pinned against the analytic helix, against the reference engine
+with the field on (including the tabulated spectral thorax at 1.5 T) and by the Fano
+test in a field at lung-like density ratios, and the electron return effect comes out
+with the right sign and shape. What is missing is a quantitative gate against an
+independent code or measurement: Raaijmakers' film phantoms (PMMA-air-PMMA, 0.6 and
+1.3 T), the water-lung-water interface excursions of Ahmad et al. and Li et al. at
+1.5 T, and EGSnrc's EEMF slab example. The maintainer is collecting those curves and
+TOPAS/EGSnrc runs of the example geometry; until they land, treat magnetic-field dose
+as *validated for internal consistency*, not against the literature.
+
+Two standing caveats. Outside the transport grid there is no field, so an MR-linac
+setup must extend the grid with air voxels to the phase-space plane. And the
+field-free engine fails the Fano test at a **thousandfold** density contrast (water /
+air): gap-to-wall dose per mass of 2.9 for a 0.2 cm air-density gap at 0.5 MeV (5.1 for
+0.1 cm; +1 to +3 % still at a hundredfold contrast and 2 cm), from the random hinge's
+second chord crossing a voxel face after the deflection and filing a wall substep's
+energy loss into the light voxel. That
+artifact predates the field and is a stepping limitation (docs/decisions.md); it sits
+in the last millimetre before an air face, exactly where the electron return effect
+peaks, so the ERE *magnitude* there carries it while the sign, the lateral push and the
+downstream re-build-up do not. The air-density Fano cases stay in the validation tier
+as strict expected failures so the fix is noticed when it lands.
 
 ### Absolute CPU variance-reduction cost is unmeasured
 

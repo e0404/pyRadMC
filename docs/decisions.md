@@ -342,6 +342,27 @@ never arithmetic.
 **A phase space must be normalized per original primary**, not per stored record. Caught
 by a demo whose absolute dose was wrong, not by a unit test; now regression-pinned.
 
+**The random hinge's second chord can cross a voxel face, and at air contrast that
+dominates the light voxel's dose.** Found 2026-10-17 by the Fano test in a field, at
+*zero* field: a water / air-density / water slab shows gap-to-wall dose-per-mass of 5.1
+and 2.9 for 0.1 and 0.2 cm gaps at 0.5 MeV, and a 2 cm gap at a hundredfold contrast
+still +1.0 % (0.5 MeV) and +3.0 % (1 MeV). The voxel-face cap
+is taken along the pre-hinge direction; after the deflection the second chord may end in
+the neighbouring voxel, and its share of the substep's energy loss — computed with the
+start voxel's density — is filed there. A reference-engine histogram of the gap deposits
+shows the physical chord deposits alone satisfy Fano, while 0.01-0.2 MeV lumps carry the
+excess; the lumps vanish as the substep fraction shrinks (6.8 MeV at f = 0.20, 0.14 at
+0.05, 0 at 0.02 over the same 60 000 histories). This is the residual of the interface
+artifact reduced from 1.95x to under 1.4x at CT contrast above, and it is why the
+Fano-in-field gate runs at a 0.1 density ratio with the air-density cases kept as strict
+expected failures. (Building that gate taught a second lesson: a light slab open to the
+phantom's lateral faces loses electrons sideways over its metre-scale range with nothing
+replacing them — a 17-23 % field-free deficit at a hundredfold contrast on an 8 cm wide
+phantom — so the slab is embedded laterally in water.) The fix — cap the post-hinge chord at the face along its new
+direction, or DPM's stopping-power-ratio scaling — is a stepping change on the
+accuracy-defining list, and it bears directly on the electron return effect's magnitude
+in the last millimetre before an air face.
+
 **Flipping a validated default re-rolls every fixed-seed statistical test.** Expect around
 a 1 % trip rate across the suite, and repair those by fixing the oracle, never by
 loosening the tolerance.

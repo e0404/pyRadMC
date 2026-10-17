@@ -34,6 +34,7 @@ from pyradmc.backends.ref.engine import ReferenceEngine  # noqa: E402
 from pyradmc.data.tabulated import build  # noqa: E402
 from pyradmc.data.tabulated.precompile import compile_materials  # noqa: E402
 from pyradmc.data.tabulated.source import TabulatedCrossSections  # noqa: E402
+from pyradmc.geometry.field import MagneticField  # noqa: E402
 from pyradmc.geometry.source import SpectralBeamSource  # noqa: E402
 from pyradmc.geometry.spectrum import ali_rogers_mv  # noqa: E402
 from pyradmc.rng.host import HostRNG  # noqa: E402
@@ -79,7 +80,12 @@ def _depth_energy_profile(dose: np.ndarray, grid) -> np.ndarray:
 
 
 @pytest.mark.gpu
-def test_gs_thorax_depth_profile_agrees_across_backends(thorax) -> None:
+@pytest.mark.parametrize(
+    "magnetic_field",
+    [None, MagneticField.uniform((1.5, 0.0, 0.0))],
+    ids=["field-free", "transverse-1.5T"],
+)
+def test_gs_thorax_depth_profile_agrees_across_backends(thorax, magnetic_field) -> None:
     """Ref and Warp CUDA agree in laterally-integrated depth dose under GS f=0.20.
 
     The calibrated chi-squared runs over every z-slab carrying more than 1
@@ -87,6 +93,12 @@ def test_gs_thorax_depth_profile_agrees_across_backends(thorax) -> None:
     which a port defect anywhere in the GS path (window, cast, keying, blend,
     cap conditional) shows up as depth-profile drift. A scalar check on total
     deposited energy backs it up with an interpretable magnitude.
+
+    The transverse 1.5 T case is the realistic-geometry gate for the Lorentz
+    step (spectral, heterogeneous, tabulated — AGENTS.md section 8): lung and
+    air margins are where the gyration cap binds and the electron return effect
+    moves dose, so a twin defect in the bent chords or the field lookup shows
+    here where the water slabs of the integration tier would not see it.
     """
     if not wp.is_cuda_available():
         pytest.skip("no CUDA device")
@@ -97,7 +109,9 @@ def test_gs_thorax_depth_profile_agrees_across_backends(thorax) -> None:
 
     ref_profiles = []
     ref_totals = []
-    engine = ReferenceEngine(grid=grid, cross_sections=xs, rng=HostRNG())
+    engine = ReferenceEngine(
+        grid=grid, cross_sections=xs, rng=HostRNG(), magnetic_field=magnetic_field
+    )
     for s in range(N_SEEDS):
         result = engine.run(
             source,
@@ -110,7 +124,9 @@ def test_gs_thorax_depth_profile_agrees_across_backends(thorax) -> None:
         ref_profiles.append(_depth_energy_profile(result.dose, grid))
         ref_totals.append(result.energy_deposited / result.n_histories)
 
-    warp_engine = WarpEngine(grid=grid, cross_sections=xs, device="cuda:0")
+    warp_engine = WarpEngine(
+        grid=grid, cross_sections=xs, device="cuda:0", magnetic_field=magnetic_field
+    )
     warp_profiles = []
     warp_totals = []
     for s in range(N_SEEDS):
