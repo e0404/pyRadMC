@@ -54,9 +54,11 @@ from pyradmc import (
 from pyradmc.backends.warp.physics import warp_physics
 from pyradmc.data.interface import _GS_BINS_PER_LOG, _GS_THETA2_MIN, PhotonProcess
 from pyradmc.data.materials import WATER
+from pyradmc.geometry.field import FIELD_NONE
 from pyradmc.rng.warp_shim import WarpRNGState, init_slot, spawn_stream, uniform
 from pyradmc.transport.electron import (
     BOUNDARY_NUDGE_CM,
+    LORENTZ_STEP_ANGLE_MAX,
     STEP_HINGE_THETA2_MAX,
 )
 from pyradmc.transport.particles import ELECTRON, PHOTON, POSITRON
@@ -148,6 +150,10 @@ cylinder_contains = _p.cylinder_contains
 cylinder_radius_squared = _p.cylinder_radius_squared
 edge_bin_index = _p.edge_bin_index
 substep_pieces = _p.substep_pieces
+field_at = _p.field_at
+gyroradius_cm = _p.gyroradius_cm
+lorentz_rotation_angle = _p.lorentz_rotation_angle
+rotate_about_axis = _p.rotate_about_axis
 slab_entry_distance = _p.slab_entry_distance
 distance_to_voxel_boundary = _p.distance_to_voxel_boundary
 
@@ -1655,6 +1661,42 @@ def electron_kernel(
         rho = density[ix, iy, iz]
         mat = int(material[ix, iy, iz])  # uint8 voxel map -> table row index
 
+        # --- magnetic field at the substep start (mirror of the reference loop) --
+        # b_mode == FIELD_NONE is the field-free world: nothing below executes, so
+        # the kernel's arithmetic and random stream are those of the pre-field code.
+        has_field = False
+        b_mag = 0.0
+        b_ux = 0.0
+        b_uy = 0.0
+        b_uz = 0.0
+        if gi.b_mode != FIELD_NONE:
+            bx, by, bz = field_at(
+                gi.b_values,
+                gi.b_mode,
+                gi.b0x,
+                gi.b0y,
+                gi.b0z,
+                gi.b_ox,
+                gi.b_oy,
+                gi.b_oz,
+                gi.b_sx,
+                gi.b_sy,
+                gi.b_sz,
+                gi.b_nx,
+                gi.b_ny,
+                gi.b_nz,
+                x,
+                y,
+                z,
+            )
+            b2 = bx * bx + by * by + bz * bz
+            if b2 > 0.0:
+                b_mag = math.sqrt(b2)
+                b_ux = bx / b_mag
+                b_uy = by / b_mag
+                b_uz = bz / b_mag
+                has_field = True
+
         # --- substep length ----------------------------------------------------
         range_cm = (
             lookup_2d(tab.csda_range, mat, tab.e_log_e_min, tab.e_inv_dlog, tab.n_points, e) / rho
@@ -1674,8 +1716,12 @@ def electron_kernel(
                 * rho
             )
             s_max = min(s_max, s_theta)
+        if has_field:
+            # Curvature cap (LORENTZ_STEP_ANGLE_MAX), as in the reference loop.
+            s_max = min(s_max, LORENTZ_STEP_ANGLE_MAX * gyroradius_cm(e, b_mag))
         # Cap at the next voxel face (plus the nudge across it) so the substep's
-        # density and material stay those of the voxel it starts in.
+        # density and material stay those of the voxel it starts in (to within the
+        # chord's bend under a field; see the reference loop).
         s_boundary = (
             distance_to_voxel_boundary(
                 x,
@@ -1751,6 +1797,12 @@ def electron_kernel(
             d1 = continuous * (s1 / s)
         d2 = continuous - d1
 
+        # Under a field each chord runs along its midpoint direction: half the
+        # gyration angle before, half after (mirror of the reference loop).
+        half = 0.0
+        if has_field:
+            half = 0.5 * lorentz_rotation_angle(s1, gyroradius_cm(e - 0.5 * d1, b_mag), is_positron)
+            ux, uy, uz = rotate_about_axis(ux, uy, uz, b_ux, b_uy, b_uz, half)
         _deposit_spread(
             edep,
             escaped,
@@ -1775,6 +1827,8 @@ def electron_kernel(
         x += ux * s1
         y += uy * s1
         z += uz * s1
+        if has_field:
+            ux, uy, uz = rotate_about_axis(ux, uy, uz, b_ux, b_uy, b_uz, half)
         if not point_inside(x, y, z, gi.x_lo, gi.y_lo, gi.z_lo, gi.x_hi, gi.y_hi, gi.z_hi):
             _escape(escaped, w * (e + latent))
             return
@@ -1854,6 +1908,10 @@ def electron_kernel(
                 )
             e -= k
 
+        half = 0.0
+        if has_field:
+            half = 0.5 * lorentz_rotation_angle(s2, gyroradius_cm(e - 0.5 * d2, b_mag), is_positron)
+            ux, uy, uz = rotate_about_axis(ux, uy, uz, b_ux, b_uy, b_uz, half)
         _deposit_spread(
             edep,
             escaped,
@@ -1878,6 +1936,8 @@ def electron_kernel(
         x += ux * s2
         y += uy * s2
         z += uz * s2
+        if has_field:
+            ux, uy, uz = rotate_about_axis(ux, uy, uz, b_ux, b_uy, b_uz, half)
         if not point_inside(x, y, z, gi.x_lo, gi.y_lo, gi.z_lo, gi.x_hi, gi.y_hi, gi.z_hi):
             _escape(escaped, w * (e + latent))
             return
