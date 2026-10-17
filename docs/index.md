@@ -46,6 +46,11 @@ enough for beamlet-resolved planning, and readable.
 - **Planning-grade statistics** through variance reduction rather than brute force.
 - **Cross-sections behind an interface**, so analytic and tabulated data are the same
   engine and the same API.
+- **A static magnetic field is world data.** For MR-linac dose, a
+  `MagneticField` (uniform, per voxel, or a trilinear map on its own grid) is handed to
+  the engine next to the grid; charged particles are bent by the Lorentz force in both
+  backends, photons are unaffected, and without a field the engines are byte-identical
+  to before the field existed. There is no switch.
 
 ## What it deliberately does not do
 

@@ -86,6 +86,19 @@ Swap in `WarpEngine(grid=..., cross_sections=..., device="cuda:0")` for the prod
 the `run` signatures are identical. Everything importable from the top-level `pyradmc`
 namespace is public API.
 
+For MR-linac geometries, a static magnetic field is world data handed to either engine at
+construction — `magnetic_field=MagneticField.uniform((0.0, 0.0, 1.5))`, or a per-voxel or
+trilinear vector map on its own grid — and every charged particle is bent by the Lorentz force
+(photons are unaffected). Without a field the engines are byte-identical to before the field
+existed.
+
+![6 MV photons in a transverse field: the electron return effect](https://raw.githubusercontent.com/e0404/pyRadMC/main/docs/assets/magnetic_field_demo.png)
+
+`examples/magnetic_field_demo.py`: a water / air / water slab at 0, 0.35 and 1.5 T. Electrons
+leaving the upstream water into the air gyrate back and redeposit — the electron return
+effect — while the downstream slab, no longer fed across the gap, rebuilds from its own
+surface; the lateral profile before the gap skews in the direction of the Lorentz force.
+
 From here, the [documentation](https://pyradmc.readthedocs.io/) carries the rest:
 [getting started](https://pyradmc.readthedocs.io/en/latest/getting-started/) (GPU runs, the
 influence matrix, pencil-beam kernels, a tour of the `examples/`),

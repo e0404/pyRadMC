@@ -270,6 +270,57 @@ flatness plus depth growth reads "scatter"; fan-coordinate constancy would read 
 tuning, texture-memory reads and step-fraction changes all measured neutral or negative.
 The kernel is divergence- and latency-bound. What remains is multi-GPU or algorithmic.
 
+## Magnetic field (MR-linac dose), 2026-10-17
+
+**The field is engine data, not a run option.** `MagneticField` goes to the engine
+constructor next to the grid and the cross-sections, is uploaded once per device inside
+the kernels' `GridInfo` struct (no kernel signature changed), and is recorded in the
+result's provenance. AGENTS.md 2.10: there is no switch; the only way to transport without
+a field is to not supply one. A gridded map must cover the transport grid — a zero fringe
+inside the grid would be a silent bias, so it is refused rather than clamped.
+
+**Each hinge chord follows the arc to second order: rotate by half the gyration angle,
+drift, rotate by the other half**, with the gyroradius at the chord's mid-energy. The
+chord of a circular arc lies along its midpoint direction, so this reproduces Bielajew's
+(1988) first-order displacement exactly and is closer to the arc at second order (end
+point within s theta^2/24), with the direction exact and the component along B conserved
+by construction — the property EGSnrc enforces by hand in its renormalisation (Malkov &
+Rogers 2016, Appendix A). No separate displacement term is added; it is already in the
+chord. Multiple scattering and the field stay decoupled within a substep, as in every
+production code.
+
+**The gyration-angle cap is 0.2 rad per substep** (`LORENTZ_STEP_ANGLE_MAX`), the value
+Malkov & Rogers validated against the Fano test for their higher-order scheme (stable to
+0.4; the historical first-order scheme needed 0.02 at two to three times the cost). It is
+gated here by the Fano test in a field and recorded as accuracy-defining. The voxel-face
+cap is still taken along the pre-rotation direction, so under a field a chord can end up to
+s theta/2 (tens of microns at 1 MeV, 1.5 T) off its straight-line prediction; the next
+substep re-reads its voxel. Stated at the cap.
+
+**Field-free results are byte-identical, by construction and by measurement.** The
+kernel branches once per substep on the field mode (the `msc_model_gs` precedent) and the
+field-free path executes no new floating-point operation and draws no random number.
+Measured interleaved on the RTX 4070 at healthy clocks: a uniform zero field or a zero
+trilinear map against no field 0.98 / 1.01 (noise); a 1.5 T field in water 1.05. The
+before/after dose bytes of a 6 MeV open field, an electron beam and a 2x2 Dij matched on
+the reference engine, Warp CPU and Warp CUDA after every slice. `wp.static`
+specialisation was kept as the fallback and was not needed.
+
+**Air is the cost.** In air the energy-limited step is metres and the voxel face used to
+bound the substep; under a field the gyration cap does, several times per voxel.
+Measured on a water / air / water slab, 6 MeV, 10x10 cm: 1.20x wall at 0.35 T and 2.27x
+at 1.5 T against the field-free run (Malkov & Rogers report +76 % with half the phantom
+air). An exact-helix low-density path (chord substeps without multiple-scattering or
+deposit work, the EGSnrc single-scattering-mode precedent) is the lever if this matters;
+it needs the Fano-in-field gate and a realistic-geometry measurement, not a guess.
+
+**Outside the transport grid there is no field.** The world beyond the grid stays vacuum,
+a charged particle born outside flies straight to the entry face, and one that leaves does
+not return. MR-linac setups extend the grid with real air voxels to the phase-space or head
+exit plane (the commissioning example's air-gap pattern). The head pre-solve's straight
+slide of contaminant electrons and the fringe field in the head are documented
+limitations, not loop code.
+
 ## Hazards learned the hard way
 
 **Kernel compilation could leak into host modules.** Loading the Warp physics patched

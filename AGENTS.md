@@ -15,7 +15,8 @@ CUDA GPU from a single physics source.
 
 It is a DPM-class code: macroscopic condensed-history electron transport with aggressive step
 sizes, tuned for 1 to 20 MeV in low-Z media. It is **not** a general-purpose Monte Carlo code
-and must not grow into one.
+and must not grow into one. Photon dose in a **static magnetic field** (MR-linac geometries)
+is in scope: the field is world data handed to the engine (section 2.10), never a run option.
 
 Target accuracy: approximately 2 to 3 percent per-beamlet statistical uncertainty (1 sigma) in
 the high-dose region.
@@ -166,7 +167,8 @@ silent misconfiguration downstream. Concretely:
 pyradmc/
   physics/     pure scalar functions: sampling, kinematics, energy loss
   data/        CrossSectionSource interface; analytic and tabulated backends; materials
-  geometry/    rectilinear voxel grid, Woodcock majorant, Source/BeamletSource interface
+  geometry/    rectilinear voxel grid, Woodcock majorant, Source/BeamletSource interface,
+               static magnetic field (MagneticField + the pure scalar lookup)
   transport/   photon and electron step loops, particle queues
   scoring/     dose scoring, batched Dij assembly
   rng/         RNG interface and per-target shims
@@ -345,6 +347,21 @@ These outlive the work that produced them. Each is a live constraint, not histor
   Changing one needs a test demonstrating the dosimetric effect, on realistic spectral and
   heterogeneous geometry — never on an analytic monoenergetic homogeneous phantom, which
   has been measured to be roughly twice as forgiving.
+- **The gyration-angle cap is accuracy-defining too.** `LORENTZ_STEP_ANGLE_MAX` (0.2 rad
+  per substep) is what keeps each straight chord on the gyration arc under a magnetic
+  field; it is the value Malkov & Rogers validated for EGSnrc and it is gated here by the
+  Fano test in a field (`tests/validation/test_fano_magnetic.py`). It binds below about
+  1.5 MeV in tissue at 1.5 T and on every substep in air, where it replaces the voxel
+  face as the limiter and multiplies the substep count. Changing it, or adding a
+  low-density fast path, needs that gate and a measurement on realistic geometry.
+- **Outside the transport grid there is no magnetic field.** The world beyond the grid
+  is vacuum and field-free: a charged particle born outside flies straight to the entry
+  face, and one that leaves does not come back. An MR-linac setup therefore extends the
+  transport grid with real air voxels to the phase-space or head exit plane; the head
+  pre-solve's straight slide of contaminant electrons and the fringe field in the head
+  are not modelled. The field-free path is pinned byte-identical to the pre-field
+  engines on each target, by test (`None` against an explicit zero field) and by a
+  one-off before/after byte comparison on ref, Warp CPU and CUDA.
 
 ## 9. Git workflow and commit convention
 

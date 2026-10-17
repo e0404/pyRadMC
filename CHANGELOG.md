@@ -11,10 +11,28 @@ must be able to find out from this file whether the numbers should have moved.
 
 ## [Unreleased]
 
-No dose value, cutoff or tolerance changes.
+No dose value, cutoff or tolerance changes. The magnetic-field work below leaves every
+field-free result byte-identical per target (measured on a 6 MeV open field, an electron
+beam and a 2x2 Dij on the reference engine, Warp CPU and Warp CUDA, before and after).
 
 ### Added
 
+- Charged-particle transport in a **static magnetic field** (MR-linac dose).
+  `pyradmc.MagneticField` — uniform, one vector per transport voxel, or a trilinear
+  vector map on its own rectilinear grid, in tesla and the engine frame — is handed to
+  `ReferenceEngine` and `WarpEngine` at construction as world data (never a run option);
+  a gridded map must cover the transport grid. Both engines bend every electron and
+  positron by the Lorentz force: each hinge chord is taken along its midpoint direction
+  (half rotation about B, drift, half rotation) with the gyroradius at the chord's
+  mid-energy, and a gyration-angle cap of 0.2 rad per substep
+  (`LORENTZ_STEP_ANGLE_MAX`, accuracy-defining) keeps the chords on the arc. Photons are
+  unaffected; `RunProvenance.magnetic_field` records the field. New physics primitives
+  in `pyradmc.physics.lorentz` and the constant `pyradmc.MEV_C_PER_TESLA_CM`. Pinned by
+  the gyroradius and handedness of a single electron, cross-backend chi-squared with the
+  field on, Dij scheduling invariance with the field on, the electron return effect in a
+  water / low-density / water slab, and the Fano test in a field (validation tier).
+  Demonstrated by `examples/magnetic_field_demo.py`. Outside the transport grid there is
+  no field (AGENTS.md section 8).
 - `examples/dij_plan_sigma_demo.py`: plan-dose uncertainty from the Dij, three ways —
   quadrature of the column variances from an independent Dij, the same from a correlated
   Dij, and a direct forward simulation — against the seed-to-seed spread of the plan
