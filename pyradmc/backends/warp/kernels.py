@@ -169,6 +169,12 @@ class GridInfo:
     through the build-up region and coarse ones in the tail — so their boundaries come
     from ``z_edges`` rather than from a single ``sz``. The ``x_*``/``y_*`` fields are
     unused; the lateral fields below replace them.
+
+    The static magnetic field travels here too (``b_*``), for the same reason: the
+    electron kernel is the single reader and every signature stays unchanged.
+    ``b_mode`` is one of the :mod:`pyradmc.geometry.field` mode constants;
+    ``FIELD_NONE`` (the field-free world) leaves the remaining members inert and
+    unread, like the cylindrical members at ``mode == 0``.
     """
 
     x_lo: float
@@ -194,6 +200,21 @@ class GridInfo:
     r_outer_sq: float
     r_edges_sq: wp.array(dtype=float)
     z_edges: wp.array(dtype=float)
+    # --- static magnetic field (b_mode != FIELD_NONE); inert and unread otherwise --
+    b_mode: int
+    b0x: float
+    b0y: float
+    b0z: float
+    b_ox: float
+    b_oy: float
+    b_oz: float
+    b_sx: float
+    b_sy: float
+    b_sz: float
+    b_nx: int
+    b_ny: int
+    b_nz: int
+    b_values: wp.array3d(dtype=wp.vec3)
 
 
 @wp.struct

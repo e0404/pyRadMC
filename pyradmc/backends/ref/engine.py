@@ -24,6 +24,7 @@ from pyradmc import (
 )
 from pyradmc.backends.results import RunProvenance, TransportResult
 from pyradmc.data.interface import CrossSectionSource
+from pyradmc.geometry.field import MagneticField
 from pyradmc.geometry.grid import VoxelGrid
 from pyradmc.geometry.source import BeamletSource, Source
 from pyradmc.progress import ProgressCallback, ProgressEmitter
@@ -74,6 +75,21 @@ class ReferenceEngine:
     grid: VoxelGrid
     cross_sections: CrossSectionSource
     rng: RNG
+    magnetic_field: MagneticField | None = None
+    """Static magnetic field the charged particles are bent by; ``None`` is the
+    field-free world and reproduces every pre-field result byte for byte. World
+    data, like ``grid``: a gridded map must cover the transport grid
+    (:meth:`~pyradmc.geometry.field.MagneticField.covers`), checked here once."""
+
+    def __post_init__(self) -> None:
+        """Refuse a gridded field map that does not cover the transport grid."""
+        if self.magnetic_field is not None and not self.magnetic_field.covers(self.grid):
+            raise ValueError(
+                "the magnetic field map does not cover the transport grid: "
+                f"field extent {self.magnetic_field.origin} to "
+                f"{self.magnetic_field.upper_corner} cm, grid {self.grid.origin} to "
+                f"{self.grid.upper_corner} cm"
+            )
 
     def _provenance(
         self,
@@ -105,6 +121,9 @@ class ReferenceEngine:
             ),
             cross_sections=self.cross_sections.provenance,
             deposit_resolution_cm=deposit_resolution_cm,
+            magnetic_field=(
+                None if self.magnetic_field is None else self.magnetic_field.provenance
+            ),
         )
 
     def run(
@@ -273,6 +292,7 @@ class ReferenceEngine:
                     step_energy_fraction=step_energy_fraction,
                     deposit_resolution_cm=deposit_resolution_cm,
                     msc_model=msc_model,
+                    field=self.magnetic_field,
                 )
             scorer.end_batch(per_batch)
             emitter.tick(per_batch)
@@ -437,6 +457,7 @@ class ReferenceEngine:
                         step_energy_fraction=step_energy_fraction,
                         deposit_resolution_cm=deposit_resolution_cm,
                         msc_model=msc_model,
+                        field=self.magnetic_field,
                     )
             scorer.end_batch(per_batch)
             emitter.tick(n_beamlets * per_batch)

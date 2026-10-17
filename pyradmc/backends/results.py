@@ -62,6 +62,12 @@ class RunProvenance:
     differ only here agree on the energy books and on any dose scored at voxel
     resolution, and can differ below it. That is exactly why it is recorded: it is
     not recoverable from the dose array."""
+    magnetic_field: str | None = None
+    """Provenance of the static magnetic field the charged particles were bent by,
+    from :attr:`~pyradmc.geometry.field.MagneticField.provenance`; ``None`` when the
+    engine was built without one (the field-free path, byte-identical to every
+    result produced before fields existed). The field is engine data, not a run
+    option, so it is recorded here rather than inferred from the engine later."""
 
     def summary(self) -> str:
         """One-line human-readable digest, for logs and file headers."""
@@ -69,7 +75,7 @@ class RunProvenance:
             f"pyradmc {self.version} {self.backend}/{self.device} seed={self.seed} "
             f"pcut={self.pcut_mev} ecut={self.ecut_mev} msc={self.msc_model} "
             f"step={self.step_energy_fraction} deposit_res={self.deposit_resolution_cm} "
-            f"xs=[{self.cross_sections}]"
+            f"xs=[{self.cross_sections}] B=[{self.magnetic_field}]"
         )
 
 

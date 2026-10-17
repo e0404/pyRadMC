@@ -12,6 +12,7 @@ is either deposited through the callback or returned as escaped.
 from __future__ import annotations
 
 from pyradmc.data.interface import CrossSectionSource
+from pyradmc.geometry.field import MagneticField
 from pyradmc.geometry.grid import VoxelGrid
 from pyradmc.rng import RNGState
 from pyradmc.transport.electron import electron_steps
@@ -49,6 +50,7 @@ def transport_history(
     step_energy_fraction: float | None = None,
     deposit_resolution_cm: float | None = None,
     msc_model: str = "gs",
+    field: MagneticField | None = None,
 ) -> float:
     """Transport one primary and all its descendants; returns the escaped energy.
 
@@ -89,6 +91,10 @@ def transport_history(
         :func:`~pyradmc.transport.electron.electron_steps`.
         See :func:`~pyradmc.transport.electron.electron_steps`, also for
         ``msc_model`` (default ``"gs"``, the shipped configuration).
+    field
+        Static magnetic field the charged particles move in, or ``None`` for the
+        field-free world. Photons never see it; it is handed to
+        :func:`~pyradmc.transport.electron.electron_steps` alone.
     """
     stack: list[StackEntry] = [(kind, energy, weight, x, y, z, ux, uy, uz)]
     escaped = 0.0
@@ -146,5 +152,6 @@ def transport_history(
                 step_energy_fraction=step_energy_fraction,
                 deposit_resolution_cm=deposit_resolution_cm,
                 msc_model=msc_model,
+                field=field,
             )
     return escaped

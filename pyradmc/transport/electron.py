@@ -48,6 +48,7 @@ from pyradmc import (
     PHOTON_ROULETTE_WEIGHT_CAP,
 )
 from pyradmc.data.interface import CrossSectionSource
+from pyradmc.geometry.field import MagneticField
 from pyradmc.geometry.grid import VoxelGrid, distance_to_voxel_boundary
 from pyradmc.physics.brems import bremsstrahlung_step_parameters, sample_bremsstrahlung_energy
 from pyradmc.physics.direction import rotate_direction
@@ -225,6 +226,7 @@ def electron_steps(
     step_energy_fraction: float | None = None,
     msc_model: str = "gs",
     deposit_resolution_cm: float | None = None,
+    field: MagneticField | None = None,
 ) -> float:
     """Transport one electron or positron; secondaries go to ``spawn``.
 
@@ -274,6 +276,14 @@ def electron_steps(
     model's validated fraction) — a measurement instrument for substep
     resolution studies. Changing a *default* is a maintainer decision gated
     on the validation tier, not a knob turn.
+
+    ``field`` is the static magnetic field the particle moves in, or ``None`` for
+    the field-free world. It is world data handed down from the engine, never a
+    per-run option (AGENTS.md 2.10). The Lorentz force does no work, so it enters
+    only through the direction of each chord and the step cap that keeps the chord
+    close to the gyration arc; the field-free path executes no field operation and
+    draws no random number, which is what keeps it byte-identical to every result
+    produced before fields existed.
     """
     if msc_model not in ("gaussian", "gs"):
         raise ValueError(f"unknown msc_model {msc_model!r}; expected 'gaussian' or 'gs'")
