@@ -30,6 +30,8 @@ installed; touching it then raises an error naming the extra to install.
 
 ::: pyradmc.geometry.grid.VoxelGrid
 
+::: pyradmc.geometry.field.MagneticField
+
 ::: pyradmc.scoring.grid.ScoringGrid
 
 ::: pyradmc.scoring.cylinder.CylindricalScoringGrid

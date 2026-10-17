@@ -152,6 +152,7 @@ if TYPE_CHECKING:
         MaterialData,
     )
     from pyradmc.data.tabulated.source import TabulatedCrossSections
+    from pyradmc.geometry.field import MagneticField
     from pyradmc.geometry.fluence import RadialFluence
     from pyradmc.geometry.grid import VoxelGrid
     from pyradmc.geometry.phasespace import InMemoryPhaseSpaceSource, PhaseSpaceSource
@@ -201,6 +202,7 @@ _LAZY_EXPORTS: dict[str, str] = {
     "InMemoryPhaseSpaceSource": "pyradmc.geometry.phasespace",
     "LUNG": "pyradmc.data.materials",
     "MATERIALS": "pyradmc.data.materials",
+    "MagneticField": "pyradmc.geometry.field",
     "MaterialData": "pyradmc.data.materials",
     "ParallelBeamSource": "pyradmc.geometry.source",
     "PencilBeamSource": "pyradmc.geometry.source",
@@ -291,6 +293,7 @@ __all__ = [
     "GaussianSpotBeamletSource",
     "HostRNG",
     "InMemoryPhaseSpaceSource",
+    "MagneticField",
     "MaterialData",
     "ParallelBeamSource",
     "PencilBeamSource",
