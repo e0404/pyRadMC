@@ -26,9 +26,11 @@ from pyradmc.data.materials import MATERIALS, WATER
 __all__ = [
     "VoxelGrid",
     "distance_to_voxel_boundary",
+    "nudge_across_face",
     "point_axis_index",
     "point_inside",
     "slab_entry_distance",
+    "voxel_face_axis",
 ]
 
 
@@ -221,6 +223,87 @@ def distance_to_voxel_boundary(
         result = min(result, (z_lo + float(iz) * sz - z) / uz)
 
     return max(result, 0.0)
+
+
+def voxel_face_axis(
+    x: float,
+    y: float,
+    z: float,
+    ux: float,
+    uy: float,
+    uz: float,
+    x_lo: float,
+    y_lo: float,
+    z_lo: float,
+    sx: float,
+    sy: float,
+    sz: float,
+    nx: int,
+    ny: int,
+    nz: int,
+) -> int:
+    """Axis (0, 1, 2) of the voxel face :func:`distance_to_voxel_boundary` measures to.
+
+    Same per-axis exit distances, same tie-breaking (the first axis attaining the
+    minimum), so a chord truncated at that distance ends on the face normal to this
+    axis. The electron loop carries a particle across a face it has reached by a
+    nudge along that normal (:func:`nudge_across_face`) rather than along its
+    direction: at grazing incidence the normal component of a direction-aligned
+    micron is below one float32 ulp of the coordinate, the position does not move,
+    and a particle that reaches the face with no in-voxel path left — a bent chord
+    under a magnetic field cut at the face, whose substep then ends without a hinge
+    — sits there for ever (measured 2026-10-18: a water / air slab at 1.5 T ran 7.6x
+    slower on the GPU and not at all slower in float64).
+    """
+    best = math.inf
+    axis = 0
+
+    ix = point_axis_index(x, x_lo, sx, nx)
+    if ux > 0.0:
+        best = (x_lo + float(ix + 1) * sx - x) / ux
+    elif ux < 0.0:
+        best = (x_lo + float(ix) * sx - x) / ux
+
+    iy = point_axis_index(y, y_lo, sy, ny)
+    d = math.inf
+    if uy > 0.0:
+        d = (y_lo + float(iy + 1) * sy - y) / uy
+    elif uy < 0.0:
+        d = (y_lo + float(iy) * sy - y) / uy
+    if d < best:
+        best = d
+        axis = 1
+
+    iz = point_axis_index(z, z_lo, sz, nz)
+    d = math.inf
+    if uz > 0.0:
+        d = (z_lo + float(iz + 1) * sz - z) / uz
+    elif uz < 0.0:
+        d = (z_lo + float(iz) * sz - z) / uz
+    if d < best:
+        axis = 2
+
+    return axis
+
+
+def nudge_across_face(
+    axis: int, ux: float, uy: float, uz: float, length: float
+) -> tuple[float, float, float]:
+    """Displacement of ``length`` along the normal of the face on ``axis``.
+
+    In the sense of travel along that axis; a negative ``length`` steps back. See
+    :func:`voxel_face_axis` for why the nudge is taken along the normal.
+    """
+    dx = 0.0
+    dy = 0.0
+    dz = 0.0
+    if axis == 0:
+        dx = length if ux > 0.0 else -length
+    elif axis == 1:
+        dy = length if uy > 0.0 else -length
+    else:
+        dz = length if uz > 0.0 else -length
+    return dx, dy, dz
 
 
 @dataclass(frozen=True)

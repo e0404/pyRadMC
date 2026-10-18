@@ -62,6 +62,8 @@ _KERNEL_MODULES: dict[str, tuple[str, ...] | None] = {
         "point_axis_index",
         "slab_entry_distance",
         "distance_to_voxel_boundary",
+        "voxel_face_axis",
+        "nudge_across_face",
     ),
     "pyradmc.geometry.field": ("_lower_cell", "_lerp", "field_at"),
     "pyradmc.geometry.cylinder": (

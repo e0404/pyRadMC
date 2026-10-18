@@ -156,6 +156,8 @@ lorentz_rotation_angle = _p.lorentz_rotation_angle
 rotate_about_axis = _p.rotate_about_axis
 slab_entry_distance = _p.slab_entry_distance
 distance_to_voxel_boundary = _p.distance_to_voxel_boundary
+voxel_face_axis = _p.voxel_face_axis
+nudge_across_face = _p.nudge_across_face
 
 
 @wp.struct
@@ -1591,6 +1593,8 @@ def electron_kernel(
     tid = wp.tid()
     is_positron = q_in.kind[tid] == POSITRON
     e = q_in.energy[tid]
+    # Nudge walked into the current voxel, charged by its first substep there.
+    carry = float(0.0)  # noqa: UP018 - Warp needs a dynamic var mutated in the loop
     beamlet = q_in.beamlet[tid]
     base = beamlet * si.n_voxels
     w = q_in.weight[tid]
@@ -1758,31 +1762,56 @@ def electron_kernel(
         # Mirror of the reference loop: E_end = r^-1(r(E) - rho*s) through the
         # flattened restricted-range table and its inverse; clamped so table
         # interpolation can never gain energy or undershoot the cutoff.
+        # The nudge past a face is a geometric move: the loss covers the path inside
+        # this voxel plus the carried nudge (mirror of the reference loop).
+        face_limited = s == s_boundary
+        s_in = s
+        if face_limited:
+            s_in = s - BOUNDARY_NUDGE_CM
+        crossing = False
+        path = s_in + carry
         available = lookup_2d(
             tab.restricted_range, mat, tab.e_log_e_min, tab.e_inv_dlog, tab.n_points, e
         )
-        if rho * s >= available:
-            s = available / rho
+        if rho * path >= available:
+            s_in = max(available / rho - carry, 0.0)
+            path = s_in + carry
             de = e - ecut
             moller_pending = False
         else:
+            # Both ends of the loss through the *same* inverse table. The reference
+            # loop inverts one range grid exactly; here range-of-energy and
+            # energy-of-range are two tables on different grids, and their round
+            # trip E(R(e)) - e is a fixed error per substep (~1e-6 MeV) that the
+            # loss of a short step cannot absorb: a gyration-capped substep in air
+            # loses tens of micro-eV, and whenever the error exceeded it the clamp
+            # e_end <= e zeroed the whole step's loss. Measured 2026-10-18 on the
+            # Fano cavity at air density, 1 MeV, 1.5 T: gap-to-wall 0.855 at a cap
+            # of 0.05 rad and 0.984 at 0.2 with e - e_end; 1.000 and 1.004 this way.
             e_end = lookup_2d(
                 tab.energy_of_restricted_range,
                 mat,
                 tab.r_log_min,
                 tab.r_inv_dlog,
                 tab.n_points,
-                available - rho * s,
+                available - rho * path,
             )
-            e_end = min(max(e_end, ecut), e)
-            de = e - e_end
+            e_start = lookup_2d(
+                tab.energy_of_restricted_range,
+                mat,
+                tab.r_log_min,
+                tab.r_inv_dlog,
+                tab.n_points,
+                available,
+            )
+            de = min(max(e_start - e_end, 0.0), e - ecut)
         emit_probability, local_brems = bremsstrahlung_step_parameters(
             e,
             lookup_2d(
                 tab.stopping_radiative, mat, tab.e_log_e_min, tab.e_inv_dlog, tab.n_points, e
             ),
             rho,
-            s,
+            path,
             pcut,
         )
         continuous = de + local_brems
@@ -1790,19 +1819,71 @@ def electron_kernel(
         substep_factor = _spr_factor(tab, dose_to_water, e, mat, ecut)
 
         # --- random hinge: move, deflect, move ----------------------------------
-        s1 = uniform(state) * s
-        s2 = s - s1
+        # The carry's share of the loss rides with the first chord (mirror of the
+        # reference loop).
+        s1 = uniform(state) * s_in
+        s2 = s_in - s1
         d1 = 0.0
-        if s > 0.0:
-            d1 = continuous * (s1 / s)
+        if path > 0.0:
+            d1 = continuous * ((s1 + carry) / path)
         d2 = continuous - d1
+        carry = 0.0
 
         # Under a field each chord runs along its midpoint direction: half the
         # gyration angle before, half after (mirror of the reference loop).
         half = 0.0
+        cut = False
         if has_field:
             half = 0.5 * lorentz_rotation_angle(s1, gyroradius_cm(e - 0.5 * d1, b_mag), is_positron)
             ux, uy, uz = rotate_about_axis(ux, uy, uz, b_ux, b_uy, b_uz, half)
+            # Bent chord may reach a face sooner than the pre-rotation cap allowed:
+            # stop there and end the substep (mirror of the reference loop).
+            s1_face = distance_to_voxel_boundary(
+                x,
+                y,
+                z,
+                ux,
+                uy,
+                uz,
+                gi.x_lo,
+                gi.y_lo,
+                gi.z_lo,
+                gi.sx,
+                gi.sy,
+                gi.sz,
+                gi.nx,
+                gi.ny,
+                gi.nz,
+            )
+            if s1 >= s1_face:
+                d1_scale = 0.0
+                if s1 > 0.0:
+                    d1_scale = s1_face / s1
+                d1 = d1 * d1_scale
+                s1 = s1_face
+                cut = True
+                axis = voxel_face_axis(
+                    x,
+                    y,
+                    z,
+                    ux,
+                    uy,
+                    uz,
+                    gi.x_lo,
+                    gi.y_lo,
+                    gi.z_lo,
+                    gi.sx,
+                    gi.sy,
+                    gi.sz,
+                    gi.nx,
+                    gi.ny,
+                    gi.nz,
+                )
+                # Whole turn = the cut chord's (mirror of the reference loop).
+                half = (
+                    lorentz_rotation_angle(s1, gyroradius_cm(e - 0.5 * d1, b_mag), is_positron)
+                    - half
+                )
         _deposit_spread(
             edep,
             escaped,
@@ -1829,6 +1910,23 @@ def electron_kernel(
         z += uz * s1
         if has_field:
             ux, uy, uz = rotate_about_axis(ux, uy, uz, b_ux, b_uy, b_uz, half)
+        if cut:
+            # On the face: carry across along the face normal (a direction-aligned
+            # micron is below a float32 ulp at grazing incidence and the lane sits
+            # on the face for ever), or stop just inside if terminal; the micron is
+            # charged by the next substep, in that voxel.
+            nudge = BOUNDARY_NUDGE_CM
+            if e <= ecut:
+                nudge = -BOUNDARY_NUDGE_CM
+            dx, dy, dz = nudge_across_face(axis, ux, uy, uz, nudge)
+            x += dx
+            y += dy
+            z += dz
+            carry = BOUNDARY_NUDGE_CM
+            if not point_inside(x, y, z, gi.x_lo, gi.y_lo, gi.z_lo, gi.x_hi, gi.y_hi, gi.z_hi):
+                _escape(escaped, w * (e + latent))
+                return
+            continue
         if not point_inside(x, y, z, gi.x_lo, gi.y_lo, gi.z_lo, gi.x_hi, gi.y_hi, gi.z_hi):
             _escape(escaped, w * (e + latent))
             return
@@ -1836,7 +1934,7 @@ def electron_kernel(
         mean_square = (
             lookup_2d(tab.scattering_power, mat, tab.e_log_e_min, tab.e_inv_dlog, tab.n_points, e)
             * rho
-            * s
+            * path
         )
         # Both laws take the same <theta^2> and one uniform (stream parity is
         # test-pinned through the device RNG), mirroring the reference loop's
@@ -1912,6 +2010,60 @@ def electron_kernel(
         if has_field:
             half = 0.5 * lorentz_rotation_angle(s2, gyroradius_cm(e - 0.5 * d2, b_mag), is_positron)
             ux, uy, uz = rotate_about_axis(ux, uy, uz, b_ux, b_uy, b_uz, half)
+        # The deflected second chord stops at the voxel face it would cross, so this
+        # voxel's energy loss never lands in the neighbour (mirror of the reference
+        # loop; the second-leg interface rule of the random hinge).
+        s2_face = distance_to_voxel_boundary(
+            x,
+            y,
+            z,
+            ux,
+            uy,
+            uz,
+            gi.x_lo,
+            gi.y_lo,
+            gi.z_lo,
+            gi.sx,
+            gi.sy,
+            gi.sz,
+            gi.nx,
+            gi.ny,
+            gi.nz,
+        )
+        if s2 >= s2_face or (face_limited and s2_face - s2 <= BOUNDARY_NUDGE_CM):
+            # A face-limited substep ends on its face unless the hinge turned the
+            # particle away by more than a nudge; the exact test alone leaves a
+            # particle a rounding residue short of the face stuck for ever (mirror
+            # of the reference loop).
+            d2_scale = 0.0
+            if s2 > 0.0:
+                d2_scale = s2_face / s2
+            d2 = d2 * d2_scale
+            s2 = s2_face
+            moller_pending = False
+            crossing = True
+            axis = voxel_face_axis(
+                x,
+                y,
+                z,
+                ux,
+                uy,
+                uz,
+                gi.x_lo,
+                gi.y_lo,
+                gi.z_lo,
+                gi.sx,
+                gi.sy,
+                gi.sz,
+                gi.nx,
+                gi.ny,
+                gi.nz,
+            )
+            if has_field:
+                half = (
+                    lorentz_rotation_angle(s2, gyroradius_cm(e - 0.5 * d2, b_mag), is_positron)
+                    - half
+                )
         _deposit_spread(
             edep,
             escaped,
@@ -1938,6 +2090,17 @@ def electron_kernel(
         z += uz * s2
         if has_field:
             ux, uy, uz = rotate_about_axis(ux, uy, uz, b_ux, b_uy, b_uz, half)
+        if crossing:
+            # On the face: carry across along the normal (see the cut above), or
+            # stop just inside if terminal; the micron is charged next substep.
+            nudge = BOUNDARY_NUDGE_CM
+            if e <= ecut:
+                nudge = -BOUNDARY_NUDGE_CM
+            dx, dy, dz = nudge_across_face(axis, ux, uy, uz, nudge)
+            x += dx
+            y += dy
+            z += dz
+            carry = BOUNDARY_NUDGE_CM
         if not point_inside(x, y, z, gi.x_lo, gi.y_lo, gi.z_lo, gi.x_hi, gi.y_hi, gi.z_hi):
             _escape(escaped, w * (e + latent))
             return
