@@ -18,6 +18,7 @@ than the passes.
 | Backend vs backend, field on (water slabs, electron beam, tabulated spectral thorax at 1.5 T) | reference oracle | chi-squared detection oracle | passes |
 | Fano test in a field, density ratios 0.1 / 0.01 / 0.001 (0.2 and 2 cm gaps), 0.5 and 1 MeV, 0.35 and 1.5 T | Fano theorem (Bouchard et al. 2015) | the field moves the gap-to-wall dose per mass by < 1 % | moved by <= 0.4 % at a tenth and a hundredth, <= 0.8 % in a 2 cm air gap; in a 0.2 cm air gap the field shrinks the field-free thin-gap residual (0.98 -> 0.995), held to that residual's 3 % gate |
 | Fano test without a field, same phantoms, shipped substep fraction 0.05 | Fano theorem | gap-to-wall within 1 % at a tenth of the wall density, within 3 % down to air density | 2 cm gaps 0.996-1.001 at every contrast; 0.2 cm air gap 0.979 / 0.975 (0.5 / 1 MeV) |
+| Exit-side ERE vs field strength, 10 x 10 cm2 6 MV on 20 x 20 x 8 cm3 water (Raaijmakers et al. 2008, Geant4 + film-verified setup) | literature: excess 40 / 52 / 42 / 25 % of dmax at 0.2 / 0.75 / 1.5 / 3 T, 20 % shift 17.5 / 9.5 / 4 mm, build-up 15 / 12 / 7 mm | excess within 30 % at 0.75-3 T with the 0.75 > 1.5 > 3 T ordering; shift within 4 mm; 1.5 T build-up within 2 mm | excess 0.42 / 0.63 / 0.50 / 0.29 (ratios 0.79 and 0.58 vs 0.81 and 0.60); shift 15 / 7.5 / 2.5 mm; build-up 14.8 / 12.2 / 12.2 mm |
 | Fano test, 0.2 cm air gap, substep fraction 0.02, 0 and 1.5 T | Fano theorem | gap-to-wall within 1.5 %, field moves it < 1.5 % | 0.998 / 0.994 at 0 T, 0.992 / 0.996 at 1.5 T (0.5 / 1 MeV, +- 0.3 %) |
 | Electron return effect, water / light gap / water | qualitative sign (Raaijmakers 2005) | gain before the gap, loss behind it, lateral push toward the Lorentz force | passes |
 
@@ -71,17 +72,29 @@ Below ~1 MeV the analytic cross-section layer is an explicitly few-percent
 parameterization (Klein-Nishina without binding, a crude photoelectric power law, no
 Rayleigh). Use the tabulated backend where the soft spectrum matters.
 
-### Magnetic-field dose is not yet gated against published benchmarks
+### Magnetic-field dose is gated against one published benchmark
 
 The Lorentz step is pinned against the analytic helix, against the reference engine
 with the field on (including the tabulated spectral thorax at 1.5 T) and by the Fano
-test in a field at lung-like density ratios, and the electron return effect comes out
-with the right sign and shape. What is missing is a quantitative gate against an
-independent code or measurement: Raaijmakers' film phantoms (PMMA-air-PMMA, 0.6 and
-1.3 T), the water-lung-water interface excursions of Ahmad et al. and Li et al. at
-1.5 T, and EGSnrc's EEMF slab example. The maintainer is collecting those curves and
-TOPAS/EGSnrc runs of the example geometry; until they land, treat magnetic-field dose
-as *validated for internal consistency*, not against the literature.
+test in a field down to air density, and since 2026-10-18 against one published
+benchmark: the exit-side electron return effect of Raaijmakers et al. (2008, PMB 53,
+909) as a function of field strength (`tests/validation/test_ere_field_strength.py`).
+On their phantom and field the central-axis dose excess in the last 0.5 mm of water is
+0.42 / 0.63 / 0.50 / 0.29 of the field-free dmax at 0.2 / 0.75 / 1.5 / 3 T against
+their 40 / 52 / 42 / 25 %, with their field-strength ratios reproduced to a few per
+cent, the lateral 20 % shift 15 / 7.5 / 2.5 mm against 17.5 / 9.5 / 4 mm, and the
+build-up depth 14.8 / 12.2 mm at 0.75 / 1.5 T against 15 / 12 mm. Two things in that
+comparison deserve a note. The effect is as large at low field as at 1.5 T for a broad
+beam, with the maximum at 0.75 T, exactly as they report: everything below a few MeV
+turns round whatever the radius, and what a weaker field changes is *where* it lands —
+one gyration diameter to the Lorentz side, centimetres at 0.2-0.35 T, millimetres at
+1.5 T — so the lateral skew of an exit profile is wider at the weaker field, not
+narrower. And the 3 T build-up depth (12 mm here, 7 mm in the paper) is the one
+quantity outside the gate; 3 T is outside the MR-linac range and it is not gated.
+Still missing: Raaijmakers' film phantoms (PMMA-air-PMMA, 0.6 and 1.3 T), the
+water-lung-water interface excursions of Ahmad et al. and Li et al. at 1.5 T, and
+EGSnrc's EEMF slab example; TOPAS/EGSnrc runs of the example geometry would still be
+welcome as an independent-code check.
 
 Two standing caveats. Outside the transport grid there is no field, so an MR-linac
 setup must extend the grid with air voxels to the phase-space plane. And at a

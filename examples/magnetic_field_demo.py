@@ -10,12 +10,22 @@ transverse to the beam as on an MR-linac (ViewRay MRIdian: 0.35 T; Elekta Unity:
   on the water side — the *electron return effect* (Raaijmakers, Raaymakers &
   Lagendijk 2005, PMB 50, 1363, doi:10.1088/0031-9155/50/7/002) — so the last
   millimetres before the gap gain dose while the downstream water, no longer fed by
-  electrons crossing the gap, rebuilds from its own surface. At 0.35 T the
-  gyroradius is four times larger and the effect is much weaker.
+  electrons crossing the gap, rebuilds from its own surface. The peak is as high at
+  0.35 T as at 1.5 T: an electron leaving along the normal reaches only one
+  gyroradius into the gap, so in a 3 cm gap everything below about 2.7 MeV turns
+  round even at 0.35 T, which is essentially the whole exit spectrum of a 6 MV beam.
+  That is the saturation Raaijmakers et al. (2008, PMB 53, 909,
+  doi:10.1088/0031-9155/53/4/006) report for broad fields: an exit-side dose
+  increase of 40 / 52 / 42 / 25 % at 0.2 / 0.75 / 1.5 / 3 T for a 10 x 10 cm2 field.
 - **Right**: lateral profile across the beam in the last 4 mm of water before the
-  gap. The Lorentz force pushes the returning electrons to one side (toward -y for a
-  +z beam in a +x field): the profile skews, one penumbra spreads out of the field and
-  the other sharpens.
+  gap. The returning electrons land one gyration *diameter* to the side (toward -y
+  for a +z beam in a +x field), so the profile skews, and the skew is *wider* at the
+  weaker field: a 1 MeV electron comes back 2.7 cm to the left at 0.35 T and 6 mm at
+  1.5 T. The right edge loses the electrons that would have returned from outside
+  the field, the left edge gains them; at 0.35 T the dose rises gradually from the
+  right edge to the left and a long tail reaches centimetres beyond the field, as
+  Raaijmakers et al. (2008) describe for 0.2 T. The in-water penumbra shift that
+  grows *with* the field is under a millimetre here and invisible on 5 mm voxels.
 
 Air is a real registry material here (EPICS-tabulated cross-sections, downloaded and
 cached on first use), and the field is :class:`pyradmc.MagneticField` handed to the

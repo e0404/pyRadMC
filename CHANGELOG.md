@@ -34,6 +34,12 @@ boundary fix under `Fixed` moves electron dose at density interfaces and is meas
   water / low-density / water slab, and the Fano test in a field (validation tier).
   Demonstrated by `examples/magnetic_field_demo.py`. Outside the transport grid there is
   no field (AGENTS.md section 8).
+- **First literature gate for magnetic-field dose**
+  (`tests/validation/test_ere_field_strength.py`): the exit-side electron return effect
+  of Raaijmakers et al. 2008 (PMB 53, 909) at 0.75, 1.5 and 3 T — dose excess within
+  30 %, field-strength ordering, lateral shift within 4 mm, build-up depth at 1.5 T
+  within 2 mm. Measured: excess 0.42 / 0.63 / 0.50 / 0.29 of dmax at 0.2 / 0.75 / 1.5 /
+  3 T against the paper's 0.40 / 0.52 / 0.42 / 0.25.
 - `examples/dij_plan_sigma_demo.py`: plan-dose uncertainty from the Dij, three ways —
   quadrature of the column variances from an independent Dij, the same from a correlated
   Dij, and a direct forward simulation — against the seed-to-seed spread of the plan
@@ -83,6 +89,12 @@ boundary fix under `Fixed` moves electron dose at density interfaces and is meas
 
 ### Changed
 
+- `examples/magnetic_field_demo.py` docstring: the electron return effect is *not*
+  "much weaker" at 0.35 T for a broad beam over a thick gap — it is as large as at
+  1.5 T (Raaijmakers et al. 2008), and the lateral skew of the exit profile is wider at
+  the weaker field because the returning electrons land one gyration diameter to the
+  side. The figure is re-rendered with the hinge-face fix (air voxels adjacent to water
+  drop about threefold; the water side moves under 2 %).
 - The correlated-columns constraint (AGENTS.md section 8, validation page) is now
   quantified as above rather than stated as a blanket prohibition; the
   `DijResult.variance_csc` caveat says what the quadrature omits and points at the
