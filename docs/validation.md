@@ -16,7 +16,9 @@ than the passes.
 | Dij column truncation | DVH endpoints D2/D50/D98 | < 0.5 % | passes |
 | Charged-particle gyration in a magnetic field | analytic helix (Bielajew 1988) | radius within 1.5 %, handedness, straight along B | 0.1 % |
 | Backend vs backend, field on (water slabs, electron beam, tabulated spectral thorax at 1.5 T) | reference oracle | chi-squared detection oracle | passes |
-| Fano test in a field, 0.1 density ratio, 0.5 and 1 MeV, 0 / 0.35 / 1.5 T | Fano theorem (Bouchard et al. 2015) | gap-to-wall dose per mass within 1 % | 0.994-1.002; the field moves it by < 0.7 % |
+| Fano test in a field, density ratios 0.1 / 0.01 / 0.001 (0.2 and 2 cm gaps), 0.5 and 1 MeV, 0.35 and 1.5 T | Fano theorem (Bouchard et al. 2015) | the field moves the gap-to-wall dose per mass by < 1 % | moved by <= 0.4 % at a tenth and a hundredth, <= 0.8 % in a 2 cm air gap; in a 0.2 cm air gap the field shrinks the field-free thin-gap residual (0.98 -> 0.995), held to that residual's 3 % gate |
+| Fano test without a field, same phantoms, shipped substep fraction 0.05 | Fano theorem | gap-to-wall within 1 % at a tenth of the wall density, within 3 % down to air density | 2 cm gaps 0.996-1.001 at every contrast; 0.2 cm air gap 0.979 / 0.975 (0.5 / 1 MeV) |
+| Fano test, 0.2 cm air gap, substep fraction 0.02, 0 and 1.5 T | Fano theorem | gap-to-wall within 1.5 %, field moves it < 1.5 % | 0.998 / 0.994 at 0 T, 0.992 / 0.996 at 1.5 T (0.5 / 1 MeV, +- 0.3 %) |
 | Electron return effect, water / light gap / water | qualitative sign (Raaijmakers 2005) | gain before the gap, loss behind it, lateral push toward the Lorentz force | passes |
 
 Variance reduction is unbiased **by construction** and test-pinned as such against a
@@ -82,17 +84,20 @@ TOPAS/EGSnrc runs of the example geometry; until they land, treat magnetic-field
 as *validated for internal consistency*, not against the literature.
 
 Two standing caveats. Outside the transport grid there is no field, so an MR-linac
-setup must extend the grid with air voxels to the phase-space plane. And the
-field-free engine fails the Fano test at a **thousandfold** density contrast (water /
-air): gap-to-wall dose per mass of 2.9 for a 0.2 cm air-density gap at 0.5 MeV (5.1 for
-0.1 cm; +1 to +3 % still at a hundredfold contrast and 2 cm), from the random hinge's
-second chord crossing a voxel face after the deflection and filing a wall substep's
-energy loss into the light voxel. That
-artifact predates the field and is a stepping limitation (docs/decisions.md); it sits
-in the last millimetre before an air face, exactly where the electron return effect
-peaks, so the ERE *magnitude* there carries it while the sign, the lateral push and the
-downstream re-build-up do not. The air-density Fano cases stay in the validation tier
-as strict expected failures so the fix is noticed when it lands.
+setup must extend the grid with air voxels to the phase-space plane. And at a
+**thousandfold** density contrast (water / air) the field-free engine satisfies Fano
+only to about 2 % at the shipped substep fraction, and only for a *thin* gap: measured
+2026-10-18, gap-to-wall dose per mass 0.98 +- 0.003 for a 0.2 cm air-density gap at
+0.5 MeV (ECUT 0.05 as the test instrument), -0.9 % at a hundredfold contrast, +0.9 % at a
+tenth, while a 2 cm gap is within 0.4 % at every contrast; the thin gap's residual halves
+at a substep fraction of 0.03 and is within 1 % at 0.02. That residual is step-size convergence of the
+random hinge at an interface (docs/decisions.md records the boundary handling it replaced,
+which read 2.9x at air contrast and +8 % at a hundredfold, and the Warp energy-loss round
+trip that read 0.855 in air under a field at a tight gyration cap); it sits
+in the last millimetre before an air face, where the electron return effect peaks, so
+the ERE *magnitude* there carries a few per cent while the sign, the lateral push and the
+downstream re-build-up do not. The validation tier gates the field's own contribution at
+1 % separately from this field-free residual, and pins the convergence at 0.03.
 
 ### Absolute CPU variance-reduction cost is unmeasured
 

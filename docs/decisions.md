@@ -85,11 +85,13 @@ across its 0.256-10 MeV shape gap and sits 1.1-1.3x the closed form at 1-6 MeV).
 Stated omission: no Mott (spin-relativistic) factor on the
 closed-form moment, a few percent at `beta -> 1` in low-Z media.
 
-**Each electron substep is capped at the next voxel face.** Without it a step carried one
-medium's stopping power across a boundary into the neighbour's mass, producing a
-single-voxel interface spike — **1.95x before, under 1.4x after** at a pure density step.
-Residual interface structure is second-order (the hinge can still deflect the short
-post-hinge segment across the face) plus genuine interface dosimetry.
+**Each electron substep is capped at the next voxel face, and so is each hinge chord.**
+Without the cap a step carried one medium's stopping power across a boundary into the
+neighbour's mass, producing a single-voxel interface spike — **1.95x before, under 1.4x
+after** at a pure density step. The cap alone left the hinge's second chord free to cross
+the face after the deflection; that residual, dominant at air contrast, was closed on
+2026-10-18 (see "The random hinge's second chord" below). What remains is step-size
+convergence of the hinge at an interface plus genuine interface dosimetry.
 
 **Positrons stay Møller-approximated** — no Bhabha, annihilation at rest. If upgraded,
 both land together as the new default, with a test showing the dosimetric effect.
@@ -342,26 +344,82 @@ never arithmetic.
 **A phase space must be normalized per original primary**, not per stored record. Caught
 by a demo whose absolute dose was wrong, not by a unit test; now regression-pinned.
 
-**The random hinge's second chord can cross a voxel face, and at air contrast that
-dominates the light voxel's dose.** Found 2026-10-17 by the Fano test in a field, at
-*zero* field: a water / air-density / water slab shows gap-to-wall dose-per-mass of 5.1
-and 2.9 for 0.1 and 0.2 cm gaps at 0.5 MeV, and a 2 cm gap at a hundredfold contrast
-still +1.0 % (0.5 MeV) and +3.0 % (1 MeV). The voxel-face cap
-is taken along the pre-hinge direction; after the deflection the second chord may end in
-the neighbouring voxel, and its share of the substep's energy loss — computed with the
-start voxel's density — is filed there. A reference-engine histogram of the gap deposits
-shows the physical chord deposits alone satisfy Fano, while 0.01-0.2 MeV lumps carry the
-excess; the lumps vanish as the substep fraction shrinks (6.8 MeV at f = 0.20, 0.14 at
-0.05, 0 at 0.02 over the same 60 000 histories). This is the residual of the interface
-artifact reduced from 1.95x to under 1.4x at CT contrast above, and it is why the
-Fano-in-field gate runs at a 0.1 density ratio with the air-density cases kept as strict
-expected failures. (Building that gate taught a second lesson: a light slab open to the
-phantom's lateral faces loses electrons sideways over its metre-scale range with nothing
-replacing them — a 17-23 % field-free deficit at a hundredfold contrast on an 8 cm wide
-phantom — so the slab is embedded laterally in water.) The fix — cap the post-hinge chord at the face along its new
-direction, or DPM's stopping-power-ratio scaling — is a stepping change on the
-accuracy-defining list, and it bears directly on the electron return effect's magnitude
-in the last millimetre before an air face.
+**The random hinge's second chord stops at a voxel face; the nudge across a face is a
+free move charged by the next substep in the new voxel.** Found 2026-10-17 by the Fano
+test in a field, at *zero* field: a water / air-density / water slab showed gap-to-wall
+dose-per-mass of 5.1 and 2.9 for 0.1 and 0.2 cm gaps at 0.5 MeV, and a 2 cm gap at a
+hundredfold contrast still +7.9 % (0.5 MeV, ECUT 0.05). Three mechanisms, all in the
+boundary handling and all predating the field: (1) the voxel-face cap is taken along the
+pre-hinge direction, so after the deflection the second chord could end in the
+neighbouring voxel and file its share of the substep's loss — computed with the start
+voxel's density — there, with range-out terminations landing there too; (2) the chords
+split the full capped length *including* the nudge past the face, so on short final steps
+the first chord overshot the face and the second ran inside the neighbour; (3) the nudge
+itself was transported path charged at the old voxel's density, so an electron ranging
+out in the last micron before an air face was carried into the air with a sliver above
+ECUT and terminated there. The fix (2026-10-18, reference loop and Warp twin alike): a
+chord that reaches a face stops on it, with its loss scaled to the shortened length and a
+Møller event sampled beyond the face not reached (the flight is memoryless and re-sampled
+in the next voxel) — PENELOPE's rule for an interface met on the second leg; under a
+field the first chord is cut the same way, since it bends off the pre-rotation cap; the
+chords split only the path inside the voxel; the particle is carried across by a
+geometric nudge that the next substep charges at the new voxel's density (a ``carry``
+length), or left just inside the face if it is terminal there; and a face-limited
+substep whose second chord ends within a nudge of the face counts as reaching it, else a
+rounding residue leaves the particle a zero-length step short of the face for ever (that
+infinite loop was found the hard way, by a test hanging 15 hours). Measured on the
+embedded Fano phantom at ECUT 0.05 (test instrument), 0.5 MeV, 0.2 cm gap, CUDA and Warp
+CPU agreeing: **air contrast 2.9x -> 0.98 +- 0.003; hundredfold +7.9 % -> -0.9 %; tenth
+-0.6 % -> +0.9 %**, all for a 0.2 cm gap, while a 2 cm gap is within 0.4 % at every
+contrast; the thin gap's residual halves at a substep fraction of 0.03 (-1.1 / -0.9 %)
+and is within 1 % at 0.02 (-0.2 / -0.6 % at 0.5 / 1 MeV; -0.8 / -0.4 % under 1.5 T,
+which shortens its substeps), so the remaining -2 % at the shipped 0.05 is step-size
+convergence of the hinge at an interface, not bookkeeping, and the validation tier now
+gates all three statements (field moves the ratio < 1 %, field-free residual < 1 % at a
+tenth and < 3 % to air, converged < 1.5 % at 0.02 with and without the field). The
+substep fraction stays 0.05 (AGENTS.md section 8: an accuracy-defining change needs the
+realistic-geometry measurement). (Building the gate taught a second lesson: a light slab
+open to the phantom's lateral faces loses electrons sideways over their metre-scale
+range with nothing replacing them — a 17-23 % field-free deficit at a hundredfold
+contrast on an 8 cm wide phantom — so the slab is embedded laterally in water.) Dose
+effect in the electron return effect's slab (6 MeV, 1.5 T): the air voxels adjacent to
+water drop about threefold, the water side within 2 %; field-free water-only results
+move at the 1e-4 level (deposited energy 1.7348e6 -> 1.7342e6 MeV on the 64^3 open field).
+
+**A particle that has reached a voxel face is carried across along the face normal, and a
+chord cut at a face turns by the cut chord's gyration angle.** Two corrections to the
+chord-cut rule above, both found by its first perf A/B (2026-10-18). (1) The nudge across
+a face was a micron along the *direction*; at grazing incidence its normal component is
+below one float32 ulp of a coordinate near 10 cm, the position does not move, and a bent
+chord cut at the face with no in-voxel path left is cut again next substep with
+zero-length chords — the cut path has no hinge and no rotation to turn it away — so the
+lane sits on the face charging one carry micron per iteration until its energy is gone.
+The water / air slab at 1.5 T ran **7.6x slower on the GPU** and not at all slower in the
+float64 reference loop (substeps per history 1615 with the cut, 1606 without). The nudge
+is now a micron along the normal of the face the chord reached (``voxel_face_axis``,
+``nudge_across_face``), always resolvable, the same micron geometrically; it applies to
+every crossing, field or not. (2) Both half-rotations of a chord used the full chord's
+gyration angle even when the chord was truncated at a face, so every cut over-turned the
+direction without the matching path; the second half-turn is now the cut chord's whole
+angle minus the first half-turn, so direction and path stay on one arc. Gated by the
+Fano-in-field tier and the slab throughput in the perf tier.
+
+**The Warp kernel takes both ends of a substep's continuous loss through the same
+inverse-range table.** The reference loop evaluates ``E_end = r^-1(r(E) - rho s)`` on
+one piecewise-linear range grid, whose forward and inverse interpolations are exact
+inverses of each other. The kernel tabulates range-of-energy and energy-of-range on two
+different log grids, and until 2026-10-18 computed ``de = e - E(R(e) - rho s)``: the
+round trip ``E(R(e)) - e`` is a fixed error of order 1e-6 MeV per substep, invisible
+against a 5 % step but comparable to the tens of micro-eV a gyration-capped substep in
+air loses, and because the kernel clamps ``e_end <= e`` every substep whose loss fell
+below the error lost *nothing*. Found by the Fano test in a field at air density, where
+the gyration cap makes the substeps short: gap-to-wall dose per mass 0.984 at the shipped
+cap of 0.2 rad and 0.855 at 0.05 (1 MeV, 1.5 T, 2 cm gap), 1.004 and 1.000 with
+``de = E(R(e)) - E(R(e) - rho s)``; field-free the same gap moved 0.9947 -> 0.9995.
+One extra table lookup per substep. The lesson generalises: any per-substep quantity
+with a fixed absolute error is a bias that scales with the substep *count*, and the
+field, by capping the substep in air, multiplies that count a thousandfold relative to
+the loss.
 
 **Flipping a validated default re-rolls every fixed-seed statistical test.** Expect around
 a 1 % trip rate across the suite, and repair those by fixing the oracle, never by
