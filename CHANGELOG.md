@@ -93,8 +93,9 @@ boundary fix under `Fixed` moves electron dose at density interfaces and is meas
   "much weaker" at 0.35 T for a broad beam over a thick gap — it is as large as at
   1.5 T (Raaijmakers et al. 2008), and the lateral skew of the exit profile is wider at
   the weaker field because the returning electrons land one gyration diameter to the
-  side. The figure is re-rendered with the hinge-face fix (air voxels adjacent to water
-  drop about threefold; the water side moves under 2 %).
+  side. The figure now sweeps 0, 0.2, 0.7, 1.5 and 3 T (the field strengths of that
+  paper) and is re-rendered with the hinge-face fix (air voxels adjacent to water drop
+  about threefold; the water side moves under 2 %).
 - The correlated-columns constraint (AGENTS.md section 8, validation page) is now
   quantified as above rather than stated as a blanket prohibition; the
   `DijResult.variance_csc` caveat says what the quadrature omits and points at the

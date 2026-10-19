@@ -1,30 +1,32 @@
 """Photon dose in a transverse magnetic field: the electron return effect.
 
 Renders one figure (``magnetic_field_demo.png``, saved beside this script) for a
-6 MV beam into a water / air / water slab phantom at 0, 0.35 and 1.5 T, the field
-transverse to the beam as on an MR-linac (ViewRay MRIdian: 0.35 T; Elekta Unity:
-1.5 T):
+6 MV beam into a water / air / water slab phantom at 0, 0.2, 0.7, 1.5 and 3 T, the
+field transverse to the beam as on an MR-linac (the sweep of Raaijmakers et al. 2008;
+the MRIdian runs at 0.35 T, the Aurora-RT at 0.5 T, the Unity at 1.5 T):
 
 - **Left**: central-axis depth dose. Secondary electrons that leave the upstream
   water into the air gyrate back (gyroradius 3 mm at 1 MeV and 1.5 T) and redeposit
   on the water side — the *electron return effect* (Raaijmakers, Raaymakers &
   Lagendijk 2005, PMB 50, 1363, doi:10.1088/0031-9155/50/7/002) — so the last
   millimetres before the gap gain dose while the downstream water, no longer fed by
-  electrons crossing the gap, rebuilds from its own surface. The peak is as high at
-  0.35 T as at 1.5 T: an electron leaving along the normal reaches only one
-  gyroradius into the gap, so in a 3 cm gap everything below about 2.7 MeV turns
-  round even at 0.35 T, which is essentially the whole exit spectrum of a 6 MV beam.
-  That is the saturation Raaijmakers et al. (2008, PMB 53, 909,
-  doi:10.1088/0031-9155/53/4/006) report for broad fields: an exit-side dose
-  increase of 40 / 52 / 42 / 25 % at 0.2 / 0.75 / 1.5 / 3 T for a 10 x 10 cm2 field.
+  electrons crossing the gap, rebuilds from its own surface. The peak is about as
+  high at 0.2 T as at 1.5 T and highest in between: an electron leaving along the
+  normal reaches only one gyroradius into the gap, so in a 3 cm gap everything below
+  about 1.4 MeV turns round even at 0.2 T (2.7 MeV at 0.35 T), which covers most of
+  the energy fluence leaving a 6 MV beam, and at the strongest fields the compressed
+  in-water kernel feeds the exit face from a smaller volume. That is what Raaijmakers
+  et al. (2008, PMB 53, 909, doi:10.1088/0031-9155/53/4/006) report for broad fields:
+  an exit-side dose increase of 40 / 52 / 42 / 25 % at 0.2 / 0.75 / 1.5 / 3 T for a
+  10 x 10 cm2 field.
 - **Right**: lateral profile across the beam in the last 4 mm of water before the
   gap. The returning electrons land one gyration *diameter* to the side (toward -y
   for a +z beam in a +x field), so the profile skews, and the skew is *wider* at the
-  weaker field: a 1 MeV electron comes back 2.7 cm to the left at 0.35 T and 6 mm at
-  1.5 T. The right edge loses the electrons that would have returned from outside
-  the field, the left edge gains them; at 0.35 T the dose rises gradually from the
-  right edge to the left and a long tail reaches centimetres beyond the field, as
-  Raaijmakers et al. (2008) describe for 0.2 T. The in-water penumbra shift that
+  weaker field: a 1 MeV electron comes back 4.7 cm to the left at 0.2 T, 6 mm at
+  1.5 T and 3 mm at 3 T. The right edge loses the electrons that would have returned
+  from outside the field, the left edge gains them; at 0.2 T the dose rises gradually
+  from the right edge to the left and a long tail reaches centimetres beyond the
+  field, as Raaijmakers et al. (2008) describe. The in-water penumbra shift that
   grows *with* the field is under a millimetre here and invisible on 5 mm voxels.
 
 Air is a real registry material here (EPICS-tabulated cross-sections, downloaded and
@@ -63,13 +65,8 @@ SURFACE = "#fcfcfb"
 INK = "#0b0b0b"
 INK_SECONDARY = "#52514e"
 GRID_LINE = "#e5e4e0"
-SERIES = [
-    "#52514e",
-    "#2a78d6",
-    "#d64545",
-    "#ffa500",
-    "#ff69b4",
-]  # 0 T grey, 0.2 T blue, 0.7 T orange, 1.5 T red, 3 T pink
+SERIES = ["#52514e", "#2a78d6", "#ffa500", "#d64545", "#ff69b4"]
+# 0 T grey, 0.2 T blue, 0.7 T orange, 1.5 T red, 3 T pink — zipped with FIELDS_TESLA.
 AIR_BAND = "#d8ecf5"
 
 FIELDS_TESLA = (0.0, 0.2, 0.7, 1.5, 3)
@@ -126,7 +123,7 @@ def make_engine(backend: str, grid: VoxelGrid, xs: TabulatedCrossSections, field
 
 
 def main() -> None:
-    """Transport the three fields and render the figure."""
+    """Transport the field sweep and render the figure."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--histories", type=int, default=50_000_000)
     parser.add_argument("--batches", type=int, default=10)
