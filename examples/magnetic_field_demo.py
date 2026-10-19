@@ -63,10 +63,16 @@ SURFACE = "#fcfcfb"
 INK = "#0b0b0b"
 INK_SECONDARY = "#52514e"
 GRID_LINE = "#e5e4e0"
-SERIES = ["#52514e", "#2a78d6", "#d64545"]  # 0 T grey, 0.35 T blue, 1.5 T red
+SERIES = [
+    "#52514e",
+    "#2a78d6",
+    "#d64545",
+    "#ffa500",
+    "#ff69b4",
+]  # 0 T grey, 0.2 T blue, 0.7 T orange, 1.5 T red, 3 T pink
 AIR_BAND = "#d8ecf5"
 
-FIELDS_TESLA = (0.0, 0.35, 1.5)
+FIELDS_TESLA = (0.0, 0.2, 0.7, 1.5, 3)
 
 # Phantom: 20 x 20 cm lateral, 12 cm deep; water 0-4 cm, air 4-7 cm, water 7-12 cm.
 NXY, DXY = 40, 0.5
@@ -122,7 +128,7 @@ def make_engine(backend: str, grid: VoxelGrid, xs: TabulatedCrossSections, field
 def main() -> None:
     """Transport the three fields and render the figure."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--histories", type=int, default=2_000_000)
+    parser.add_argument("--histories", type=int, default=50_000_000)
     parser.add_argument("--batches", type=int, default=10)
     parser.add_argument("--backend", choices=("auto", "warp", "ref"), default="auto")
     parser.add_argument("--cache-dir", type=Path, default=None, help="EPICS library cache")
