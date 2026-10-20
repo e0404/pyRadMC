@@ -11,10 +11,9 @@ must be able to find out from this file whether the numbers should have moved.
 
 ## [Unreleased]
 
-No cutoff or tolerance changes. The magnetic-field work below leaves every field-free
-result byte-identical per target (measured on a 6 MeV open field, an electron beam and a
-2x2 Dij on the reference engine, Warp CPU and Warp CUDA, before and after); the hinge
-boundary fix under `Fixed` moves electron dose at density interfaces and is measured there.
+No cutoff or tolerance changes. An explicit zero field remains byte-identical to no
+field on each target. The hinge boundary and Warp loss fixes below also affect runs
+without a field, so results are not byte-identical to the previous release.
 
 ### Added
 
@@ -51,6 +50,15 @@ boundary fix under `Fixed` moves electron dose at density interfaces and is meas
 
 ### Fixed
 
+- Magnetic field samples are copied into read-only storage, preventing caller-array
+  mutations from changing validated fields or invalidating device-map provenance.
+  Infinite sample spacing is rejected, and uniform-field provenance retains the full
+  precision of its components.
+- The Fano test source now assigns six fixed RNG draws to each history, independently
+  of chunk size, so changing the device's auto-selected chunk cannot change the gate's
+  sampled primaries.
+- Reference magnetic-field integration tests run even when the optional Warp backend
+  is not installed; only device-dependent cases are skipped.
 - **The random hinge no longer carries one voxel's energy loss into a lighter
   neighbour.** A hinge chord that reaches a voxel face now stops on it (its loss scaled
   to the shortened length, a Møller event beyond the face not reached), the chords split
@@ -66,8 +74,9 @@ boundary fix under `Fixed` moves electron dose at density interfaces and is meas
   air density**, **+7.9 % -> -0.9 % at a hundredth**, -0.6 % -> +0.9 % at a tenth of the
   wall density; a 2 cm gap is within 0.4 % at every contrast, and the thin gap's residual
   halves at a substep fraction of 0.03 and is within 1 % at 0.02 (its remaining 2 % at the
-  shipped 0.05 is step-size convergence of the hinge at an interface, now pinned by the
-  validation tier). In the electron return effect slab
+  studied fraction 0.05 is step-size convergence of the hinge at an interface; the
+  shipped GS default remains 0.20 and the default-path validation gates exercise it).
+  In the electron return effect slab
   (6 MeV, 1.5 T) the air voxels adjacent to water drop about threefold and the water
   side moves under 2 %; homogeneous water moves at the 1e-4 level (deposited energy
   1.7348e6 -> 1.7342e6 MeV, 64^3 open field). Throughput cost on an RTX 4070 (interleaved

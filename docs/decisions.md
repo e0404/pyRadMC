@@ -299,14 +299,17 @@ cap is still taken along the pre-rotation direction, so under a field a chord ca
 s theta/2 (tens of microns at 1 MeV, 1.5 T) off its straight-line prediction; the next
 substep re-reads its voxel. Stated at the cap.
 
-**Field-free results are byte-identical, by construction and by measurement.** The
+**The field plumbing alone preserves field-free results.** The
 kernel branches once per substep on the field mode (the `msc_model_gs` precedent) and the
 field-free path executes no new floating-point operation and draws no random number.
 Measured interleaved on the RTX 4070 at healthy clocks: a uniform zero field or a zero
 trilinear map against no field 0.98 / 1.01 (noise); a 1.5 T field in water 1.05. The
 before/after dose bytes of a 6 MeV open field, an electron beam and a 2x2 Dij matched on
 the reference engine, Warp CPU and Warp CUDA after every slice. `wp.static`
-specialisation was kept as the fallback and was not needed.
+specialisation was kept as the fallback and was not needed. This measurement predates
+the hinge-boundary and inverse-range fixes below, which also change field-free dose.
+The standing bit-identity tests compare an explicit zero field with no field within
+the current implementation; they do not assert equality with an earlier release.
 
 **Air is the cost.** In air the energy-limited step is metres and the voxel face used to
 bound the substep; under a field the gyration cap does, several times per voxel.
@@ -373,11 +376,12 @@ CPU agreeing: **air contrast 2.9x -> 0.98 +- 0.003; hundredfold +7.9 % -> -0.9 %
 -0.6 % -> +0.9 %**, all for a 0.2 cm gap, while a 2 cm gap is within 0.4 % at every
 contrast; the thin gap's residual halves at a substep fraction of 0.03 (-1.1 / -0.9 %)
 and is within 1 % at 0.02 (-0.2 / -0.6 % at 0.5 / 1 MeV; -0.8 / -0.4 % under 1.5 T,
-which shortens its substeps), so the remaining -2 % at the shipped 0.05 is step-size
+which shortens its substeps), so the remaining -2 % at the studied fraction 0.05 is step-size
 convergence of the hinge at an interface, not bookkeeping, and the validation tier now
 gates all three statements (field moves the ratio < 1 %, field-free residual < 1 % at a
 tenth and < 3 % to air, converged < 1.5 % at 0.02 with and without the field). The
-substep fraction stays 0.05 (AGENTS.md section 8: an accuracy-defining change needs the
+shipped GS fraction stays 0.20; 0.05 was the fraction in this convergence study,
+not the shipped default (AGENTS.md section 8: an accuracy-defining change needs the
 realistic-geometry measurement). (Building the gate taught a second lesson: a light slab
 open to the phantom's lateral faces loses electrons sideways over their metre-scale
 range with nothing replacing them — a 17-23 % field-free deficit at a hundredfold

@@ -325,8 +325,9 @@ def electron_steps(
     per-run option (AGENTS.md 2.10). The Lorentz force does no work, so it enters
     only through the direction of each chord and the step cap that keeps the chord
     close to the gyration arc; the field-free path executes no field operation and
-    draws no random number, which is what keeps it byte-identical to every result
-    produced before fields existed.
+    draws no random number. An explicit zero field therefore reproduces ``None``
+    byte for byte; the separate boundary and loss fixes can change historical
+    field-free results (see CHANGELOG.md).
     """
     if msc_model not in ("gaussian", "gs"):
         raise ValueError(f"unknown msc_model {msc_model!r}; expected 'gaussian' or 'gs'")

@@ -6,11 +6,12 @@ data-driven, never flag-driven — there is no switch, only the presence or abse
 a field). Two guarantees are pinned here, per target and never across targets
 (AGENTS.md 2.3):
 
-* **No field is the archived path.** Every result produced before the field existed
-  came from ``magnetic_field=None``; it must stay byte-identical. The cheapest
-  standing witness is that an explicit *zero* field reproduces ``None`` bit for bit:
+* **Zero field equals no field within this version.** An explicit *zero* field
+  reproduces ``None`` bit for bit:
   the zero guard in the step loops skips every field operation and draws no random
-  number, so the two runs share one stream.
+  number, so the two runs share one stream. This does not assert equality with
+  historical engines: the boundary and inverse-range fixes also affect zero-field
+  transport (see CHANGELOG.md).
 * **The record says what ran.** ``RunProvenance.magnetic_field`` carries the field's
   provenance string, or ``None``.
 """
@@ -122,7 +123,12 @@ class TestReference:
 
 # --- Warp backend -------------------------------------------------------------------
 
-wp = pytest.importorskip("warp", reason="warp-lang optional dependency not installed")
+try:
+    import warp as wp
+except ModuleNotFoundError as exc:
+    if exc.name != "warp":
+        raise
+    wp = None
 
 DEVICES = [
     "cpu",
@@ -132,6 +138,8 @@ DEVICES = [
 
 @pytest.fixture(scope="module", params=DEVICES)
 def device(request) -> str:
+    if wp is None:
+        pytest.skip("warp-lang optional dependency not installed")
     if request.param.startswith("cuda") and not wp.is_cuda_available():
         pytest.skip("no CUDA device")
     return request.param

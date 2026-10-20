@@ -33,14 +33,16 @@ Geant4's step limits).
    air and the residual shrinks (0.994 / 0.996 at 1.5 T against 0.979 / 0.975 at 0 T),
    so the "movement" reads up to +2 %. That case is held to the field-free gate instead,
    and gate 3 pins it once the substep is converged.
-2. *The field-free engine at the shipped substep fraction* (0.05) is within 1 % of unity
+2. *The field-free engine at the shipped GS substep fraction* (0.20) is within 1 % of unity
    at a tenth of the wall density and within 3 % down to air density. The residual is a
    thin-gap, step-length effect of the random hinge at an interface, measured after the
    boundary crossing was made exact: 0.2 cm gap -1.7 to -2.5 % at air density, -0.9 % at
    a hundredth, +0.9 % at a tenth; a 2 cm gap is within 0.4 % at every contrast; and it
    halves at a substep fraction of 0.03 (-1.1 / -0.9 %) and is within 1 % at 0.02
    (-0.2 / -0.6 %). Before the fix the same engine read 2.9x at air contrast, +7.9 % at a
-   hundredth and +4.7 % at air even with 0.02 steps.
+   hundredth and +4.7 % at air even with 0.02 steps. These historical convergence
+   measurements used a 0.05 fraction; the default-path gates below exercise GS at
+   its actual shipped 0.20 fraction, without overriding it.
 3. *Convergence*: at a substep fraction of 0.02 the 0.2 cm air-density gap is within
    1.5 % of unity with and without the field, and the field moves it by less than 1.5 %
    (measured -0.2 / -0.6 % at 0 T and -0.8 / -0.4 % at 1.5 T, 0.5 / 1 MeV, +- 0.3 %).

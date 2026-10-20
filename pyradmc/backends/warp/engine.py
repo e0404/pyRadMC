@@ -410,7 +410,7 @@ class WarpEngine:
         secondaries.
     magnetic_field
         Static magnetic field the charged particles are bent by; ``None`` is the
-        field-free world and reproduces every pre-field result byte for byte on
+        field-free world; an explicit zero field reproduces it byte for byte on
         each device. World data like ``grid``: uploaded once per device next to
         the density and material maps, and a gridded map must cover the transport
         grid (checked at construction).

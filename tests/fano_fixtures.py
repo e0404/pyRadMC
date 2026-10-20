@@ -68,21 +68,23 @@ class FanoElectronSource(Source):
         return Primary(self.energy, x, y, z, ux, uy, uz, kind="electron")
 
     def sample_batch(self, seed: int, history_offset: int, n: int) -> dict[str, npt.NDArray[Any]]:
-        rng = np.random.default_rng([seed, history_offset])
-        flat = np.minimum(
-            np.searchsorted(self._cdf, rng.random(n), side="right"), self._cdf.size - 1
-        )
+        # Six draws per history, with a fixed stream position independent of the
+        # engine's chunk size (the same contract as the spectral source sampler).
+        bitgen = np.random.PCG64(seed)
+        bitgen.advance(6 * history_offset)
+        u = np.random.Generator(bitgen).random((n, 6))
+        flat = np.minimum(np.searchsorted(self._cdf, u[:, 0], side="right"), self._cdf.size - 1)
         ix, iy, iz = np.unravel_index(flat, self.grid.shape)
         ox, oy, oz = self.grid.origin
         sx, sy, sz = self.grid.spacing
-        cos_t = 1.0 - 2.0 * rng.random(n)
+        cos_t = 1.0 - 2.0 * u[:, 1]
         sin_t = np.sqrt(np.maximum(0.0, 1.0 - cos_t * cos_t))
-        phi = 2.0 * np.pi * rng.random(n)
+        phi = 2.0 * np.pi * u[:, 2]
         values = {
             "energy": np.full(n, self.energy),
-            "x": ox + (ix + rng.random(n)) * sx,
-            "y": oy + (iy + rng.random(n)) * sy,
-            "z": oz + (iz + rng.random(n)) * sz,
+            "x": ox + (ix + u[:, 3]) * sx,
+            "y": oy + (iy + u[:, 4]) * sy,
+            "z": oz + (iz + u[:, 5]) * sz,
             "ux": sin_t * np.cos(phi),
             "uy": sin_t * np.sin(phi),
             "uz": cos_t,

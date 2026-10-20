@@ -78,15 +78,23 @@ class MagneticField:
     Components are in the engine frame (the physical frame of whatever produced
     the grid; a gantry rotation never touches the field).
 
-    ``values`` is stored as a C-contiguous ``float64`` copy of whatever was passed,
-    so the digest and the device upload have one canonical byte layout.
+    Transport samples the field once per electron substep. Coverage checks only
+    the map's extent, not whether substeps resolve its spatial variation: there is
+    no field-gradient or field-cell boundary limiter. Use a sufficiently fine
+    transport grid and check convergence for nonuniform maps; a coarse transport
+    voxel can otherwise skip a localized field region, including when a step
+    starts at zero field. Physical validation currently covers uniform fields.
+
+    ``values`` is stored as a read-only, C-contiguous ``float64`` copy of whatever
+    was passed, so caller mutations cannot change the field after validation or
+    make its provenance disagree with an uploaded device map.
 
     Attributes
     ----------
     values
         Field components per sample, shape ``(nx, ny, nz, 3)``, tesla, finite.
     spacing
-        Sample-cell edge lengths in cm, ``> 0``.
+        Sample-cell edge lengths in cm, finite and ``> 0``.
     origin
         Lower corner of sample cell ``(0, 0, 0)``, in cm.
     interpolation
@@ -104,15 +112,15 @@ class MagneticField:
 
     def __post_init__(self) -> None:
         """Validate the sample array, the geometry and the interpolation name."""
-        values = np.ascontiguousarray(self.values, dtype=np.float64)
+        values = np.array(self.values, dtype=np.float64, order="C", copy=True)
         if values.ndim != 4 or values.shape[3] != 3:
             raise ValueError(f"values shape {values.shape} must be (nx, ny, nz, 3)")
         if any(n < 1 for n in values.shape[:3]):
             raise ValueError(f"empty field shape {values.shape[:3]}")
         if not np.all(np.isfinite(values)):
             raise ValueError("non-finite field values")
-        if len(self.spacing) != 3 or not all(s > 0.0 for s in self.spacing):
-            raise ValueError(f"non-positive spacing {self.spacing}")
+        if len(self.spacing) != 3 or not all(math.isfinite(s) and s > 0.0 for s in self.spacing):
+            raise ValueError(f"non-finite or non-positive spacing {self.spacing}")
         if len(self.origin) != 3 or not all(math.isfinite(o) for o in self.origin):
             raise ValueError(f"non-finite origin {self.origin}")
         if self.interpolation not in _INTERPOLATIONS:
@@ -124,6 +132,7 @@ class MagneticField:
                 "a single-cell map is the uniform field; build it with "
                 "MagneticField.uniform (interpolation is 'nearest')"
             )
+        values.setflags(write=False)
         object.__setattr__(self, "values", values)
 
     # -- constructors -------------------------------------------------------
@@ -250,7 +259,7 @@ class MagneticField:
         """
         if self.is_uniform:
             bx, by, bz = (float(c) for c in self.values[0, 0, 0])
-            return f"uniform B=({bx:g}, {by:g}, {bz:g}) T"
+            return f"uniform B=({bx:.17g}, {by:.17g}, {bz:.17g}) T"
         nx, ny, nz = self.shape
         return (
             f"{_MODE_NAMES[self.mode]} {nx}x{ny}x{nz} |B|max={self.max_magnitude:.4g} T "

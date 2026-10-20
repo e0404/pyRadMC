@@ -65,8 +65,8 @@ class RunProvenance:
     magnetic_field: str | None = None
     """Provenance of the static magnetic field the charged particles were bent by,
     from :attr:`~pyradmc.geometry.field.MagneticField.provenance`; ``None`` when the
-    engine was built without one (the field-free path, byte-identical to every
-    result produced before fields existed). The field is engine data, not a run
+    engine was built without one. An explicit zero field reproduces that path
+    byte for byte on each target. The field is engine data, not a run
     option, so it is recorded here rather than inferred from the engine later."""
 
     def summary(self) -> str:

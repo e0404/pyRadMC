@@ -116,6 +116,38 @@ def test_values_are_stored_as_contiguous_float64() -> None:
     np.testing.assert_array_equal(field.values, fortran)
 
 
+@pytest.mark.parametrize("constructor", ["direct", "uniform", "on_grid"])
+def test_field_owns_a_read_only_copy_of_input_values(constructor: str) -> None:
+    from pyradmc.geometry.field import MagneticField
+    from pyradmc.geometry.grid import VoxelGrid
+
+    values = np.full((2, 2, 2, 3), 0.5)
+    if constructor == "uniform":
+        values = values[0, 0, 0]
+        field = MagneticField.uniform(values)
+    elif constructor == "on_grid":
+        grid = VoxelGrid.uniform_water(shape=(2, 2, 2), spacing=(1.0, 1.0, 1.0))
+        field = MagneticField.on_grid(grid, values)
+    else:
+        field = MagneticField(values=values, spacing=(1.0, 1.0, 1.0))
+    digest = field.digest
+    values[...] = np.nan
+    assert field.sample(0.5, 0.5, 0.5) == (0.5, 0.5, 0.5)
+    assert field.digest == digest
+    with pytest.raises(ValueError, match="read-only"):
+        field.values[0, 0, 0, 0] = 1.5
+
+
+@pytest.mark.parametrize("axis", range(3))
+def test_spacing_must_be_finite(axis: int) -> None:
+    from pyradmc.geometry.field import MagneticField
+
+    spacing = [1.0, 1.0, 1.0]
+    spacing[axis] = np.inf
+    with pytest.raises(ValueError, match="spacing"):
+        MagneticField(values=np.zeros((2, 2, 2, 3)), spacing=tuple(spacing))
+
+
 def test_uniform_is_one_nearest_cell_with_infinite_extent() -> None:
     from pyradmc.geometry.field import FIELD_UNIFORM, MagneticField
     from pyradmc.geometry.grid import VoxelGrid
@@ -294,6 +326,17 @@ def test_provenance_names_mode_shape_and_max_magnitude() -> None:
     assert tri.digest[:8] in tri.provenance
     near = MagneticField(values=values, spacing=(1.0, 1.0, 1.0), interpolation="nearest")
     assert "nearest" in near.provenance
+
+
+def test_uniform_provenance_preserves_the_field_components() -> None:
+    from pyradmc.geometry.field import MagneticField
+
+    b = 1.5
+    changed = np.nextafter(b, np.inf)
+    assert (
+        MagneticField.uniform((b, 0.0, 0.0)).provenance
+        != MagneticField.uniform((changed, 0.0, 0.0)).provenance
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -77,7 +77,7 @@ class ReferenceEngine:
     rng: RNG
     magnetic_field: MagneticField | None = None
     """Static magnetic field the charged particles are bent by; ``None`` is the
-    field-free world and reproduces every pre-field result byte for byte. World
+    field-free world; an explicit zero field reproduces it byte for byte. World
     data, like ``grid``: a gridded map must cover the transport grid
     (:meth:`~pyradmc.geometry.field.MagneticField.covers`), checked here once."""
 

@@ -16,8 +16,8 @@ than the passes.
 | Dij column truncation | DVH endpoints D2/D50/D98 | < 0.5 % | passes |
 | Charged-particle gyration in a magnetic field | analytic helix (Bielajew 1988) | radius within 1.5 %, handedness, straight along B | 0.1 % |
 | Backend vs backend, field on (water slabs, electron beam, tabulated spectral thorax at 1.5 T) | reference oracle | chi-squared detection oracle | passes |
-| Fano test in a field, density ratios 0.1 / 0.01 / 0.001 (0.2 and 2 cm gaps), 0.5 and 1 MeV, 0.35 and 1.5 T | Fano theorem (Bouchard et al. 2015) | the field moves the gap-to-wall dose per mass by < 1 % | moved by <= 0.4 % at a tenth and a hundredth, <= 0.8 % in a 2 cm air gap; in a 0.2 cm air gap the field shrinks the field-free thin-gap residual (0.98 -> 0.995), held to that residual's 3 % gate |
-| Fano test without a field, same phantoms, shipped substep fraction 0.05 | Fano theorem | gap-to-wall within 1 % at a tenth of the wall density, within 3 % down to air density | 2 cm gaps 0.996-1.001 at every contrast; 0.2 cm air gap 0.979 / 0.975 (0.5 / 1 MeV) |
+| Fano test in a field, density ratios 0.1 / 0.01 / 0.001 (0.2 and 2 cm gaps), 0.5 and 1 MeV, 0.35 and 1.5 T | Fano theorem (Bouchard et al. 2015) | the field moves the gap-to-wall dose per mass by < 1 % | 2026-10-20, GS fraction 0.20: moved by <= 0.25 % at a tenth and a hundredth, <= 0.7 % in a 2 cm air gap; in a 0.2 cm air gap the field shrinks the field-free residual (0.971 / 0.979 -> 0.995), held to that residual's 3 % gate |
+| Fano test without a field, same phantoms, shipped GS substep fraction 0.20 | Fano theorem | gap-to-wall within 1 % at a tenth of the wall density, within 3 % down to air density | 2026-10-20, chunk-invariant source: 2 cm gaps 0.997-1.000 at every contrast; 0.2 cm air gap 0.9706 / 0.9785 (0.5 / 1 MeV) |
 | Exit-side ERE vs field strength, 10 x 10 cm2 6 MV on 20 x 20 x 8 cm3 water (Raaijmakers et al. 2008, Geant4 + film-verified setup) | literature: excess 40 / 52 / 42 / 25 % of dmax at 0.2 / 0.75 / 1.5 / 3 T, 20 % shift 17.5 / 9.5 / 4 mm, build-up 15 / 12 / 7 mm | excess within 30 % at 0.75-3 T with the 0.75 > 1.5 > 3 T ordering; shift within 4 mm; 1.5 T build-up within 2 mm | excess 0.42 / 0.63 / 0.50 / 0.29 (ratios 0.79 and 0.58 vs 0.81 and 0.60); shift 15 / 7.5 / 2.5 mm; build-up 14.8 / 12.2 / 12.2 mm |
 | Fano test, 0.2 cm air gap, substep fraction 0.02, 0 and 1.5 T | Fano theorem | gap-to-wall within 1.5 %, field moves it < 1.5 % | 0.998 / 0.994 at 0 T, 0.992 / 0.996 at 1.5 T (0.5 / 1 MeV, +- 0.3 %) |
 | Electron return effect, water / light gap / water | qualitative sign (Raaijmakers 2005) | gain before the gap, loss behind it, lateral push toward the Lorentz force | passes |
@@ -74,6 +74,14 @@ Rayleigh). Use the tabulated backend where the soft spectrum matters.
 
 ### Magnetic-field dose is gated against one published benchmark
 
+The physical gates below use **uniform fields**. Nearest and trilinear map lookups
+are tested on host and device, but nonuniform-field dose is not independently
+validated. The field is sampled once per electron substep, with no limiter at a
+field-map cell boundary or on its gradient. A covering map can therefore still be
+under-resolved: a coarse transport voxel can skip a localized nonzero field region
+when the substep starts in a zero-field region. Refine the transport grid and check
+step-size convergence before using nonuniform maps for dose calculations.
+
 The Lorentz step is pinned against the analytic helix, against the reference engine
 with the field on (including the tabulated spectral thorax at 1.5 T) and by the Fano
 test in a field down to air density, and since 2026-10-18 against one published
@@ -99,11 +107,13 @@ welcome as an independent-code check.
 Two standing caveats. Outside the transport grid there is no field, so an MR-linac
 setup must extend the grid with air voxels to the phase-space plane. And at a
 **thousandfold** density contrast (water / air) the field-free engine satisfies Fano
-only to about 2 % at the shipped substep fraction, and only for a *thin* gap: measured
-2026-10-18, gap-to-wall dose per mass 0.98 +- 0.003 for a 0.2 cm air-density gap at
-0.5 MeV (ECUT 0.05 as the test instrument), -0.9 % at a hundredfold contrast, +0.9 % at a
-tenth, while a 2 cm gap is within 0.4 % at every contrast; the thin gap's residual halves
-at a substep fraction of 0.03 and is within 1 % at 0.02. That residual is step-size convergence of the
+only to about 2-3 % at the shipped GS fraction 0.20, and only for a *thin* gap: measured
+2026-10-20 with the chunk-invariant source, gap-to-wall dose per mass 0.9706 +- 0.0031
+at 0.5 MeV and 0.9785 +- 0.0019 at 1 MeV for a 0.2 cm gap (ECUT 0.05 as the test
+instrument), while a 2 cm gap is within 0.4 % at every contrast. The historical
+0.05-fraction convergence study found about a 2 % thin-gap residual, halving at 0.03
+and within 1 % at 0.02 (docs/decisions.md); those measurements were not at the shipped
+default. That residual is step-size convergence of the
 random hinge at an interface (docs/decisions.md records the boundary handling it replaced,
 which read 2.9x at air contrast and +8 % at a hundredfold, and the Warp energy-loss round
 trip that read 0.855 in air under a field at a tight gyration cap); it sits

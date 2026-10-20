@@ -380,9 +380,11 @@ These outlive the work that produced them. Each is a live constraint, not histor
   face, and one that leaves does not come back. An MR-linac setup therefore extends the
   transport grid with real air voxels to the phase-space or head exit plane; the head
   pre-solve's straight slide of contaminant electrons and the fringe field in the head
-  are not modelled. The field-free path is pinned byte-identical to the pre-field
-  engines on each target, by test (`None` against an explicit zero field) and by a
-  one-off before/after byte comparison on ref, Warp CPU and CUDA.
+  are not modelled. On each target, `None` is pinned byte-identical to an explicit
+  zero field within the current implementation. The field plumbing alone also
+  passed a one-off before/after byte comparison on ref, Warp CPU and CUDA; the
+  separate hinge-boundary and Warp loss fixes above change historical field-free
+  results, so that comparison is not a byte-identity guarantee across releases.
 
 ## 9. Git workflow and commit convention
 
