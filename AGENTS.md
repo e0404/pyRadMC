@@ -241,7 +241,9 @@ This ordering was established empirically, not assumed. Do not reorder it withou
 - Small commits. One conceptual change each. Commit message states the physics, not the
   diff, in the convention of section 9.
 - Type annotations everywhere outside kernels. `mypy --strict` gates non-kernel code.
-  Warp kernels are exempt; mark them.
+  Warp kernels are exempt; mark them. Coverage exempts them too (`exclude_also` on
+  `@wp.kernel` / `@wp.func` in pyproject.toml): Warp compiles those bodies from the
+  AST and they never run as Python, so a "missing" kernel line is not a missing test.
 - `ruff` for lint and format. No manual formatting debates.
 - Library output goes through `logging.getLogger(__name__)`; `warnings.warn` is reserved for
   result caveats and API misuse. No `print` in `pyradmc/` (ruff `T20` enforces this), and no

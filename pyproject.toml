@@ -116,6 +116,14 @@ filterwarnings = ["error"]
 # A bare `pytest --cov` (what CI runs) measures the package, not the test tree.
 source = ["pyradmc"]
 
+[tool.coverage.report]
+# Warp compiles the body of every `@wp.kernel` / `@wp.func` from its Python AST to
+# C++ / CUDA; those lines never execute as Python, so no test can cover them and
+# counting them only hides real gaps (the electron kernel alone is ~2000 lines). The
+# same exemption mypy grants kernel code (AGENTS.md 5). The pure-scalar physics the
+# reference engine runs stays measured; only the decorated bodies are excluded.
+exclude_also = ['^\s*@wp\.kernel', '^\s*@wp\.func']
+
 [tool.mypy]
 # No pinned python_version: modern numpy ships PEP 695 stubs that mypy refuses to parse
 # under 3.10 semantics. Types are checked under the interpreter mypy runs on; the 3.10
