@@ -85,11 +85,13 @@ across its 0.256-10 MeV shape gap and sits 1.1-1.3x the closed form at 1-6 MeV).
 Stated omission: no Mott (spin-relativistic) factor on the
 closed-form moment, a few percent at `beta -> 1` in low-Z media.
 
-**Each electron substep is capped at the next voxel face.** Without it a step carried one
-medium's stopping power across a boundary into the neighbour's mass, producing a
-single-voxel interface spike — **1.95x before, under 1.4x after** at a pure density step.
-Residual interface structure is second-order (the hinge can still deflect the short
-post-hinge segment across the face) plus genuine interface dosimetry.
+**Each electron substep is capped at the next voxel face, and so is each hinge chord.**
+Without the cap a step carried one medium's stopping power across a boundary into the
+neighbour's mass, producing a single-voxel interface spike — **1.95x before, under 1.4x
+after** at a pure density step. The cap alone left the hinge's second chord free to cross
+the face after the deflection; that residual, dominant at air contrast, was closed on
+2026-10-18 (see "The random hinge's second chord" below). What remains is step-size
+convergence of the hinge at an interface plus genuine interface dosimetry.
 
 **Positrons stay Møller-approximated** — no Bhabha, annihilation at rest. If upgraded,
 both land together as the new default, with a test showing the dosimetric effect.
@@ -270,6 +272,60 @@ flatness plus depth growth reads "scatter"; fan-coordinate constancy would read 
 tuning, texture-memory reads and step-fraction changes all measured neutral or negative.
 The kernel is divergence- and latency-bound. What remains is multi-GPU or algorithmic.
 
+## Magnetic field (MR-linac dose), 2026-10-17
+
+**The field is engine data, not a run option.** `MagneticField` goes to the engine
+constructor next to the grid and the cross-sections, is uploaded once per device inside
+the kernels' `GridInfo` struct (no kernel signature changed), and is recorded in the
+result's provenance. AGENTS.md 2.10: there is no switch; the only way to transport without
+a field is to not supply one. A gridded map must cover the transport grid — a zero fringe
+inside the grid would be a silent bias, so it is refused rather than clamped.
+
+**Each hinge chord follows the arc to second order: rotate by half the gyration angle,
+drift, rotate by the other half**, with the gyroradius at the chord's mid-energy. The
+chord of a circular arc lies along its midpoint direction, so this reproduces Bielajew's
+(1988) first-order displacement exactly and is closer to the arc at second order (end
+point within s theta^2/24), with the direction exact and the component along B conserved
+by construction — the property EGSnrc enforces by hand in its renormalisation (Malkov &
+Rogers 2016, Appendix A). No separate displacement term is added; it is already in the
+chord. Multiple scattering and the field stay decoupled within a substep, as in every
+production code.
+
+**The gyration-angle cap is 0.2 rad per substep** (`LORENTZ_STEP_ANGLE_MAX`), the value
+Malkov & Rogers validated against the Fano test for their higher-order scheme (stable to
+0.4; the historical first-order scheme needed 0.02 at two to three times the cost). It is
+gated here by the Fano test in a field and recorded as accuracy-defining. The voxel-face
+cap is still taken along the pre-rotation direction, so under a field a chord can end up to
+s theta/2 (tens of microns at 1 MeV, 1.5 T) off its straight-line prediction; the next
+substep re-reads its voxel. Stated at the cap.
+
+**The field plumbing alone preserves field-free results.** The
+kernel branches once per substep on the field mode (the `msc_model_gs` precedent) and the
+field-free path executes no new floating-point operation and draws no random number.
+Measured interleaved on the RTX 4070 at healthy clocks: a uniform zero field or a zero
+trilinear map against no field 0.98 / 1.01 (noise); a 1.5 T field in water 1.05. The
+before/after dose bytes of a 6 MeV open field, an electron beam and a 2x2 Dij matched on
+the reference engine, Warp CPU and Warp CUDA after every slice. `wp.static`
+specialisation was kept as the fallback and was not needed. This measurement predates
+the hinge-boundary and inverse-range fixes below, which also change field-free dose.
+The standing bit-identity tests compare an explicit zero field with no field within
+the current implementation; they do not assert equality with an earlier release.
+
+**Air is the cost.** In air the energy-limited step is metres and the voxel face used to
+bound the substep; under a field the gyration cap does, several times per voxel.
+Measured on a water / air / water slab, 6 MeV, 10x10 cm: 1.20x wall at 0.35 T and 2.27x
+at 1.5 T against the field-free run (Malkov & Rogers report +76 % with half the phantom
+air). An exact-helix low-density path (chord substeps without multiple-scattering or
+deposit work, the EGSnrc single-scattering-mode precedent) is the lever if this matters;
+it needs the Fano-in-field gate and a realistic-geometry measurement, not a guess.
+
+**Outside the transport grid there is no field.** The world beyond the grid stays vacuum,
+a charged particle born outside flies straight to the entry face, and one that leaves does
+not return. MR-linac setups extend the grid with real air voxels to the phase-space or head
+exit plane (the commissioning example's air-gap pattern). The head pre-solve's straight
+slide of contaminant electrons and the fringe field in the head are documented
+limitations, not loop code.
+
 ## Hazards learned the hard way
 
 **Kernel compilation could leak into host modules.** Loading the Warp physics patched
@@ -290,6 +346,85 @@ never arithmetic.
 
 **A phase space must be normalized per original primary**, not per stored record. Caught
 by a demo whose absolute dose was wrong, not by a unit test; now regression-pinned.
+
+**The random hinge's second chord stops at a voxel face; the nudge across a face is a
+free move charged by the next substep in the new voxel.** Found 2026-10-17 by the Fano
+test in a field, at *zero* field: a water / air-density / water slab showed gap-to-wall
+dose-per-mass of 5.1 and 2.9 for 0.1 and 0.2 cm gaps at 0.5 MeV, and a 2 cm gap at a
+hundredfold contrast still +7.9 % (0.5 MeV, ECUT 0.05). Three mechanisms, all in the
+boundary handling and all predating the field: (1) the voxel-face cap is taken along the
+pre-hinge direction, so after the deflection the second chord could end in the
+neighbouring voxel and file its share of the substep's loss — computed with the start
+voxel's density — there, with range-out terminations landing there too; (2) the chords
+split the full capped length *including* the nudge past the face, so on short final steps
+the first chord overshot the face and the second ran inside the neighbour; (3) the nudge
+itself was transported path charged at the old voxel's density, so an electron ranging
+out in the last micron before an air face was carried into the air with a sliver above
+ECUT and terminated there. The fix (2026-10-18, reference loop and Warp twin alike): a
+chord that reaches a face stops on it, with its loss scaled to the shortened length and a
+Møller event sampled beyond the face not reached (the flight is memoryless and re-sampled
+in the next voxel) — PENELOPE's rule for an interface met on the second leg; under a
+field the first chord is cut the same way, since it bends off the pre-rotation cap; the
+chords split only the path inside the voxel; the particle is carried across by a
+geometric nudge that the next substep charges at the new voxel's density (a ``carry``
+length), or left just inside the face if it is terminal there; and a face-limited
+substep whose second chord ends within a nudge of the face counts as reaching it, else a
+rounding residue leaves the particle a zero-length step short of the face for ever (that
+infinite loop was found the hard way, by a test hanging 15 hours). Measured on the
+embedded Fano phantom at ECUT 0.05 (test instrument), 0.5 MeV, 0.2 cm gap, CUDA and Warp
+CPU agreeing: **air contrast 2.9x -> 0.98 +- 0.003; hundredfold +7.9 % -> -0.9 %; tenth
+-0.6 % -> +0.9 %**, all for a 0.2 cm gap, while a 2 cm gap is within 0.4 % at every
+contrast; the thin gap's residual halves at a substep fraction of 0.03 (-1.1 / -0.9 %)
+and is within 1 % at 0.02 (-0.2 / -0.6 % at 0.5 / 1 MeV; -0.8 / -0.4 % under 1.5 T,
+which shortens its substeps), so the remaining -2 % at the shipped GS fraction of 0.20
+(0.987 at 0.10) is step-size convergence of the hinge at an interface, not bookkeeping,
+and the validation tier now gates all three statements (field moves the ratio < 1 %,
+field-free residual < 1 % at a tenth and < 3 % to air, converged < 1.5 % at 0.02 with
+and without the field). The shipped GS fraction stays 0.20 (AGENTS.md section 8: an
+accuracy-defining change needs the realistic-geometry measurement); an earlier draft of
+this entry called the baseline fraction 0.05, which is the Gaussian hinge's default,
+not the one these runs used. (Building the gate taught a second lesson: a light slab
+open to the phantom's lateral faces loses electrons sideways over their metre-scale
+range with nothing replacing them — a 17-23 % field-free deficit at a hundredfold
+contrast on an 8 cm wide phantom — so the slab is embedded laterally in water.) Dose
+effect in the electron return effect's slab (6 MeV, 1.5 T): the air voxels adjacent to
+water drop about threefold, the water side within 2 %; field-free water-only results
+move at the 1e-4 level (deposited energy 1.7348e6 -> 1.7342e6 MeV on the 64^3 open field).
+
+**A particle that has reached a voxel face is carried across along the face normal, and a
+chord cut at a face turns by the cut chord's gyration angle.** Two corrections to the
+chord-cut rule above, both found by its first perf A/B (2026-10-18). (1) The nudge across
+a face was a micron along the *direction*; at grazing incidence its normal component is
+below one float32 ulp of a coordinate near 10 cm, the position does not move, and a bent
+chord cut at the face with no in-voxel path left is cut again next substep with
+zero-length chords — the cut path has no hinge and no rotation to turn it away — so the
+lane sits on the face charging one carry micron per iteration until its energy is gone.
+The water / air slab at 1.5 T ran **7.6x slower on the GPU** and not at all slower in the
+float64 reference loop (substeps per history 1615 with the cut, 1606 without). The nudge
+is now a micron along the normal of the face the chord reached (``voxel_face_axis``,
+``nudge_across_face``), always resolvable, the same micron geometrically; it applies to
+every crossing, field or not. (2) Both half-rotations of a chord used the full chord's
+gyration angle even when the chord was truncated at a face, so every cut over-turned the
+direction without the matching path; the second half-turn is now the cut chord's whole
+angle minus the first half-turn, so direction and path stay on one arc. Gated by the
+Fano-in-field tier and the slab throughput in the perf tier.
+
+**The Warp kernel takes both ends of a substep's continuous loss through the same
+inverse-range table.** The reference loop evaluates ``E_end = r^-1(r(E) - rho s)`` on
+one piecewise-linear range grid, whose forward and inverse interpolations are exact
+inverses of each other. The kernel tabulates range-of-energy and energy-of-range on two
+different log grids, and until 2026-10-18 computed ``de = e - E(R(e) - rho s)``: the
+round trip ``E(R(e)) - e`` is a fixed error of order 1e-6 MeV per substep, invisible
+against a 5 % step but comparable to the tens of micro-eV a gyration-capped substep in
+air loses, and because the kernel clamps ``e_end <= e`` every substep whose loss fell
+below the error lost *nothing*. Found by the Fano test in a field at air density, where
+the gyration cap makes the substeps short: gap-to-wall dose per mass 0.984 at the shipped
+cap of 0.2 rad and 0.855 at 0.05 (1 MeV, 1.5 T, 2 cm gap), 1.004 and 1.000 with
+``de = E(R(e)) - E(R(e) - rho s)``; field-free the same gap moved 0.9947 -> 0.9995.
+One extra table lookup per substep. The lesson generalises: any per-substep quantity
+with a fixed absolute error is a bias that scales with the substep *count*, and the
+field, by capping the substep in air, multiplies that count a thousandfold relative to
+the loss.
 
 **Flipping a validated default re-rolls every fixed-seed statistical test.** Expect around
 a 1 % trip rate across the suite, and repair those by fixing the oracle, never by

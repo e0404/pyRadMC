@@ -23,13 +23,25 @@ One particle at a time, for the reference backend. The scheme, per docs/decision
   maintainer-approved approximation) and annihilate at rest into two back-to-back
   511 keV photons wherever they stop; a positron leaving the grid carries its
   annihilation energy with it.
+- **Static magnetic field** (:mod:`pyradmc.physics.lorentz`; Bielajew 1988,
+  doi:10.1007/978-1-4613-1059-4_19; Malkov & Rogers 2016, doi:10.1118/1.4954318):
+  the field is sampled once per substep and each of the hinge's two straight chords
+  is taken along the direction at its own midpoint — rotate about B by half the
+  chord's gyration angle, drift, rotate by the other half — with the gyroradius at
+  the chord's mid-energy. The direction is then exact and the end point within
+  ``s theta^2/24`` of the arc. Multiple scattering and the field are decoupled within
+  a substep, as in every production code; the decoupling error is bounded by the
+  gyration-angle cap :data:`LORENTZ_STEP_ANGLE_MAX`. Outside the grid there is no
+  field: a charged particle born outside flies straight to the entry face.
 
-Substeps are limited three ways: a fraction of the CSDA range (energy-loss
+Substeps are limited four ways: a fraction of the CSDA range (energy-loss
 accuracy), a mean-square hinge-angle ceiling (multiple-scattering accuracy — the
 angular cap that replaced the historic half-voxel-edge limit; see
-:data:`STEP_HINGE_THETA2_MAX`), and truncation at the next voxel face
-(heterogeneity: a substep's density and material are exactly those of the voxel
-it runs in). The reference backend keeps the caps conservative; the Warp backend
+:data:`STEP_HINGE_THETA2_MAX`), a gyration-angle ceiling in a magnetic field
+(:data:`LORENTZ_STEP_ANGLE_MAX`), and truncation at the next voxel face
+(heterogeneity: a substep's density and material are those of the voxel it
+runs in — exactly so without a field, and to within the chord's bend with one).
+The reference backend keeps the caps conservative; the Warp backend
 mirrors this loop step for step and is validated against it — step aggressiveness
 beyond it must be bought with better transport mechanics, not by loosening the
 oracle.
@@ -48,9 +60,16 @@ from pyradmc import (
     PHOTON_ROULETTE_WEIGHT_CAP,
 )
 from pyradmc.data.interface import CrossSectionSource
-from pyradmc.geometry.grid import VoxelGrid, distance_to_voxel_boundary
+from pyradmc.geometry.field import MagneticField
+from pyradmc.geometry.grid import (
+    VoxelGrid,
+    distance_to_voxel_boundary,
+    nudge_across_face,
+    voxel_face_axis,
+)
 from pyradmc.physics.brems import bremsstrahlung_step_parameters, sample_bremsstrahlung_energy
 from pyradmc.physics.direction import rotate_direction
+from pyradmc.physics.lorentz import gyroradius_cm, lorentz_rotation_angle, rotate_about_axis
 from pyradmc.physics.moller import moller_direction_cosines, sample_moller_delta_energy
 from pyradmc.physics.msc import sample_hinge_cos_theta
 from pyradmc.physics.path import sample_path_length
@@ -69,6 +88,7 @@ from pyradmc.transport.particles import (
 __all__ = [
     "BOUNDARY_NUDGE_CM",
     "GS_STEP_ENERGY_FRACTION",
+    "LORENTZ_STEP_ANGLE_MAX",
     "STEP_ENERGY_FRACTION",
     "STEP_HINGE_THETA2_MAX",
     "SUBSTEP_DEPOSIT_CAP",
@@ -146,6 +166,30 @@ rerunning them.
 """
 
 _ENTRY_NUDGE_CM = 1.0e-9  # same convention as the photon loop
+
+LORENTZ_STEP_ANGLE_MAX: float = 0.2
+"""Largest gyration angle (radians) a charged-particle substep may turn through.
+
+In a static magnetic field every substep is also capped at ``s_B = 0.2 r_g`` with
+``r_g`` the gyroradius at the substep's start energy (:mod:`pyradmc.physics.lorentz`).
+The cap is what keeps the two straight chords of the random hinge close to the
+gyration arc: each chord is taken along the direction at its own midpoint (rotate by
+half the chord's angle, drift, rotate by the other half), which places its end point
+within ``s theta^2 / 24`` of the exact arc and leaves the direction exact, so the
+residual is second order in the angle. The value is the one Malkov & Rogers (2016,
+Med. Phys. 43, 4447, doi:10.1118/1.4954318) validated for their higher-order EGSnrc
+scheme: it passes the Fano test in a field to 0.1 % at ``delta_u = 0.2`` and stays
+stable to 0.4, where the historical first-order scheme needed 0.02 at two to three
+times the cost.
+
+Where it binds: in water at 1.5 T, ``s_B`` is 0.63 mm at 1 MeV against the 0.9 mm
+energy-limited GS step, so it shortens substeps below roughly 1.5 MeV; at 0.35 T it is
+inert in tissue. In air the energy-limited step is metres and the voxel face bound the
+substep before; now ``s_B`` does, so air costs several substeps per voxel.
+
+Accuracy-defining (AGENTS.md 2.8): changing it needs the Fano-in-field gate and a
+measurement on realistic spectral, heterogeneous geometry, never water alone.
+"""
 
 BOUNDARY_NUDGE_CM: float = 1.0e-4
 """Over-step past a voxel face when a substep is boundary-limited, in cm.
@@ -225,6 +269,7 @@ def electron_steps(
     step_energy_fraction: float | None = None,
     msc_model: str = "gs",
     deposit_resolution_cm: float | None = None,
+    field: MagneticField | None = None,
 ) -> float:
     """Transport one electron or positron; secondaries go to ``spawn``.
 
@@ -274,6 +319,15 @@ def electron_steps(
     model's validated fraction) — a measurement instrument for substep
     resolution studies. Changing a *default* is a maintainer decision gated
     on the validation tier, not a knob turn.
+
+    ``field`` is the static magnetic field the particle moves in, or ``None`` for
+    the field-free world. It is world data handed down from the engine, never a
+    per-run option (AGENTS.md 2.10). The Lorentz force does no work, so it enters
+    only through the direction of each chord and the step cap that keeps the chord
+    close to the gyration arc; the field-free path executes no field operation and
+    draws no random number. An explicit zero field therefore reproduces ``None``
+    byte for byte; the separate boundary and loss fixes can change historical
+    field-free results (see CHANGELOG.md).
     """
     if msc_model not in ("gaussian", "gs"):
         raise ValueError(f"unknown msc_model {msc_model!r}; expected 'gaussian' or 'gs'")
@@ -288,6 +342,10 @@ def electron_steps(
     e = energy
     w = weight
     latent = 2.0 * ELECTRON_MASS_MEV if is_positron else 0.0
+    # Path already walked in the current voxel that no substep has charged yet: the
+    # nudge a face crossing carries the particle in by. It is charged here, at this
+    # voxel's density, by the first substep taken in the voxel (see the hinge).
+    carry = 0.0
 
     # Vacuum flight for a primary born outside the phantom (electron beams).
     if not grid.contains(x, y, z):
@@ -366,6 +424,25 @@ def electron_steps(
         rho = float(grid.density[ix, iy, iz])
         material = int(grid.material[ix, iy, iz])
 
+        # --- magnetic field at the substep start -----------------------------------
+        # Sampled once per substep and held over both chords (with a face-capped
+        # substep a per-voxel map is then exact). A zero vector is the field-free
+        # path: no cap, no rotation, no random number — byte-identical to ``None``.
+        has_field = False
+        b_mag = 0.0
+        b_ux = 0.0
+        b_uy = 0.0
+        b_uz = 0.0
+        if field is not None:
+            bx, by, bz = field.sample(x, y, z)
+            b2 = bx * bx + by * by + bz * bz
+            if b2 > 0.0:
+                b_mag = math.sqrt(b2)
+                b_ux = bx / b_mag
+                b_uy = by / b_mag
+                b_uz = bz / b_mag
+                has_field = True
+
         # --- substep length --------------------------------------------------------
         range_cm = cross_sections.csda_range(e, material) / rho
         s_max = step_energy_fraction * range_cm
@@ -381,8 +458,17 @@ def electron_steps(
                 cross_sections.scattering_power(e, material, ecut) * rho
             )
             s_max = min(s_max, s_theta)
+        if has_field:
+            # Curvature cap (LORENTZ_STEP_ANGLE_MAX): bound the gyration angle per
+            # substep so each straight chord stays close to the arc it stands for.
+            s_max = min(s_max, LORENTZ_STEP_ANGLE_MAX * gyroradius_cm(e, b_mag))
         # Cap at the next voxel face (plus the nudge across it) so the substep's
-        # density and material stay those of the voxel it starts in.
+        # density and material stay those of the voxel it starts in. The distance
+        # is taken along the pre-rotation direction: a bent chord can end up to
+        # s*theta/2 (at most delta_u^2 r_g / 2, tens of microns at 1 MeV, 1.5 T)
+        # off the straight-line prediction, so under a field the one-voxel
+        # invariant holds to that tolerance and the next substep re-reads its
+        # voxel — the stated approximation of this scheme.
         s_boundary = (
             distance_to_voxel_boundary(
                 x, y, z, ux, uy, uz, *grid.origin, *grid.spacing, *grid.shape
@@ -399,20 +485,35 @@ def electron_steps(
         # geometry-truncated substep ends at the boundary with no interaction.
         moller_pending = s_interaction <= s_geometry
 
+        # The face cap ends the substep a nudge past the face. That micron is a
+        # geometric device for crossing, not path in this voxel: the chords split
+        # and the loss covers the path *inside* this voxel, ``s_in``, plus any
+        # ``carry`` — the nudge the particle entered this voxel by, charged now at
+        # this voxel's density. (Charging the nudge at the old voxel's density let
+        # electrons that range out in the last micron before an air face be carried
+        # into the air with a sliver above ECUT and terminate there at water-density
+        # rate: the last 10 % of the Fano violation in a 2 mm air gap. Splitting the
+        # full s let the first chord overshoot the face on short final steps.)
+        face_limited = s == s_boundary
+        s_in = s - BOUNDARY_NUDGE_CM if face_limited else s
+        crossing = False
+
         # --- continuous loss over the substep (exact, DPM-style) --------------------
-        # E_end = r^-1(r(E) - rho*s) with the restricted-collision range, replacing
-        # the first-order S(E_start)*rho*s linearization; the range-out shortening
+        # E_end = r^-1(r(E) - rho*path) with the restricted-collision range, replacing
+        # the first-order S(E_start)*rho*path linearization; the range-out shortening
         # is exact by the same map. Sempau et al. 2000, doi:10.1088/0031-9155/45/8/315.
+        path = s_in + carry
         available = cross_sections.restricted_range(e, material, ecut)
-        if rho * s >= available:
-            # The electron ranges out inside this substep.
-            s = available / rho
+        if rho * path >= available:
+            # The electron ranges out inside this substep, in this voxel.
+            s_in = max(available / rho - carry, 0.0)
+            path = s_in + carry
             de = e - ecut
             moller_pending = False
         else:
-            de = e - cross_sections.energy_after_mass_path(e, material, ecut, rho * s)
+            de = e - cross_sections.energy_after_mass_path(e, material, ecut, rho * path)
         emit_probability, local_brems = bremsstrahlung_step_parameters(
-            e, cross_sections.radiative_stopping_power(e, material), rho, s, pcut
+            e, cross_sections.radiative_stopping_power(e, material), rho, path, pcut
         )
         continuous = de + local_brems
         emit_brems = uniform(rng_state) < emit_probability
@@ -421,20 +522,71 @@ def electron_steps(
         substep_factor = deposit_weight(e, material)
 
         # --- random hinge: move, deflect, move --------------------------------------
-        s1 = uniform(rng_state) * s
-        s2 = s - s1
-        d1 = continuous * (s1 / s) if s > 0.0 else 0.0
+        # A chord that reaches a face stops on it and the particle is carried across
+        # afterwards (or left just inside if terminal there). The carry's share of
+        # the loss rides with the first chord: it was walked just behind it.
+        s1 = uniform(rng_state) * s_in
+        s2 = s_in - s1
+        d1 = continuous * ((s1 + carry) / path) if path > 0.0 else 0.0
         d2 = continuous - d1
+        carry = 0.0
 
+        # Under a field each chord is taken along the direction at its midpoint:
+        # rotate by half the chord's gyration angle, drift, rotate by the other
+        # half. The gyroradius is read at the chord's mid-energy (the hinge already
+        # knows the chord's share of the loss), which is the energy half of the
+        # midpoint rule. The Lorentz force does no work, so the loss is untouched.
+        half = 0.0
+        cut = False
+        if has_field:
+            half = 0.5 * lorentz_rotation_angle(s1, gyroradius_cm(e - 0.5 * d1, b_mag), is_positron)
+            ux, uy, uz = rotate_about_axis(ux, uy, uz, b_ux, b_uy, b_uz, half)
+            # The face cap was taken along the pre-rotation direction; the bent
+            # chord may reach a face sooner. Stop there and end the substep (the
+            # PENELOPE rule for an interface met before the hinge): the remainder
+            # is transported from the new voxel with that voxel's medium.
+            s1_face = distance_to_voxel_boundary(
+                x, y, z, ux, uy, uz, *grid.origin, *grid.spacing, *grid.shape
+            )
+            if s1 >= s1_face:
+                d1 = d1 * (s1_face / s1) if s1 > 0.0 else 0.0
+                s1 = s1_face
+                cut = True
+                axis = voxel_face_axis(
+                    x, y, z, ux, uy, uz, *grid.origin, *grid.spacing, *grid.shape
+                )
+                # The first half-turn was the full chord's; make the whole turn the
+                # cut chord's, so direction and path stay on the same arc.
+                half = (
+                    lorentz_rotation_angle(s1, gyroradius_cm(e - 0.5 * d1, b_mag), is_positron)
+                    - half
+                )
         escaped += deposit_spread(x, y, z, ux, uy, uz, s1, w * d1, substep_factor)
         e -= d1
         x += ux * s1
         y += uy * s1
         z += uz * s1
+        if has_field:
+            ux, uy, uz = rotate_about_axis(ux, uy, uz, b_ux, b_uy, b_uz, half)
+        if cut:
+            # On the face: carry across, or stop just inside if terminal. The
+            # micron walked across is charged by the next substep, in that voxel.
+            # Along the face *normal*: along the direction, a grazing crossing moves
+            # the coordinate by less than a float32 ulp and the particle never
+            # leaves the face (see ``voxel_face_axis``).
+            nudge = -BOUNDARY_NUDGE_CM if e <= ecut else BOUNDARY_NUDGE_CM
+            dx, dy, dz = nudge_across_face(axis, ux, uy, uz, nudge)
+            x += dx
+            y += dy
+            z += dz
+            carry = BOUNDARY_NUDGE_CM
+            if not grid.contains(x, y, z):
+                return escaped + w * (e + latent)
+            continue
         if not grid.contains(x, y, z):
             return escaped + w * (e + latent)
 
-        mean_square = cross_sections.scattering_power(e, material, ecut) * rho * s
+        mean_square = cross_sections.scattering_power(e, material, ecut) * rho * path
         # Both laws take the same <theta^2> and one uniform; see ``msc_model``.
         if msc_model == "gs":
             cos_hinge = cross_sections.sample_gs_cos_theta(mean_square, e, material, rng_state)
@@ -462,11 +614,54 @@ def electron_steps(
                 escaped += deposit_or_escape(x, y, z, w * k, deposit_weight(k, material))
             e -= k
 
+        half = 0.0
+        if has_field:
+            half = 0.5 * lorentz_rotation_angle(s2, gyroradius_cm(e - 0.5 * d2, b_mag), is_positron)
+            ux, uy, uz = rotate_about_axis(ux, uy, uz, b_ux, b_uy, b_uz, half)
+        # The hinge turned the particle; the face cap was taken along the old
+        # direction, so the second chord can cross into the neighbouring voxel and
+        # would carry this voxel's energy loss (and a range-out termination) into a
+        # medium that may be a thousand times lighter. Stop at the face instead:
+        # the loss along the shortened chord scales with its length, the untaken
+        # part stays kinetic, and a Moller event sampled beyond the face is simply
+        # not reached (the flight is re-sampled next substep; memoryless). This is
+        # the second-leg interface rule of the random hinge (Salvat et al.,
+        # PENELOPE-2018, sec. 4.3) and it closes the Fano test at air contrast.
+        s2_face = distance_to_voxel_boundary(
+            x, y, z, ux, uy, uz, *grid.origin, *grid.spacing, *grid.shape
+        )
+        if s2 >= s2_face or (face_limited and s2_face - s2 <= BOUNDARY_NUDGE_CM):
+            # A face-limited substep ends on its face unless the hinge turned the
+            # particle away from it by more than a nudge. The exact test alone is
+            # not enough: a chord split leaves the particle a rounding residue
+            # short of the face, the next substep then has no in-voxel path at all
+            # and the exact test is false for ever, so the particle never moves.
+            d2 = d2 * (s2_face / s2) if s2 > 0.0 else 0.0
+            s2 = s2_face
+            moller_pending = False
+            crossing = True
+            axis = voxel_face_axis(x, y, z, ux, uy, uz, *grid.origin, *grid.spacing, *grid.shape)
+            if has_field:
+                half = (
+                    lorentz_rotation_angle(s2, gyroradius_cm(e - 0.5 * d2, b_mag), is_positron)
+                    - half
+                )
         escaped += deposit_spread(x, y, z, ux, uy, uz, s2, w * d2, substep_factor)
         e -= d2
         x += ux * s2
         y += uy * s2
         z += uz * s2
+        if has_field:
+            ux, uy, uz = rotate_about_axis(ux, uy, uz, b_ux, b_uy, b_uz, half)
+        if crossing:
+            # On the face: carry across (along the normal, see above), or stop just
+            # inside if terminal; the micron is charged by the next substep there.
+            nudge = -BOUNDARY_NUDGE_CM if e <= ecut else BOUNDARY_NUDGE_CM
+            dx, dy, dz = nudge_across_face(axis, ux, uy, uz, nudge)
+            x += dx
+            y += dy
+            z += dz
+            carry = BOUNDARY_NUDGE_CM
         if not grid.contains(x, y, z):
             return escaped + w * (e + latent)
 

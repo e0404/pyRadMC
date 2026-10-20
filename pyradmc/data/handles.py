@@ -19,7 +19,7 @@ from typing import TypeAlias
 import numpy as np
 import numpy.typing as npt
 
-__all__ = ["Table1D", "Table2D", "Table3D"]
+__all__ = ["Table1D", "Table2D", "Table3D", "Vector3Field"]
 
 Table1D: TypeAlias = npt.NDArray[np.floating]
 """One quantity on an energy grid, indexed ``[energy_node]``."""
@@ -32,3 +32,11 @@ Table3D: TypeAlias = npt.NDArray[np.floating]
 ``table[i, j]`` yields a :data:`Table1D` row on both targets (NumPy views on the
 host, Warp array views in kernels), which is what lets a row-consuming sampler
 run unchanged over a flat uploaded grid."""
+
+Vector3Field: TypeAlias = npt.NDArray[np.floating]
+"""A 3-vector per cell of a rectilinear grid, indexed ``[i, j, k, component]`` on the
+host (``(nx, ny, nz, 3)``) and ``wp.array3d(dtype=wp.vec3)`` in kernels. Partial
+indexing ``values[i, j, k]`` yields the vector on both targets (a length-3 NumPy
+view on the host, a ``vec3`` in kernels); components are then read as ``v[0]``,
+``v[1]``, ``v[2]`` — never with a fourth subscript, which Warp rejects. Used by
+:func:`pyradmc.geometry.field.field_at`."""

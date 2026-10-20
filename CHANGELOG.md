@@ -11,10 +11,34 @@ must be able to find out from this file whether the numbers should have moved.
 
 ## [Unreleased]
 
-No dose value, cutoff or tolerance changes.
+No cutoff or tolerance changes. An explicit zero field remains byte-identical to no
+field on each target. The hinge boundary and Warp loss fixes below also affect runs
+without a field, so results are not byte-identical to the previous release.
 
 ### Added
 
+- Charged-particle transport in a **static magnetic field** (MR-linac dose).
+  `pyradmc.MagneticField` — uniform, one vector per transport voxel, or a trilinear
+  vector map on its own rectilinear grid, in tesla and the engine frame — is handed to
+  `ReferenceEngine` and `WarpEngine` at construction as world data (never a run option);
+  a gridded map must cover the transport grid. Both engines bend every electron and
+  positron by the Lorentz force: each hinge chord is taken along its midpoint direction
+  (half rotation about B, drift, half rotation) with the gyroradius at the chord's
+  mid-energy, and a gyration-angle cap of 0.2 rad per substep
+  (`LORENTZ_STEP_ANGLE_MAX`, accuracy-defining) keeps the chords on the arc. Photons are
+  unaffected; `RunProvenance.magnetic_field` records the field. New physics primitives
+  in `pyradmc.physics.lorentz` and the constant `pyradmc.MEV_C_PER_TESLA_CM`. Pinned by
+  the gyroradius and handedness of a single electron, cross-backend chi-squared with the
+  field on, Dij scheduling invariance with the field on, the electron return effect in a
+  water / low-density / water slab, and the Fano test in a field (validation tier).
+  Demonstrated by `examples/magnetic_field_demo.py`. Outside the transport grid there is
+  no field (AGENTS.md section 8).
+- **First literature gate for magnetic-field dose**
+  (`tests/validation/test_ere_field_strength.py`): the exit-side electron return effect
+  of Raaijmakers et al. 2008 (PMB 53, 909) at 0.75, 1.5 and 3 T — dose excess within
+  30 %, field-strength ordering, lateral shift within 4 mm, build-up depth at 1.5 T
+  within 2 mm. Measured: excess 0.42 / 0.63 / 0.50 / 0.29 of dmax at 0.2 / 0.75 / 1.5 /
+  3 T against the paper's 0.40 / 0.52 / 0.42 / 0.25.
 - `examples/dij_plan_sigma_demo.py`: plan-dose uncertainty from the Dij, three ways —
   quadrature of the column variances from an independent Dij, the same from a correlated
   Dij, and a direct forward simulation — against the seed-to-seed spread of the plan
@@ -24,8 +48,63 @@ No dose value, cutoff or tolerance changes.
   because the positive cross-column covariance is not carried. Pinned on the reference
   engine in `tests/dij/test_dij_correlated.py`.
 
+### Fixed
+
+- Magnetic field samples are copied into read-only storage, preventing caller-array
+  mutations from changing validated fields or invalidating device-map provenance.
+  Infinite sample spacing is rejected, and uniform-field provenance retains the full
+  precision of its components.
+- The Fano test source now assigns six fixed RNG draws to each history, independently
+  of chunk size, so changing the device's auto-selected chunk cannot change the gate's
+  sampled primaries.
+- Reference magnetic-field integration tests run even when the optional Warp backend
+  is not installed; only device-dependent cases are skipped.
+- **The random hinge no longer carries one voxel's energy loss into a lighter
+  neighbour.** A hinge chord that reaches a voxel face now stops on it (its loss scaled
+  to the shortened length, a Møller event beyond the face not reached), the chords split
+  only the path inside the voxel, and the micron a crossing particle is nudged by is a
+  free move along the face normal, charged by the next substep at the *new* voxel's
+  density; under a field a chord cut at a face turns by the cut chord's gyration angle.
+  Before, the second
+  chord could cross a face after the deflection and file a wall substep's loss — and
+  range-out terminations — into the neighbour, and the nudge was charged at the old
+  density. Reference loop and Warp twin alike. Measured dose effect (Fano cavity, water
+  walls, light gap of the same material, isotropic per-mass source, ECUT 0.05 as the test
+  instrument, 0.5 MeV, 0.2 cm gap): gap-to-wall dose per mass **2.9 -> 0.98 +- 0.003 at
+  air density**, **+7.9 % -> -0.9 % at a hundredth**, -0.6 % -> +0.9 % at a tenth of the
+  wall density; a 2 cm gap is within 0.4 % at every contrast, and the thin gap's residual
+  halves at a substep fraction of 0.03 and is within 1 % at 0.02 (its remaining 2 % at the
+  shipped GS fraction of 0.20 is step-size convergence of the hinge at an interface, gated
+  in the validation tier).
+  In the electron return effect slab
+  (6 MeV, 1.5 T) the air voxels adjacent to water drop about threefold and the water
+  side moves under 2 %; homogeneous water moves at the 1e-4 level (deposited energy
+  1.7348e6 -> 1.7342e6 MeV, 64^3 open field). Throughput cost on an RTX 4070 (interleaved
+  A/B, three rounds, after / before): 0.76 on a 6 MeV open field in 64^3 water, 0.83 on a
+  1 mm water grid, 0.90 on a water / air / water slab at 0 T and 0.89 at 1.5 T, 0.85 on the
+  tabulated spectral thorax — the face tests and the extra substeps at every crossing.
+  Found by the Fano-in-field gate; the hazard
+  was recorded in docs/decisions.md as the residual of the interface-spike fix.
+- **Warp backend: a substep's continuous energy loss is now exact to the inverse-range
+  table at both ends.** The kernel computed ``e - E(R(e) - rho s)`` with range-of-energy
+  and energy-of-range tabulated on different grids; their round trip is a fixed ~1e-6 MeV
+  error per substep, and with the clamp ``e_end <= e`` a substep whose loss fell below it
+  lost nothing. Harmless at 5 % steps, dominant for gyration-capped substeps in air under
+  a magnetic field. Measured on the Fano cavity at air density (1 MeV, 1.5 T, 2 cm gap):
+  gap-to-wall dose per mass **0.984 -> 1.004 at the shipped 0.2 rad cap, 0.855 -> 1.000
+  at a 0.05 rad cap**; field-free 0.9947 -> 0.9995. Every Warp electron step moves at the
+  1e-5 relative level, so Warp results are not byte-identical to the previous release;
+  the reference engine, which inverts one grid exactly, is unchanged by this item.
+
 ### Changed
 
+- `examples/magnetic_field_demo.py` docstring: the electron return effect is *not*
+  "much weaker" at 0.35 T for a broad beam over a thick gap — it is as large as at
+  1.5 T (Raaijmakers et al. 2008), and the lateral skew of the exit profile is wider at
+  the weaker field because the returning electrons land one gyration diameter to the
+  side. The figure now sweeps 0, 0.2, 0.7, 1.5 and 3 T (the field strengths of that
+  paper) and is re-rendered with the hinge-face fix (air voxels adjacent to water drop
+  about threefold; the water side moves under 2 %).
 - The correlated-columns constraint (AGENTS.md section 8, validation page) is now
   quantified as above rather than stated as a blanket prohibition; the
   `DijResult.variance_csc` caveat says what the quadrature omits and points at the

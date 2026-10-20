@@ -54,6 +54,7 @@ from pyradmc.backends.warp import kernels
 from pyradmc.backends.warp.kernels import ENERGY_QUANTUM_MEV, GridInfo, Queue, Tables
 from pyradmc.data.interface import CrossSectionSource
 from pyradmc.geometry.collimation import TransmissionMaskSource
+from pyradmc.geometry.field import FIELD_NONE, MagneticField
 from pyradmc.geometry.grid import VoxelGrid
 from pyradmc.geometry.source import (
     BeamletGridSource,
@@ -97,6 +98,25 @@ def _no_shells(device: str):
     return wp.zeros(1, dtype=float, device=device)
 
 
+def _no_field(device: str):
+    """One-cell placeholder for ``GridInfo.b_values`` where no map is read.
+
+    Same contract as :func:`_no_shells`: a struct array field needs real storage even
+    on the paths (scoring copies, the field-free world) that never index it.
+    """
+    return wp.zeros((1, 1, 1), dtype=wp.vec3, device=device)
+
+
+def _fill_no_field(gi: GridInfo, device: str) -> None:
+    """Set the magnetic-field members of ``gi`` to the inert field-free values."""
+    gi.b_mode = FIELD_NONE
+    gi.b0x = gi.b0y = gi.b0z = 0.0
+    gi.b_ox = gi.b_oy = gi.b_oz = 0.0
+    gi.b_sx = gi.b_sy = gi.b_sz = 1.0
+    gi.b_nx = gi.b_ny = gi.b_nz = 1
+    gi.b_values = _no_field(device)
+
+
 def _scoring_info(scoring: ScoringGeometry, device: str) -> GridInfo:
     """Scalar metadata of the scoring geometry, in the same struct as the transport grid.
 
@@ -112,6 +132,7 @@ def _scoring_info(scoring: ScoringGeometry, device: str) -> GridInfo:
     read in this mode.
     """
     si = GridInfo()
+    _fill_no_field(si, device)  # scoring never reads the field
     if isinstance(scoring, CylindricalScoringGrid):
         si.mode = 1
         si.x_lo = si.y_lo = si.x_hi = si.y_hi = 0.0
@@ -387,6 +408,12 @@ class WarpEngine:
     queue_factor
         Queue capacity per chunk history. Overflow raises rather than dropping
         secondaries.
+    magnetic_field
+        Static magnetic field the charged particles are bent by; ``None`` is the
+        field-free world; an explicit zero field reproduces it byte for byte on
+        each device. World data like ``grid``: uploaded once per device next to
+        the density and material maps, and a gridded map must cover the transport
+        grid (checked at construction).
     """
 
     grid: VoxelGrid
@@ -394,6 +421,7 @@ class WarpEngine:
     device: str = "cpu"
     chunk_size: int | None = None
     queue_factor: int = 16
+    magnetic_field: MagneticField | None = None
     _auto_chunk: dict = field(default_factory=dict, init=False, repr=False, compare=False)
     # Host-table cache: build_tables flattens the source by looping the Python query
     # API over every grid node — seconds of fixed overhead for a tabulated source —
@@ -405,6 +433,16 @@ class WarpEngine:
     _table_cache_lock: threading.Lock = field(
         default_factory=threading.Lock, init=False, repr=False, compare=False
     )
+
+    def __post_init__(self) -> None:
+        """Refuse a gridded field map that does not cover the transport grid."""
+        if self.magnetic_field is not None and not self.magnetic_field.covers(self.grid):
+            raise ValueError(
+                "the magnetic field map does not cover the transport grid: "
+                f"field extent {self.magnetic_field.origin} to "
+                f"{self.magnetic_field.upper_corner} cm, grid {self.grid.origin} to "
+                f"{self.grid.upper_corner} cm"
+            )
 
     def _provenance(
         self,
@@ -433,6 +471,9 @@ class WarpEngine:
             step_energy_fraction=step_energy_fraction,
             cross_sections=self.cross_sections.provenance,
             deposit_resolution_cm=deposit_resolution_cm,
+            magnetic_field=(
+                None if self.magnetic_field is None else self.magnetic_field.provenance
+            ),
         )
 
     def _chunk_histories(self, device: str | None = None) -> int:
@@ -3351,6 +3392,24 @@ class WarpEngine:
         gi.r_inner_sq = gi.r_outer_sq = 0.0
         gi.r_edges_sq = _no_shells(device)
         gi.z_edges = _no_shells(device)
+        # The magnetic field rides in the same struct so that no kernel signature
+        # changes: b_mode routes the electron kernel's per-substep lookup (uniform:
+        # the three scalars; nearest/trilinear: the vec3 map with its own geometry).
+        # The field-free world leaves b_mode at FIELD_NONE and the kernel executes
+        # no field operation at all — that is what keeps it byte-identical.
+        b = self.magnetic_field
+        if b is None:
+            _fill_no_field(gi, device)
+        else:
+            gi.b_mode = b.mode
+            if b.is_uniform:
+                gi.b0x, gi.b0y, gi.b0z = (float(v) for v in b.values[0, 0, 0])
+            else:
+                gi.b0x = gi.b0y = gi.b0z = 0.0
+            gi.b_ox, gi.b_oy, gi.b_oz = (float(v) for v in b.origin)
+            gi.b_sx, gi.b_sy, gi.b_sz = (float(v) for v in b.spacing)
+            gi.b_nx, gi.b_ny, gi.b_nz = (int(n) for n in b.shape)
+            gi.b_values = wp.array(b.values.astype(np.float32), dtype=wp.vec3, device=device)
         density = wp.array(self.grid.density.astype(np.float32), dtype=float, device=device)
         # Material indices travel as uint8: 4x narrower than int32 on the transport
         # kernels' random per-step load, and lossless for any registry the tables can

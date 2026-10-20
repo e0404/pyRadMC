@@ -30,6 +30,8 @@ installed; touching it then raises an error naming the extra to install.
 
 ::: pyradmc.geometry.grid.VoxelGrid
 
+::: pyradmc.geometry.field.MagneticField
+
 ::: pyradmc.scoring.grid.ScoringGrid
 
 ::: pyradmc.scoring.cylinder.CylindricalScoringGrid
@@ -118,6 +120,7 @@ not tuning knobs: changing one requires a test demonstrating the dosimetric effe
         - PHOTON_ROULETTE_WEIGHT_CAP
         - PHOTON_SPLIT_N
         - ELECTRON_MASS_MEV
+        - MEV_C_PER_TESLA_CM
         - GY_PER_MEV_PER_G
         - RAYLEIGH_MOMENTUM_TRANSFER_PER_MEV
       show_root_heading: false

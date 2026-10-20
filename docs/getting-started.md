@@ -180,6 +180,43 @@ out of scope.
 `examples/pencil_kernel_database.py` sweeps an energy series into a single `.npz`
 kernel table, and reports the achieved statistics per dose band.
 
+## Dose in a magnetic field
+
+An MR-linac's static field is a property of the room, not of a run, so it is handed to
+the engine at construction next to the grid and the cross-sections:
+
+```python
+from pyradmc import MagneticField, WarpEngine
+
+engine = WarpEngine(
+    grid=grid,
+    cross_sections=xs,
+    device="cuda:0",
+    magnetic_field=MagneticField.uniform((0.0, 0.0, 1.5)),  # tesla, engine frame
+)
+```
+
+Components are in the engine frame: on an axial CT read through the CT adapter, the
+bore (superior-inferior) axis is `z`, so a Unity-like 1.5 T field is `(0, 0, ±1.5)`
+with the sign a vendor datum. A measured or simulated bore field goes in as a vector
+map — `MagneticField(values, spacing, origin)` with `values[i, j, k]` the three
+components at cell centres on its own rectilinear grid, interpolated trilinearly — or as
+one vector per transport voxel with `MagneticField.on_grid(grid, values)`. A gridded map
+must cover the transport grid; the engine refuses one that does not.
+
+Every charged particle is then bent by the Lorentz force in both backends: each
+substep's two chords follow the gyration arc to second order, and a gyration-angle cap
+of 0.2 rad per substep keeps them there (the value validated by Malkov and Rogers for
+EGSnrc). Photons are unaffected, and the result's provenance records the field.
+
+Two things to know. **Outside the transport grid there is no field**: the world beyond
+the grid is vacuum and a charged particle born there flies straight to the entry face,
+so for an MR-linac setup extend the grid with real air voxels up to the phase-space or
+head exit plane — the electrons returning from air to tissue (the electron return
+effect) exist only where there is air to transport. And **air costs more under a field**:
+there the gyration cap, not the voxel face, bounds the substep, so expect several
+substeps per air voxel.
+
 ## Better cross-sections
 
 The analytic parameterization is correct to a few percent and needs no data files. For
@@ -200,7 +237,8 @@ exact for independent columns, a lower bound for correlated ones, against a dire
 forward run), `tabulated_demo.py` (EPDL/EEDL cross-sections), `materials_demo.py`
 (bone/lung heterogeneity), `ct_demo.py` (dose on a CT), `dose_grid_demo.py` (decoupled
 scoring grid and dose-to-water), `spectral_source_demo.py` (6 MV polyenergetic fan),
-`collimation_demo.py` (staircase MLC field), `virtual_source_demo.py`
+`collimation_demo.py` (staircase MLC field), `magnetic_field_demo.py` (the electron
+return effect in a water / air / water slab at 0, 0.2, 0.7, 1.5 and 3 T), `virtual_source_demo.py`
 (measured-primary-fluence source model), `phasespace_demo.py` (IAEA phase-space source),
 `custom_source_demo.py`, `pencil_kernel_demo.py` and `pencil_kernel_database.py`
 (see [pencil-beam kernels](#pencil-beam-kernels)), and `noise_bias_study.py`

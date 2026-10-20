@@ -55,13 +55,17 @@ _KERNEL_MODULES: dict[str, tuple[str, ...] | None] = {
     "pyradmc.physics.brems": None,
     "pyradmc.physics.rayleigh": None,
     "pyradmc.physics.roulette": None,
+    "pyradmc.physics.lorentz": None,
     "pyradmc.data.tables": ("lookup_loglinear_1d", "lookup_loglinear_2d"),
     "pyradmc.geometry.grid": (
         "point_inside",
         "point_axis_index",
         "slab_entry_distance",
         "distance_to_voxel_boundary",
+        "voxel_face_axis",
+        "nudge_across_face",
     ),
+    "pyradmc.geometry.field": ("_lower_cell", "_lerp", "field_at"),
     "pyradmc.geometry.cylinder": (
         "cylinder_contains",
         "cylinder_radius_squared",
@@ -126,6 +130,7 @@ def _make_handles_shim() -> types.ModuleType:
     shim.Table1D = wp.array(dtype=float)
     shim.Table2D = wp.array2d(dtype=float)
     shim.Table3D = wp.array3d(dtype=float)
+    shim.Vector3Field = wp.array3d(dtype=wp.vec3)
     return shim
 
 

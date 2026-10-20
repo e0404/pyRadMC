@@ -15,7 +15,8 @@ CUDA GPU from a single physics source.
 
 It is a DPM-class code: macroscopic condensed-history electron transport with aggressive step
 sizes, tuned for 1 to 20 MeV in low-Z media. It is **not** a general-purpose Monte Carlo code
-and must not grow into one.
+and must not grow into one. Photon dose in a **static magnetic field** (MR-linac geometries)
+is in scope: the field is world data handed to the engine (section 2.10), never a run option.
 
 Target accuracy: approximately 2 to 3 percent per-beamlet statistical uncertainty (1 sigma) in
 the high-dose region.
@@ -166,7 +167,8 @@ silent misconfiguration downstream. Concretely:
 pyradmc/
   physics/     pure scalar functions: sampling, kinematics, energy loss
   data/        CrossSectionSource interface; analytic and tabulated backends; materials
-  geometry/    rectilinear voxel grid, Woodcock majorant, Source/BeamletSource interface
+  geometry/    rectilinear voxel grid, Woodcock majorant, Source/BeamletSource interface,
+               static magnetic field (MagneticField + the pure scalar lookup)
   transport/   photon and electron step loops, particle queues
   scoring/     dose scoring, batched Dij assembly
   rng/         RNG interface and per-target shims
@@ -239,7 +241,9 @@ This ordering was established empirically, not assumed. Do not reorder it withou
 - Small commits. One conceptual change each. Commit message states the physics, not the
   diff, in the convention of section 9.
 - Type annotations everywhere outside kernels. `mypy --strict` gates non-kernel code.
-  Warp kernels are exempt; mark them.
+  Warp kernels are exempt; mark them. Coverage exempts them too (`exclude_also` on
+  `@wp.kernel` / `@wp.func` in pyproject.toml): Warp compiles those bodies from the
+  AST and they never run as Python, so a "missing" kernel line is not a missing test.
 - `ruff` for lint and format. No manual formatting debates.
 - Library output goes through `logging.getLogger(__name__)`; `warnings.warn` is reserved for
   result caveats and API misuse. No `print` in `pyradmc/` (ruff `T20` enforces this), and no
@@ -345,6 +349,44 @@ These outlive the work that produced them. Each is a live constraint, not histor
   Changing one needs a test demonstrating the dosimetric effect, on realistic spectral and
   heterogeneous geometry — never on an analytic monoenergetic homogeneous phantom, which
   has been measured to be roughly twice as forgiving.
+- **The gyration-angle cap is accuracy-defining too.** `LORENTZ_STEP_ANGLE_MAX` (0.2 rad
+  per substep) is what keeps each straight chord on the gyration arc under a magnetic
+  field; it is the value Malkov & Rogers validated for EGSnrc and it is gated here by the
+  Fano test in a field (`tests/validation/test_fano_magnetic.py`). It binds below about
+  1.5 MeV in tissue at 1.5 T and on every substep in air, where it replaces the voxel
+  face as the limiter and multiplies the substep count. Changing it, or adding a
+  low-density fast path, needs that gate and a measurement on realistic geometry.
+- **A hinge chord stops at a voxel face; the nudge across it is charged in the new
+  voxel.** The random hinge's second chord (and, under a field, the first) is truncated
+  where it meets a face along its actual direction, the chords split only the path inside
+  the voxel, and the micron a crossing particle is nudged by is a free move *along the
+  face normal* (a direction-aligned micron is below a float32 ulp at grazing incidence and
+  stalled GPU lanes 7.6x) that the next substep charges at the new voxel's density
+  (`carry`); a chord cut at a face turns by the cut chord's gyration angle. Before this
+  the engine gave an
+  air-density gap 2.9 times the Fano dose per mass; after it the field-free residual at
+  air contrast is a step-size effect of about -2 % at the shipped substep fraction for a
+  thin gap, halving at 0.03 and within 1 % at 0.02. Any change to the boundary handling,
+  the nudge or the chord split needs
+  the three Fano gates in `tests/validation/test_fano_magnetic.py` (field, field-free,
+  converged) and the fast-tier air-gap check, on both loops.
+- **The Warp kernel's substep loss is `E(R(e)) - E(R(e) - rho s)`, both ends through the
+  inverse-range table.** Its two range tables sit on different grids; `e - E(R(e) - rho s)`
+  carried their round-trip error (~1e-6 MeV) into every substep and, with the clamp
+  `e_end <= e`, zeroed the loss of any substep shorter than that — a 15 % Fano violation
+  in air under a field at a 0.05 rad gyration cap, measured 2026-10-18. Any per-substep
+  quantity with a fixed absolute error is a bias in the substep *count*; test a change to
+  the loss bookkeeping by varying `LORENTZ_STEP_ANGLE_MAX` on the air-density Fano cavity.
+- **Outside the transport grid there is no magnetic field.** The world beyond the grid
+  is vacuum and field-free: a charged particle born outside flies straight to the entry
+  face, and one that leaves does not come back. An MR-linac setup therefore extends the
+  transport grid with real air voxels to the phase-space or head exit plane; the head
+  pre-solve's straight slide of contaminant electrons and the fringe field in the head
+  are not modelled. On each target, `None` is pinned byte-identical to an explicit
+  zero field within the current implementation. The field plumbing alone also
+  passed a one-off before/after byte comparison on ref, Warp CPU and CUDA; the
+  separate hinge-boundary and Warp loss fixes above change historical field-free
+  results, so that comparison is not a byte-identity guarantee across releases.
 
 ## 9. Git workflow and commit convention
 

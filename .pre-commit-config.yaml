@@ -37,15 +37,18 @@ repos:
         args: [--fix]
       - id: ruff-format
 
-  - repo: local
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    # Isolated environment, so the hook does not depend on the committer's PATH or on
+    # which interpreter the git client was started from. The only typed third-party
+    # import mypy needs is NumPy (scipy, warp and SimpleITK are ignore_missing_imports in
+    # pyproject.toml); it is pinned to the same major/minor line as the dev environment
+    # because NumPy's stubs change what mypy --strict accepts. Keep rev equal to the mypy
+    # the CI job resolves, as with ruff above. Configured whole-package in pyproject.toml
+    # (kernels exempt), so it does not take filenames.
+    rev: v2.2.0
     hooks:
-      # Run from the project environment, not an isolated one: mypy --strict needs the
-      # real NumPy, SciPy and Warp stubs to say anything true, and it is configured
-      # whole-package in pyproject.toml (kernels exempt), so it does not take filenames.
       - id: mypy
         name: mypy --strict (non-kernel code)
-        entry: mypy pyradmc
-        language: system
-        types: [python]
+        args: [pyradmc]
         pass_filenames: false
-        require_serial: true
+        additional_dependencies: ["numpy>=2.4,<2.5"]
