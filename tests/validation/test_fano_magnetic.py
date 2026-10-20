@@ -40,9 +40,8 @@ Geant4's step limits).
    a hundredth, +0.9 % at a tenth; a 2 cm gap is within 0.4 % at every contrast; and it
    halves at a substep fraction of 0.03 (-1.1 / -0.9 %) and is within 1 % at 0.02
    (-0.2 / -0.6 %). Before the fix the same engine read 2.9x at air contrast, +7.9 % at a
-   hundredth and +4.7 % at air even with 0.02 steps. These historical convergence
-   measurements used a 0.05 fraction; the default-path gates below exercise GS at
-   its actual shipped 0.20 fraction, without overriding it.
+   hundredth and +4.7 % at air even with 0.02 steps. (The baselines were taken at the
+   shipped GS fraction; an earlier draft labelled it 0.05, the Gaussian hinge's default.)
 3. *Convergence*: at a substep fraction of 0.02 the 0.2 cm air-density gap is within
    1.5 % of unity with and without the field, and the field moves it by less than 1.5 %
    (measured -0.2 / -0.6 % at 0 T and -0.8 / -0.4 % at 1.5 T, 0.5 / 1 MeV, +- 0.3 %).

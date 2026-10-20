@@ -110,10 +110,11 @@ setup must extend the grid with air voxels to the phase-space plane. And at a
 only to about 2-3 % at the shipped GS fraction 0.20, and only for a *thin* gap: measured
 2026-10-20 with the chunk-invariant source, gap-to-wall dose per mass 0.9706 +- 0.0031
 at 0.5 MeV and 0.9785 +- 0.0019 at 1 MeV for a 0.2 cm gap (ECUT 0.05 as the test
-instrument), while a 2 cm gap is within 0.4 % at every contrast. The historical
-0.05-fraction convergence study found about a 2 % thin-gap residual, halving at 0.03
-and within 1 % at 0.02 (docs/decisions.md); those measurements were not at the shipped
-default. That residual is step-size convergence of the
+instrument), while a 2 cm gap is within 0.4 % at every contrast (the 2026-10-18
+numbers quoted in docs/decisions.md, 0.978-0.983, were taken at the same shipped
+fraction; an earlier draft labelled it 0.05, which is the *Gaussian* hinge's default).
+Shortening the substep removes it: 0.987 at 0.10, within 1 % at 0.03 and 0.02. That
+residual is step-size convergence of the
 random hinge at an interface (docs/decisions.md records the boundary handling it replaced,
 which read 2.9x at air contrast and +8 % at a hundredfold, and the Warp energy-loss round
 trip that read 0.855 in air under a field at a tight gyration cap); it sits

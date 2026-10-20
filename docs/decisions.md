@@ -376,13 +376,14 @@ CPU agreeing: **air contrast 2.9x -> 0.98 +- 0.003; hundredfold +7.9 % -> -0.9 %
 -0.6 % -> +0.9 %**, all for a 0.2 cm gap, while a 2 cm gap is within 0.4 % at every
 contrast; the thin gap's residual halves at a substep fraction of 0.03 (-1.1 / -0.9 %)
 and is within 1 % at 0.02 (-0.2 / -0.6 % at 0.5 / 1 MeV; -0.8 / -0.4 % under 1.5 T,
-which shortens its substeps), so the remaining -2 % at the studied fraction 0.05 is step-size
-convergence of the hinge at an interface, not bookkeeping, and the validation tier now
-gates all three statements (field moves the ratio < 1 %, field-free residual < 1 % at a
-tenth and < 3 % to air, converged < 1.5 % at 0.02 with and without the field). The
-shipped GS fraction stays 0.20; 0.05 was the fraction in this convergence study,
-not the shipped default (AGENTS.md section 8: an accuracy-defining change needs the
-realistic-geometry measurement). (Building the gate taught a second lesson: a light slab
+which shortens its substeps), so the remaining -2 % at the shipped GS fraction of 0.20
+(0.987 at 0.10) is step-size convergence of the hinge at an interface, not bookkeeping,
+and the validation tier now gates all three statements (field moves the ratio < 1 %,
+field-free residual < 1 % at a tenth and < 3 % to air, converged < 1.5 % at 0.02 with
+and without the field). The shipped GS fraction stays 0.20 (AGENTS.md section 8: an
+accuracy-defining change needs the realistic-geometry measurement); an earlier draft of
+this entry called the baseline fraction 0.05, which is the Gaussian hinge's default,
+not the one these runs used. (Building the gate taught a second lesson: a light slab
 open to the phantom's lateral faces loses electrons sideways over their metre-scale
 range with nothing replacing them — a 17-23 % field-free deficit at a hundredfold
 contrast on an 8 cm wide phantom — so the slab is embedded laterally in water.) Dose

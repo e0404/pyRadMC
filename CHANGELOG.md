@@ -74,8 +74,8 @@ without a field, so results are not byte-identical to the previous release.
   air density**, **+7.9 % -> -0.9 % at a hundredth**, -0.6 % -> +0.9 % at a tenth of the
   wall density; a 2 cm gap is within 0.4 % at every contrast, and the thin gap's residual
   halves at a substep fraction of 0.03 and is within 1 % at 0.02 (its remaining 2 % at the
-  studied fraction 0.05 is step-size convergence of the hinge at an interface; the
-  shipped GS default remains 0.20 and the default-path validation gates exercise it).
+  shipped GS fraction of 0.20 is step-size convergence of the hinge at an interface, gated
+  in the validation tier).
   In the electron return effect slab
   (6 MeV, 1.5 T) the air voxels adjacent to water drop about threefold and the water
   side moves under 2 %; homogeneous water moves at the 1e-4 level (deposited energy
