@@ -561,11 +561,11 @@ class WarpEngine:
             )
         from pyradmc.backends.warp.presolve import DevicePhaseSpace
 
-        in_kernel = isinstance(source, PencilBeamSource | ParallelBeamSource)
-        is_device_ps = isinstance(source, DevicePhaseSpace)
         # Exact type, not isinstance: a subclass may override emit/sample_batch, and
         # the built-in generator would silently bypass the override; a subclass keeps
-        # the host pre-sampling route (test-pinned).
+        # the host pre-sampling route (test-pinned, for every built-in generator).
+        in_kernel = type(source) in (PencilBeamSource, ParallelBeamSource)
+        is_device_ps = isinstance(source, DevicePhaseSpace)
         is_spectral = type(source) is SpectralBeamSource
         is_spectral_mask = (
             type(source) is TransmissionMaskSource and type(source.inner) is SpectralBeamSource
@@ -1258,7 +1258,7 @@ class WarpEngine:
             counts, indices, dose, sigma = blocks[group_start]
             assembler.add_sparse_block(group_start, counts, indices, dose, sigma)
 
-        use_lattice = isinstance(source, BeamletGridSource)
+        use_lattice = type(source) is BeamletGridSource  # exact type: see run()
         if use_lattice:
             emitted_energy = n_beamlets * n_histories_per_beamlet * source.max_energy
         elif emitted_quanta:
@@ -1322,7 +1322,7 @@ class WarpEngine:
         # photons carrying the source's statistical weight (the built-in routes are
         # unit-weight by construction; the other two take the weight from the
         # sampler/emit, matching the reference Dij).
-        use_lattice = isinstance(source, BeamletGridSource)
+        use_lattice = type(source) is BeamletGridSource  # exact type: see run()
         use_spectral = type(source) is SpectralBeamletSource
         beamlet_generator = None
         emitted_counter = None
