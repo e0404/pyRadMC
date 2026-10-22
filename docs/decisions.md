@@ -445,8 +445,10 @@ count of the previous drain on the device, so a steady workload drains with one 
 there a readback is a memory read and a capacity-wide launch loops over every slot.
 **Bit-identical by construction and verified**: a run is a function of the multiset of
 particles each launch consumes, and an empty launch consumes nothing; 94 saved pre-change
-outputs (every run route, Dij routes, run and Dij lanes, a 1.5 T field) matched bit for
-bit on cpu and cuda.
+outputs (every host- and in-kernel-generated run route, Dij routes, run and Dij lanes, a
+1.5 T field) matched bit for bit on cpu and cuda. The device phase-space route was checked
+in process only — one buffer transported under each schedule — because the device
+pre-solve that fills the buffer is itself order-nondeterministic.
 
 **The gain is 3-7 %, not the readback count.** Interleaved in-process A/B, 16 pairs, on
 the shared 4070 (clocks checked at 2535 MHz, other jobs at ~60 % utilization): ten
