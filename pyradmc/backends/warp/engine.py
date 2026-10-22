@@ -3,7 +3,9 @@
 Production backend, ``cpu`` and ``cuda`` from one kernel source (AGENTS.md section 3:
 nothing physical lives here). The run loop is:
 
-1. Flatten the cross-sections (``build_tables``) and upload everything as float32.
+1. Flatten the cross-sections (``build_tables``) and upload everything as float32 —
+   once per engine and device: tables, voxel maps and the transport workspaces stay
+   resident between calls (see :class:`WarpEngine`).
 2. Per batch, per chunk of histories: generate primaries into a queue, then
    ping-pong the photon and electron kernels until every queue drains. Photons
    spawn charged secondaries into the electron queue; electrons spawn
@@ -825,8 +827,8 @@ class WarpEngine:
         :func:`pyradmc.transport.electron.electron_steps`): ``"gs"`` — the
         shipped default — samples Goudsmit-Saunderson deflections from an
         eagerly precomputed table grid (built host-side on the first GS run
-        for this ``(ecut, e_max)``, persisted to the user cache, uploaded per
-        run) and does not apply the Gaussian-validity angular cap; the
+        for this ``(ecut, e_max)``, persisted to the user cache, uploaded once
+        per device and kept resident) and does not apply the Gaussian-validity angular cap; the
         ``"gaussian"`` hinge survives as the paired-comparison test
         instrument. ``step_energy_fraction=None`` resolves to the selected
         model's validated fraction.
