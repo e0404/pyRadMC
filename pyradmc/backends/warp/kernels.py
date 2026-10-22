@@ -273,7 +273,9 @@ class Queue:
 
     Overflow does not write (the slot does not exist) but the counter keeps
     counting, so the engine detects ``count > capacity`` after the launch and
-    raises — secondaries are never silently dropped.
+    raises — secondaries are never silently dropped. (Under the blind drain
+    schedule the consuming launch clamps to capacity and ``retire_queue`` books
+    the overflow on the device for the next readback.)
 
     ``beamlet`` is the Dij tag: the group-local index of the beamlet whose
     primary this particle descends from. Secondaries inherit it unchanged, so a
@@ -981,6 +983,48 @@ def fill_float64(a: wp.array(dtype=wp.float64), value: wp.float64):
     a[wp.tid()] = value
 
 
+# Drain-status slots (see ``retire_queue`` / ``snapshot_drain_status``).
+DRAIN_PHOTON_COUNT = 0
+DRAIN_ELECTRON_COUNT = 1
+DRAIN_LAST_BUSY_ROUND = 2
+DRAIN_OVERFLOW = 3
+DRAIN_STATUS_SLOTS = 4
+
+
+@wp.kernel
+def retire_queue(
+    count: wp.array(dtype=wp.int32),
+    capacity: int,
+    round_index: int,
+    status: wp.array(dtype=wp.int32),
+):
+    """Reset a queue a blind drain round has just consumed, keeping what it held.
+
+    Single-thread bookkeeping launched on the drain's stream after the kernel that
+    consumed the queue, so the count it reads is the count that kernel saw. It
+    records the latest round that had work (the engine's adaptive block size) and
+    any overflow: a blind launch clamps to capacity, so an overflowed queue would
+    otherwise be truncated without the host ever seeing its count.
+    """
+    n = count[0]
+    if n > 0:
+        status[DRAIN_LAST_BUSY_ROUND] = wp.max(status[DRAIN_LAST_BUSY_ROUND], round_index + 1)
+    if n > capacity:
+        status[DRAIN_OVERFLOW] = wp.max(status[DRAIN_OVERFLOW], n)
+    count[0] = 0
+
+
+@wp.kernel
+def snapshot_drain_status(
+    photon_count: wp.array(dtype=wp.int32),
+    electron_count: wp.array(dtype=wp.int32),
+    status: wp.array(dtype=wp.int32),
+):
+    """Gather both live queue counts next to the drain's books, for one readback."""
+    status[DRAIN_PHOTON_COUNT] = photon_count[0]
+    status[DRAIN_ELECTRON_COUNT] = electron_count[0]
+
+
 @wp.kernel
 def count_kept_per_column(
     mean: wp.array(dtype=wp.float64),
@@ -1227,6 +1271,10 @@ def photon_kernel(
     stay physical either way.
     """
     tid = wp.tid()
+    # A blind drain round launches at queue capacity; only the first ``count``
+    # slots hold particles. A launch sized from the count never takes this.
+    if tid >= wp.min(q_in.count[0], q_in.capacity):
+        return
     e = q_in.energy[tid]
     beamlet = q_in.beamlet[tid]
     base = beamlet * si.n_voxels
@@ -1591,6 +1639,9 @@ def electron_kernel(
     (E, material) the restricted stopping power charged the loss with.
     """
     tid = wp.tid()
+    # Blind drain rounds launch at capacity; see photon_kernel.
+    if tid >= wp.min(q_in.count[0], q_in.capacity):
+        return
     is_positron = q_in.kind[tid] == POSITRON
     e = q_in.energy[tid]
     # Nudge walked into the current voxel, charged by its first substep there.
