@@ -72,6 +72,7 @@ _KERNEL_MODULES: dict[str, tuple[str, ...] | None] = {
         "edge_bin_index",
     ),
     "pyradmc.transport.electron": ("substep_pieces",),
+    "pyradmc.geometry.fan": None,
     "pyradmc.geometry.collimation": (
         "_clip_len",
         "_affine_interval_length",
