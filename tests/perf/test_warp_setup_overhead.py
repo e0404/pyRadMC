@@ -12,8 +12,10 @@ that cost so a regression in the resident device state shows up as baseline drif
   cost alone.
 
 Measured 2026-10-22 on the laptop RTX 4070 (shared with other jobs; interleaved
-A/B, best-of), resident state vs the per-call setup it replaced: loop 119 -> 21 ms,
-tiny run 7.5 -> 0.94 ms, tiny Dij 8.3 -> 2.2 ms. See ``docs/decisions.md``.
+A/B, best-of ranges), resident state vs the per-call setup it replaced, cuda: loop
+111-120 -> 20-22 ms, tiny run 7.4-8.7 -> 0.88-0.92 ms, tiny Dij 8.4-8.7 -> 1.62-1.69
+ms; cpu: loop 395-423 -> 72 ms, tiny run 7.4-7.7 -> 0.94-0.98 ms, tiny Dij 23-24 ->
+15.5-16.6 ms. The full table is in ``docs/decisions.md``.
 """
 
 from __future__ import annotations

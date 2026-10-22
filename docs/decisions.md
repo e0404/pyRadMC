@@ -442,43 +442,69 @@ and counters, and a `synchronize_device` plus three or four synchronizing readba
 batch. Transport kernels were a small fraction of the wall.
 
 Now kept per engine and device: the tables per `(ecut, pcut, e_max, with_gs)` (the GS
-grid shared across `pcut`), the transport grid and field, the last scoring geometry (by
-identity, held so the identity cannot be recycled), spectrum tables by identity, and a
-pool of transport workspaces — queues, slots, the energy counters in one array, lane
-streams — shared by `run` and `run_dij`. Invalidation is structural: every input that
-keys this state is a frozen field of the engine, so a different grid, field or source
-is a different engine; in-place mutation of those arrays is unsupported (it was already
-for the host table cache). `release_device_memory()` hands the device memory back.
+grid shared across `pcut`; the four most recently used keys, so an ECUT sweep does not
+park a 12 MB grid per cut), the transport grid and field, the last scoring geometry and
+up to eight spectra, and a pool of transport workspaces — queues, slots, the counters in
+one array, lane streams — shared by `run` and `run_dij`. Two kinds of key:
 
-Decisions inside it, each measured or pinned:
+- **Engine fields** (grid, field, cross-section source) are frozen dataclass fields, so
+  a different one is a different engine; in-place mutation of their arrays is
+  unsupported, as it already was for the host table cache.
+- **Per-call arguments** (the scoring grid, the spectrum) are matched by identity with
+  a strong reference held. That is only sound because their arrays are read-only:
+  `Spectrum` already was, and `ScoringGrid` / `CylindricalScoringGrid` now copy
+  `voxel_mass` and mark it read-only (a review probe showed `sg.voxel_mass *= 2` between
+  two calls silently doubling the dose of the second).
 
-- **Bitwise inert.** Every call on a warmed engine is compared exactly against the same
-  call on a fresh engine (`tests/integration/test_warp_resident_session.py`, cpu and
-  cuda, including concurrent lanes and Dij), and pre-change golden arrays (run routes,
-  Dij, lanes, field, dose-to-water, scoring grid) matched exactly on both devices.
-  Reused queues need no clearing: every writer fills all fields of a slot before a count
-  publishes it, readers stop at the count, RNG slots are written before they are read.
-- **A smaller request keeps its own queue capacity** (`q.capacity` = the request, not
-  the buffer length), so overflow binds where a fresh queue's would.
-- **`run` grows the pool, a Dij shard refits it exactly.** Grow-only reuse let a Dij ride
-  on a large run's queues: peak device memory for run-then-Dij went 1325 -> 2054 MB
-  (64x64x48 water, 256 beamlets). With exact refit in the shard, peak equals the
-  pre-change engine in every sequence measured, and the Dij auto group size counts idle
-  pooled bytes as free, so it is the size a fresh engine gets.
-- **Dense dose maps stay per call.** Their size is the scoring grid's (tens of bytes per
-  voxel; gigabytes on a full CT) or, for a Dij, half the free memory; parking them
-  between calls would starve the next user of the card for a sub-millisecond saving.
-- **Books read in one transfer; the majorant check once per call.** The int64 counters
-  share one array (one 128-byte line each) and are still cleared and read per batch
-  (`run`) or per group (Dij), so no int64 sum spans more than before; the violation
-  counter only grows and is read once per call or shard (a new test pins that it still
-  raises and that an aborted call leaves the engine usable).
+**Memory policy: the pool holds what the last call needed, never the largest so far.**
+Every call refits its workspaces exactly, growing or shrinking. A steady workload — an
+optimizer's loop of equal calls — reuses them untouched; an alternating big/small
+workload reallocates on each change, as every call did before. A first version kept the
+largest-ever size: it parked 864 MiB behind tiny calls after one 300k run (1760 MiB
+after a two-lane run) and let a Dij's dense group maps ride on a big run's queues (peak
+1325 -> 2054 MB, 64x64x48 water, 256 beamlets). With the exact refit, peak memory equals
+the pre-change engine in every sequence measured (run, dij, run+dij, dij+run, run+run).
+What stays held between calls is the tables and voxel maps plus the last call's queues
+(about 0.9 GB after a full-width `run` on this card, per lane);
+`WarpEngine.release_device_memory()` hands it back. The Dij auto group size counts idle
+pooled bytes as free (each is released or reused by the shard), so it is the size a
+fresh engine gets — pinned with a simulated device in the test file below.
 
-Measured, interleaved A/B against the pre-change code in separate processes, best of 3
-loops / 30 tiny runs / 15 tiny Dij, on a GPU shared with other jobs (clock checked under
-load at 2.0-2.5 GHz, no power cap): ten-run loop 119-123 -> 22-24 ms; tiny `run`
-(64 histories) 7.9-8.4 -> 1.0-1.1 ms; tiny `run_dij` (16 beamlets x 16) 8.9-9.8 ->
-2.1-2.5 ms. On cpu (40k histories per run): loop 402-414 -> 73-76 ms, tiny run 8.0-8.2 ->
-0.71-0.73 ms, tiny Dij 23-25 -> 16-17 ms. Recorded in
-`tests/perf/test_warp_setup_overhead.py`. What remains of a tiny call is mostly the
-drain loop's per-round count readbacks and launch overhead, which this change left alone.
+**Dense dose maps stay per call** — not to spare memory in general (the pool holds the
+last call's queues, which are of the same order), but because parking them buys little
+and costs a lot: a `run`'s five voxel-sized maps took about 0.1 ms to allocate and zero
+on the 48x40x24 grid (profiled, ~25 us each) against ~2 ms for the queues, while holding
+them would add 48 bytes per scoring voxel between calls (2.5 GB on a 512x512x200 CT). A
+Dij's group maps are sized per call from free memory and stay per call for that reason.
+
+**Books read in one transfer, majorant checked in the same readback.** The int64
+counters share one array (one 128-byte line each) and are still cleared and read per
+batch (`run`) or per group (Dij), so no int64 sum spans more than before. The kernels'
+int32 majorant-violation counter is aliased onto the low half of a zeroed int64 slot of
+that array (little-endian on every Warp target; `kernels.py` untouched), so the per-pass
+readback raises in the pass that made the violation at no extra transfer. The explicit
+`synchronize_device` in front of default-stream readbacks is gone (kept after
+concurrent lanes).
+
+Pinned in `tests/integration/test_warp_resident_session.py`: every call on a warmed
+engine equals the same call on a fresh one (run routes incl. pre-sampled, dose-to-water,
+KERMA, scoring grid, Dij incl. `devices=[...]`, lanes on cuda, a field engine); calls
+after an aborted one (a source failing mid-run, a queue overflow) equal a fresh engine's,
+and an overflow on a pool fitted to a larger call raises the same error as on a fresh
+engine; the pool's size after each call; the bounded table cache; the early majorant
+raise. Pre-change golden arrays matched exactly on cpu and cuda:0 after every commit.
+
+Measured, interleaved A/B against the pre-change code in separate processes on a GPU
+shared with other jobs (clock checked under load at 2.27 GHz, no power cap); ranges are
+the best-of values over three alternations (cuda) or two (cpu), best of 3 loops, 30 tiny
+runs, 15 tiny Dij each:
+
+| | cuda before | cuda after | cpu before | cpu after |
+|---|---|---|---|---|
+| ten collimated runs (400k histories each on cuda, 40k on cpu) | 111-120 ms | 20-22 ms | 395-423 ms | 72 ms |
+| tiny `run` (64 histories) | 7.4-8.7 ms | 0.88-0.92 ms | 7.4-7.7 ms | 0.94-0.98 ms |
+| tiny `run_dij` (16 beamlets x 16) | 8.4-8.7 ms | 1.62-1.69 ms | 23-24 ms | 15.5-16.6 ms |
+
+Recorded in `tests/perf/test_warp_setup_overhead.py`. What remains of a tiny call is
+mostly the drain loop's per-round count readbacks and launch overhead, which this change
+left alone.
