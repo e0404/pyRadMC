@@ -5,8 +5,8 @@ A step-and-shoot or VMAT plan delivers one fan through many collimator settings.
 one dose column per segment (the Dij of a segmented plan) from a single engine
 launch, instead of one head pre-solve plus one transport run per segment.
 
-Physics — exactly the head pre-solve's ``mode="attenuation"``
-(:func:`pyradmc.geometry.head.presolve_head`) and of
+Physics — the head pre-solve's ``mode="attenuation"`` without an air column
+(:func:`pyradmc.geometry.head.presolve_head` with ``air=None``) and
 :class:`~pyradmc.geometry.collimation.CollimatedSource`: a history samples the fan
 of a :class:`~pyradmc.geometry.source.SpectralBeamSource` (energy, then the ray
 from the focal point through the field) and, as a primary of segment ``s``,
@@ -20,9 +20,15 @@ the narrow-beam Beer-Lambert transmission through segment ``s``'s stack, with
 ``L_{s,j}`` the device chord the ray cuts (full-line convention of
 :mod:`pyradmc.geometry.collimation`). Stated approximations, inherited unchanged
 from the attenuation mode: photons scattered in the devices are removed and none
-are transported onward (no head scatter, no leaf-scattered photons), and no
-contaminant electrons. Column ``s`` of the Dij is the dose per fan history
-through segment ``s``; a plan's dose is ``sum_s MU_s * column_s``.
+are transported onward (no head scatter, no leaf-scattered photons), no contaminant
+electrons, and **no air attenuation** between the focal spot and the phantom (the
+pre-solve's optional :class:`~pyradmc.geometry.head.AirColumn` has no counterpart
+here). One bookkeeping difference: the pre-solve drops primaries below ``PCUT`` (and
+of zero weight) when it slides them to its exit plane, while here every fan photon is
+handed to transport, which ends a sub-cutoff photon at once — the two agree for a
+spectrum above ``PCUT``, as every shipped MV spectrum is (Ali-Rogers floor 0.15 MeV).
+Column ``s`` of the Dij is the dose per fan history through segment ``s``; a plan's
+dose is ``sum_s MU_s * column_s``.
 
 Every segment shares the fan, the beam frame, and the stack's *structure* —
 device kinds, slabs, materials, densities, leaf strips, tip radius, focusing —
@@ -53,6 +59,7 @@ import numpy.typing as npt
 
 from pyradmc.data.interface import CrossSectionSource
 from pyradmc.geometry.collimation import MLC, BeamLimitingStack, JawPair
+from pyradmc.geometry.fan import select_by_cdf
 from pyradmc.geometry.head import _MuTables
 from pyradmc.geometry.source import BeamletSource, Primary, Source, SpectralBeamSource
 from pyradmc.rng import RNGState, uniform
@@ -137,9 +144,18 @@ class SegmentedFanSource(BeamletSource):
     e_min, n_table
         The attenuation table's log-energy grid, as in the head pre-solve (whose
         defaults these are, so both routes interpolate one table).
+    attenuation_tables
+        Reuse another source's :attr:`attenuation_tables` (built for the same
+        template devices) instead of building them; ``e_min``/``n_table`` are then
+        ignored. :meth:`with_settings` passes its own.
 
     At least one per-segment array is required; they fix ``n_segments``.
     :meth:`from_stacks` builds the source from one stack per segment instead.
+
+    The per-segment arrays are stored as read-only copies, so the lazily built host
+    stacks and a device upload can never disagree. Sources have no value semantics:
+    they compare and hash by identity, and two sources with equal settings are
+    distinct objects.
     """
 
     def __init__(
@@ -154,9 +170,19 @@ class SegmentedFanSource(BeamletSource):
         tips_pos: npt.ArrayLike | None = None,
         e_min: float = 0.010,
         n_table: int = 512,
+        attenuation_tables: _MuTables | None = None,
     ) -> None:
-        pairs = tuple(zip(template.materials, template.densities, strict=True))
-        tables = _MuTables(cross_sections, pairs, e_min, fan.max_energy, n_table)
+        if attenuation_tables is None:
+            pairs = tuple(zip(template.materials, template.densities, strict=True))
+            tables = _MuTables(cross_sections, pairs, e_min, fan.max_energy, n_table)
+        else:
+            if attenuation_tables._log_total.shape[0] != len(template.devices):
+                raise ValueError(
+                    f"attenuation_tables hold {attenuation_tables._log_total.shape[0]} "
+                    f"devices, the template has {len(template.devices)}"
+                )
+            tables = attenuation_tables
+        self._cross_sections = cross_sections
         self._setup(fan, template, tables, jaw_neg, jaw_pos, tips_neg, tips_pos)
 
     @classmethod
@@ -231,11 +257,28 @@ class SegmentedFanSource(BeamletSource):
 
         The cheap per-iteration path of an aperture optimization: no device
         objects are built and the attenuation tables are shared, not rebuilt.
-        Settings not given default to the *template's* (not to this source's).
+        A setting not given keeps *this* source's values when the given arrays
+        have this source's segment count (or none is given), and falls back to
+        the template's otherwise.
         """
-        source = object.__new__(type(self))
-        source._setup(self._fan, self._template, self._tables, jaw_neg, jaw_pos, tips_neg, tips_pos)
-        return source
+        given = [a for a in (jaw_neg, jaw_pos, tips_neg, tips_pos) if a is not None]
+        n_new = np.shape(given[0])[0] if given else self.n_segments
+        if n_new == self.n_segments:
+            jaws = list(self._jaw_devices)
+            jaw_neg = self._jaw_neg[:, jaws] if jaw_neg is None else jaw_neg
+            jaw_pos = self._jaw_pos[:, jaws] if jaw_pos is None else jaw_pos
+            tips_neg = self._tips_neg if tips_neg is None else tips_neg
+            tips_pos = self._tips_pos if tips_pos is None else tips_pos
+        return type(self)(
+            self._fan,
+            self._template,
+            self._cross_sections,
+            jaw_neg=jaw_neg,
+            jaw_pos=jaw_pos,
+            tips_neg=tips_neg,
+            tips_pos=tips_pos,
+            attenuation_tables=self._tables,
+        )
 
     def _setup(
         self,
@@ -305,8 +348,10 @@ class SegmentedFanSource(BeamletSource):
         self._jaw_pos = np.zeros((n_segments, n_devices), dtype=np.float64)
         self._jaw_neg[:, jaws] = jaw_lo
         self._jaw_pos[:, jaws] = jaw_hi
-        self._tips_neg = tip_lo
-        self._tips_pos = tip_hi
+        self._tips_neg = tip_lo.copy()
+        self._tips_pos = tip_hi.copy()
+        for array in (self._jaw_neg, self._jaw_pos, self._tips_neg, self._tips_pos):
+            array.setflags(write=False)
         self._fan = fan
         self._template = template
         self._tables = tables
@@ -410,11 +455,12 @@ class SegmentedFanSource(BeamletSource):
         return stack
 
     def plan(self, weights: npt.ArrayLike) -> SegmentedPlanSource:
-        """Return the open-field view of the segments summed with ``weights`` (e.g. MU).
+        """Return the open-field view of the segments, mixed by ``weights`` (e.g. MU).
 
-        ``run`` on the result estimates ``sum_s weights[s] * column_s`` of this
-        source's Dij in one launch, with histories allocated to segments in
-        proportion to their weight; see :class:`SegmentedPlanSource`.
+        ``run`` on the result estimates ``sum_s (weights[s] / W) * column_s`` of
+        this source's Dij per history in one launch, with histories allocated to
+        segments in proportion to their weight; multiply by the result's
+        ``total_weight`` ``W`` for the plan dose. See :class:`SegmentedPlanSource`.
         """
         return SegmentedPlanSource(self, weights)
 
@@ -466,25 +512,32 @@ class SegmentedFanSource(BeamletSource):
 
 
 class SegmentedPlanSource(Source):
-    """A segmented fan's plan dose as an open-field source: segments summed by weight.
+    """A segmented fan's plan dose as an open-field source: segments mixed by weight.
 
     Each history first chooses a segment with probability ``p_s = w_s / W``
-    (``W = sum_s w_s``; one uniform), then emits the fan exactly as
-    :meth:`SegmentedFanSource.emit` does for that segment, at weight
-    ``W * exp(-tau_s)``. ``run`` therefore estimates
+    (``W = sum_s w_s`` is :attr:`total_weight`; one uniform), then emits the fan
+    exactly as :meth:`SegmentedFanSource.emit` does for that segment, at weight
+    ``exp(-tau_s)``. ``run`` therefore estimates, **per history**,
 
-        sum_s p_s * W * column_s = sum_s w_s * column_s,
+        sum_s (w_s / W) * column_s,
 
-    the weighted sum of the segments' Dij columns (each per fan history through
-    its segment), with no Dij, no per-segment dose maps and no truncation — the
-    plan-dose route of an optimization loop. Histories go to segments in
-    proportion to their weight, so a segment with more monitor units gets more of
-    them, multinomially (the history index is not visible to ``emit``, so the
-    allocation is sampled rather than stratified); a zero-weight segment is never
-    chosen (selection takes the first ``s`` whose cumulative share exceeds the
-    uniform). Build it with :meth:`SegmentedFanSource.plan`. The Warp engine
-    generates this exact type in-kernel when its segments and fan are exact types
-    too; anything else is host pre-sampled.
+    the share-weighted mean of the segments' Dij columns (each per fan history
+    through its segment). **Multiply the result by** :attr:`total_weight` **for the
+    plan dose** ``sum_s w_s * column_s``. The normalization is deliberate: the
+    engine's energy books are fixed-point integers, and a weight carrying ``W``
+    (hundreds of MU) would overflow them on long runs; at transmission scale every
+    book stays the size of a plain fan run.
+
+    No Dij, no per-segment dose maps and no truncation — the plan-dose route of an
+    optimization loop. Histories go to segments in proportion to their weight, so a
+    segment with more monitor units gets more of them, multinomially (``emit`` does
+    not see the history index, so the allocation is sampled rather than
+    stratified); a zero-weight segment is never chosen (the first ``s`` whose
+    cumulative share exceeds the uniform is taken, the shares being cumulative sums
+    divided by their own final value). Build it with
+    :meth:`SegmentedFanSource.plan`. The Warp engine generates this exact type
+    in-kernel when its segments and fan are exact types too; anything else is host
+    pre-sampled. No value semantics: it hashes by identity.
     """
 
     def __init__(self, segments: SegmentedFanSource, weights: npt.ArrayLike) -> None:
@@ -495,11 +548,15 @@ class SegmentedPlanSource(Source):
             raise ValueError("segment weights must be finite")
         if np.any(w < 0.0):
             raise ValueError("segment weights must be non-negative")
-        total = float(w.sum())
+        cumulative = np.cumsum(w)
+        total = float(cumulative[-1])
         if total <= 0.0:
             raise ValueError("segment weights must sum to a positive value")
-        cdf = np.cumsum(w) / total
-        cdf[-1] = 1.0  # exact: a uniform in [0, 1) always finds a segment
+        # Divided by its own last entry: the final share is exactly 1, and a trailing
+        # zero-weight segment repeats it exactly, so no rounding gap can select it.
+        cdf = cumulative / total
+        w.setflags(write=False)
+        cdf.setflags(write=False)
         self._segments = segments
         self._weights = w
         self._total = total
@@ -522,7 +579,7 @@ class SegmentedPlanSource(Source):
 
     @property
     def total_weight(self) -> float:
-        """``W = sum_s w_s``, the factor every primary's transmission is scaled by."""
+        """``W = sum_s w_s``: multiply a ``run`` result by it for the plan dose."""
         return self._total
 
     @property
@@ -531,14 +588,14 @@ class SegmentedPlanSource(Source):
         return self._cdf
 
     def _select(self, u: npt.ArrayLike) -> npt.NDArray[np.int64]:
+        # Vectorized :func:`~pyradmc.geometry.fan.select_by_cdf` (side="right").
         index = np.searchsorted(self._cdf, u, side="right")
         return np.minimum(index, self._cdf.size - 1).astype(np.int64)
 
     def emit(self, rng_state: RNGState) -> Primary:
-        """Choose a segment by weight (one uniform), then emit its weighted primary."""
-        segment = int(self._select(uniform(rng_state)))
-        primary = self._segments.emit(segment, rng_state)
-        return primary._replace(weight=self._total * primary.weight)
+        """Choose a segment by its share (one uniform), then emit its weighted primary."""
+        segment = select_by_cdf(self._cdf, self._cdf.size, uniform(rng_state))
+        return self._segments.emit(segment, rng_state)
 
     def segment_of(self, seed: int, history_offset: int, n: int) -> npt.NDArray[np.int64]:
         """Return the segment the vectorized batch gives each of ``n`` histories.
@@ -566,7 +623,5 @@ class SegmentedPlanSource(Source):
                 int(s), energies[rows], origins[rows], directions[rows]
             )
         out = dict(columns)
-        out["weight"] = (columns["weight"].astype(np.float64) * self._total * factors).astype(
-            np.float32
-        )
+        out["weight"] = (columns["weight"].astype(np.float64) * factors).astype(np.float32)
         return out

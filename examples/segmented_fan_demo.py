@@ -5,7 +5,8 @@ A step-and-shoot field is one photon fan delivered through several MLC settings.
 beamlet, so a single ``run_dij`` returns one dose column per segment — instead of
 one head pre-solve plus one transport run per segment — and its
 :meth:`~pyradmc.geometry.segments.SegmentedFanSource.plan` view returns the
-MU-weighted plan dose from a single ``run``. Physics: the head pre-solve's
+MU-weighted plan dose from a single ``run`` (scaled by the plan's ``total_weight``,
+the total MU). Physics: the head pre-solve's
 attenuation mode (narrow-beam MLC transmission; no head scatter, no contaminant
 electrons).
 
@@ -144,7 +145,9 @@ def bev_transmission(source: SegmentedFanSource, segment: int):
 def main() -> None:
     """Build the segments, run one Dij and one plan run, render the figure."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--histories", type=int, default=8_000_000, help="per segment")
+    parser.add_argument(
+        "--histories", type=int, default=None, help="per segment (default 2M CUDA, 100k CPU)"
+    )
     parser.add_argument("--batches", type=int, default=8)
     parser.add_argument("--seed", type=int, default=20261022)
     parser.add_argument("--material", choices=("tungsten", "water"), default="tungsten")
@@ -165,7 +168,7 @@ def main() -> None:
         fan, template(material, density), xs, tips_neg=tips[..., 0], tips_pos=tips[..., 1]
     )
     engine, backend = make_engine(grid, xs)
-    n = args.histories
+    n = args.histories or (2_000_000 if backend == "warp:cuda:0" else 100_000)
     if backend == "ref":
         n = min(n, 4_000)
         print("no Warp: the reference engine is slow, histories capped at 4000")
@@ -176,8 +179,9 @@ def main() -> None:
     )
     print(f"one run_dij, {source.n_segments} segments x {n:,}: {time.perf_counter() - t0:.2f} s")
     t0 = time.perf_counter()
+    plan_source = source.plan(MU)
     plan = engine.run(
-        source.plan(MU),
+        plan_source,
         n_histories=source.n_segments * n,
         n_batches=args.batches,
         seed=args.seed + 1,
@@ -224,14 +228,17 @@ def main() -> None:
         )
     )
     ax = axes[0, 4]
-    ax.imshow(plan.dose[:, :, iz].T, origin="lower", extent=extent, cmap="magma")
+    # run() returns sum_s (MU_s / W) column_s per history; W = total MU scales it back.
+    plan_dose = plan_source.total_weight * plan.dose
+    plan_sigma = plan_source.total_weight * plan.dose_sigma
+    ax.imshow(plan_dose[:, :, iz].T, origin="lower", extent=extent, cmap="magma")
     ax.set_title("plan dose at 5 cm\n(one run of the plan view)")
     ax.set_xlabel("x (cm)")
     ax.set_ylabel("y (cm)")
     ax = axes[1, 4]
     iy = int((CENTRE[1] + 1.75) / grid.spacing[1])  # a row through the C's closed bar
     ax.errorbar(
-        x, plan.dose[:, iy, iz], yerr=plan.dose_sigma[:, iy, iz], color="#d8853b", label="plan run"
+        x, plan_dose[:, iy, iz], yerr=plan_sigma[:, iy, iz], color="#d8853b", label="plan run"
     )
     ax.plot(x, weighted[:, iy, iz], color="#2b5fa8", label="sum MU x column")
     ax.fill_between(

@@ -174,10 +174,58 @@ def test_with_settings_replaces_the_segments_and_keeps_the_rest() -> None:
     tips_pos = np.array([[0.2, 0.2, 0.2]])
     narrow = source.with_settings(tips_neg=tips_neg, tips_pos=tips_pos)
     assert narrow.n_segments == 1
-    # The jaws default to the template's (segment 0 of the original).
+    # Another segment count: the jaws fall back to the template's (segment 0).
     assert narrow.segment_stack(0).devices[0] == _stacks()[0].devices[0]
     assert narrow.segment_stack(0).devices[1].tips_neg == (-0.2, -0.2, -0.2)
     assert narrow.attenuation_tables is source.attenuation_tables
+
+
+def test_with_settings_keeps_this_sources_settings_at_the_same_count() -> None:
+    """Same segment count: an omitted setting keeps *this* source's, not the template's."""
+    source = _source()
+    tips_neg = np.array([s[2] for s in SETTINGS]) - 0.1
+    moved = source.with_settings(tips_neg=tips_neg)
+    stacks = _stacks()
+    for s in range(3):
+        jaw, mlc = moved.segment_stack(s).devices
+        assert jaw == stacks[s].devices[0]  # this source's jaws, per segment
+        assert mlc.tips_pos == stacks[s].devices[1].tips_pos
+        np.testing.assert_array_equal(mlc.tips_neg, tips_neg[s])
+    same = source.with_settings()
+    for s in range(3):
+        assert same.segment_stack(s) == stacks[s]
+    assert same is not source
+
+
+def test_settings_arrays_are_read_only_copies() -> None:
+    """In-place edits could desync the cached host stacks from a device upload."""
+    tips_neg = np.array([s[2] for s in SETTINGS])
+    tips_pos = np.array([s[3] for s in SETTINGS])
+    source = SegmentedFanSource(
+        _fan(), _stacks()[0], AnalyticCrossSections(), tips_neg=tips_neg, tips_pos=tips_pos
+    )
+    tips_neg[0, 0] = -2.0  # the caller's array stays the caller's
+    assert source.tips_neg[0, 0] == SETTINGS[0][2][0]
+    for array in (source.jaw_neg, source.jaw_pos, source.tips_neg, source.tips_pos):
+        with pytest.raises(ValueError, match="read-only"):
+            array[0, 0] = 0.0
+
+
+def test_foreign_attenuation_tables_must_match_the_template() -> None:
+    other = SegmentedFanSource.from_stacks(
+        _fan(),
+        [BeamLimitingStack(frame=FRAME, devices=(_stacks()[0].devices[1],))],
+        AnalyticCrossSections(),
+    )
+    with pytest.raises(ValueError, match="devices"):
+        SegmentedFanSource(
+            _fan(),
+            _stacks()[0],
+            AnalyticCrossSections(),
+            tips_neg=[SETTINGS[0][2]],
+            tips_pos=[SETTINGS[0][3]],
+            attenuation_tables=other.attenuation_tables,
+        )
 
 
 def test_unspecified_settings_default_to_the_template() -> None:
@@ -292,8 +340,8 @@ def test_malformed_setting_arrays_are_refused() -> None:
 # --- the plan view: segments summed with MU weights, for a plain run() ------------------
 
 
-def test_plan_emits_a_segment_drawn_by_weight_times_the_total_weight() -> None:
-    """One selection uniform, then the fan; weight W * T_s for the chosen segment."""
+def test_plan_emits_a_segment_drawn_by_share_at_its_transmission() -> None:
+    """One selection uniform, then the fan; weight T_s of the chosen segment (no W)."""
     source = _source()
     weights = np.array([1.0, 3.0, 0.0])
     plan = source.plan(weights)
@@ -301,11 +349,11 @@ def test_plan_emits_a_segment_drawn_by_weight_times_the_total_weight() -> None:
     for history in range(200):
         state = rng.init_state(SEED, history)
         u = state.random()
-        chosen = int(np.searchsorted(np.cumsum(weights) / weights.sum(), u))
+        chosen = int(np.searchsorted(np.cumsum(weights) / weights.sum(), u, side="right"))
         segment_primary = source.emit(chosen, state)  # the fan draws follow
         got = plan.emit(rng.init_state(SEED, history))
-        assert got[:7] == segment_primary[:7]
-        assert got.weight == pytest.approx(weights.sum() * segment_primary.weight, rel=1e-12)
+        assert got == segment_primary
+    assert plan.total_weight == 4.0
 
 
 def test_plan_batch_selects_in_proportion_and_is_chunk_invariant() -> None:
@@ -326,7 +374,19 @@ def test_plan_batch_selects_in_proportion_and_is_chunk_invariant() -> None:
     for s in range(3):
         rows = segment == s
         t = source.sample_beamlet_batch(SEED, 0, 30_000, s)["weight"][rows]
-        np.testing.assert_allclose(whole["weight"][rows], weights.sum() * t, rtol=1e-6)
+        np.testing.assert_array_equal(whole["weight"][rows], t)
+
+
+def test_plan_never_selects_a_zero_weight_segment() -> None:
+    """Trailing and leading zero shares: the cumulative shares repeat exactly."""
+    source = _source()
+    plan = source.plan([0.0, 0.1, 0.0])
+    assert plan.selection_cdf[-1] == 1.0 and plan.selection_cdf[-2] == 1.0
+    edge = np.nextafter(1.0, 0.0)  # the largest uniform below 1
+    assert plan._select([0.0, 0.05, edge]).tolist() == [1, 1, 1]
+    assert np.all(plan.segment_of(SEED, 0, 5_000) == 1)
+    plan = source.plan([0.3, 0.7, 0.0])
+    assert plan._select([edge]).tolist() == [1]
 
 
 def test_plan_weights_are_validated() -> None:
@@ -343,3 +403,48 @@ def test_plan_weights_are_validated() -> None:
     assert plan.max_energy == SPECTRUM.max_energy
     np.testing.assert_array_equal(plan.weights, [2.0, 1.0, 1.0])
     assert plan.segments is source
+
+
+# --- the single-source fan sampler (geometry.fan) on the host -------------------------
+
+
+def test_host_fan_primary_is_the_spectral_fans_emit() -> None:
+    """The kernel sampler, run on the host, is the fan's own emit (same draws, same ray)."""
+    from pyradmc.geometry.fan import fan_primary
+
+    fan = SpectralBeamSource(
+        SPECTRUM, FOCAL, (9.0, 7.0, 0.0), 8.0, 6.0, u_axis=(0.8, 0.6, 0.0), v_axis=(-0.6, 0.8, 0.0)
+    )
+    rng = HostRNG()
+    for history in range(300):
+        want = fan.emit(rng.init_state(SEED, history))
+        got = fan_primary(
+            rng.init_state(SEED, history),
+            SPECTRUM.edges,
+            SPECTRUM.cdf,
+            SPECTRUM.cdf.size,
+            *FOCAL,
+            *fan.center,
+            *fan.u_axis,
+            *fan.v_axis,
+            fan.width_u,
+            fan.width_v,
+        )
+        assert got[0] == want.energy
+        assert got[1:] == pytest.approx((want.ux, want.uy, want.uz), rel=0.0, abs=1e-15)
+
+
+def test_cdf_samplers_match_searchsorted() -> None:
+    from pyradmc.geometry.fan import cdf_lower_bound, select_by_cdf
+
+    rng = np.random.default_rng(SEED)
+    cdf = np.cumsum([0.0, 0.2, 0.0, 0.5, 0.3, 0.0])
+    cdf /= cdf[-1]
+    probes = np.concatenate([rng.random(2_000), cdf, [0.0, np.nextafter(1.0, 0.0)]])
+    for u in probes:
+        assert cdf_lower_bound(cdf, cdf.size, u) == np.searchsorted(cdf, u, side="left")
+        want = min(int(np.searchsorted(cdf, u, side="right")), cdf.size - 1)
+        assert select_by_cdf(cdf, cdf.size, u) == want
+    # Zero-share indices (0, 2, 5) are never drawn.
+    drawn = {select_by_cdf(cdf, cdf.size, u) for u in probes if u < 1.0}  # u in [0, 1)
+    assert drawn == {1, 3, 4}

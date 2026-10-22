@@ -2601,7 +2601,7 @@ class WarpEngine:
     ) -> None:
         """Generate one segmented-plan chunk in-kernel, then drain all queues.
 
-        Each primary chooses its segment by weight and carries ``W`` times that
+        Each primary chooses its segment by its normalized share and carries that
         segment's transmission
         (:func:`~pyradmc.backends.warp.segments.generate_segmented_plan`); fixed
         thread slots into the photon queue, emitted energy booked per primary.
@@ -2625,7 +2625,6 @@ class WarpEngine:
                 history_offset,
                 selection_cdf,
                 int(selection_cdf.shape[0]),
-                float(source.total_weight),
                 upload.edges,
                 upload.cdf,
                 int(upload.cdf.shape[0]),
