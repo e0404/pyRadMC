@@ -52,6 +52,7 @@ from numpy.typing import NDArray
 
 from pyradmc.data.handles import Table1D
 from pyradmc.data.interface import CrossSectionSource
+from pyradmc.geometry import mucache
 from pyradmc.geometry.source import BeamletSource, Primary, Source
 from pyradmc.rng import RNGState
 
@@ -73,6 +74,7 @@ __all__ = [
 _F64 = NDArray[np.float64]
 
 _ORTHONORMAL_TOLERANCE = 1.0e-9
+_EYE3 = np.eye(3)
 
 
 def _as_unit(vector: tuple[float, float, float], name: str) -> tuple[float, float, float]:
@@ -107,7 +109,9 @@ class BeamFrame:
         object.__setattr__(self, "v_axis", v)
         object.__setattr__(self, "w_axis", w)
         axes = np.array([u, v, w])
-        if not np.allclose(axes @ axes.T, np.eye(3), atol=_ORTHONORMAL_TOLERANCE):
+        # np.allclose(gram, eye, atol=tol) written out: |a - b| <= atol + rtol * |b| with
+        # numpy's default rtol, minus the isclose wrapper overhead (same decision).
+        if not np.all(np.abs(axes @ axes.T - _EYE3) <= _ORTHONORMAL_TOLERANCE + 1.0e-5 * _EYE3):
             raise ValueError("beam frame axes must be orthonormal")
         if float(np.dot(np.cross(axes[0], axes[1]), axes[2])) < 1.0 - 1.0e-9:
             raise ValueError("beam frame axes must be right-handed (u x v = w)")
@@ -660,16 +664,19 @@ class MLC:
         if len(self.leaf_edges_v) < 2:
             raise ValueError("leaf_edges_v needs at least two edges (one pair)")
         edges = np.asarray(self.leaf_edges_v, dtype=np.float64)
-        if not np.all(np.diff(edges) > 0.0):
+        if not np.all(edges[1:] > edges[:-1]):  # == diff > 0, one fewer temporary
             raise ValueError("leaf_edges_v must be strictly increasing")
         n_pairs = len(self.leaf_edges_v) - 1
         if len(self.tips_neg) != n_pairs:
             raise ValueError(f"tips_neg has {len(self.tips_neg)} entries for {n_pairs} pairs")
         if len(self.tips_pos) != n_pairs:
             raise ValueError(f"tips_pos has {len(self.tips_pos)} entries for {n_pairs} pairs")
-        for i, (neg, pos) in enumerate(zip(self.tips_neg, self.tips_pos, strict=True)):
-            if neg > pos:
-                raise ValueError(f"pair {i}: tip positions cross ({neg} > {pos})")
+        crossed = np.asarray(self.tips_neg) > np.asarray(self.tips_pos)
+        if crossed.any():
+            i = int(np.argmax(crossed))  # the first crossing pair, as the scan reported
+            raise ValueError(
+                f"pair {i}: tip positions cross ({self.tips_neg[i]} > {self.tips_pos[i]})"
+            )
         if self.material < 0:
             raise ValueError(f"material index must be non-negative, got {self.material}")
         if self.density <= 0.0:
@@ -960,11 +967,11 @@ class _StackTransmission(_RayWeightModel):
         if not 0.0 < e_min < e_max:
             raise ValueError(f"need 0 < e_min < e_max, got {e_min}, {e_max}")
         self._stack = stack
-        energies = np.geomspace(e_min, e_max, n_table)
+        energies = mucache.energy_grid(e_min, e_max, n_table)
         self._log_energies = np.log(energies)
         self._log_mu = np.stack(
             [
-                np.log([cross_sections.mu_over_rho_total(float(e), material) for e in energies])
+                np.log(mucache.mu_curve(cross_sections, material, e_min, e_max, n_table, None)[1])
                 for material in stack.materials
             ]
         )
