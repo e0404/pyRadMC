@@ -429,3 +429,45 @@ the loss.
 **Flipping a validated default re-rolls every fixed-seed statistical test.** Expect around
 a 1 % trip rate across the suite, and repair those by fixing the oracle, never by
 loosening the tolerance.
+
+## Warp drain schedule, 2026-10-22
+
+**The queue drain launches blind rounds and reads the counts back once per block.**
+The drain loop used to read every queue count to the host before launching on it — 8-10
+synchronizations per drain on a 6 MV-class chunk, which needs 3-5 rounds (primary photons,
+their electrons, then bremsstrahlung and delta generations of a few hundred and a few
+dozen particles). Rounds are now launched at queue capacity, the transport kernels guard
+`tid` against the device-side count, a one-thread kernel retires each consumed queue
+(booking overflow and the last busy round on the device), and one status readback per
+block of `k` rounds decides whether another block is needed. `k` adapts to the round
+count of the previous drain on the device, so a steady workload drains with one readback.
+`WarpEngine(drain_rounds=0)` keeps the host-sized schedule, and cpu uses it by default:
+there a readback is a memory read and a capacity-wide launch loops over every slot.
+**Bit-identical by construction and verified**: a run is a function of the multiset of
+particles each launch consumes, and an empty launch consumes nothing; 94 saved pre-change
+outputs (every run route, Dij routes, run and Dij lanes, a 1.5 T field) matched bit for
+bit on cpu and cuda.
+
+**The gain is 3-7 %, not the readback count.** Interleaved in-process A/B, 16 pairs, on
+the shared 4070 (clocks checked at 2535 MHz, other jobs at ~60 % utilization): ten
+48x40x24 collimated 4e5-history runs 0.934x wall, the 64^3 open field 0.968x. Most of the
+time inside the old readbacks was waiting for transport that has to happen anyway, as the
+2026-07 replay measurement found. On the collimated optimizer-loop workload the transport
+kernels are only ~1.3 of ~15-18 ms per call (Warp kernel timing); the rest is per-run
+setup — memsets of freshly allocated queues (~4.1 ms), table and grid uploads (~1.4 ms) —
+and the per-batch book readbacks and `synchronize_device` in `run()`. Those, not the
+drain, are the next levers for small runs.
+
+**A blind launch's grid is one chunk wide, not the capacity and not one device-full.**
+Warp's grid-stride loop walks the empty capacity behind the count guard. A capacity-wide
+grid (16x the blocks) cost ~2-3 % against the chunk-wide one; grids of 2-16 blocks per SM
+were 1-8 % slower than chunk-wide, because the first round's work then runs serially per
+thread — the persistent-threads result again.
+
+**CUDA graph capture of a block: not built, bounded at near zero.** Per drain the host
+enqueues a whole block in 0.49 ms (collimated) / 0.67 ms (open) while the block's GPU
+work takes 1.5 / 2.3 ms more after that, so the GPU is never starved inside a drain;
+replaying a captured graph could save only the first launch's issue latency. Against it:
+the queues are reallocated per run (so a capture per run), the round index is baked into
+the retire launches, and cpu has no graphs. Revisit only if per-run buffers become
+resident *and* a workload's per-drain GPU time falls below its host enqueue time.

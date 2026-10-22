@@ -98,6 +98,11 @@ without a field, so results are not byte-identical to the previous release.
 
 ### Changed
 
+- Warp queue drain: rounds are launched blind at queue capacity and the counts read back
+  once per block instead of before every launch (`WarpEngine(drain_rounds=...)`; default
+  adaptive on CUDA, host-sized on cpu, `0` restores the old schedule). Results are
+  byte-identical on each target; measured 0.93x wall on a loop of small collimated runs
+  and 0.97x on a 1e6-history open field (RTX 4070, contended).
 - `examples/magnetic_field_demo.py` docstring: the electron return effect is *not*
   "much weaker" at 0.35 T for a broad beam over a thick gap — it is as large as at
   1.5 T (Raaijmakers et al. 2008), and the lateral skew of the exit profile is wider at
