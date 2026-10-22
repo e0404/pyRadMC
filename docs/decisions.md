@@ -429,3 +429,56 @@ the loss.
 **Flipping a validated default re-rolls every fixed-seed statistical test.** Expect around
 a 1 % trip rate across the suite, and repair those by fixing the oracle, never by
 loosening the tolerance.
+
+## Resident Warp device state, 2026-10-22
+
+**The Warp engine keeps its device state between calls; a plan-optimization loop was
+paying setup, not transport.** Profiling ten consecutive `run` calls (48x40x24 water,
+400k histories each through a mostly closed 6 MV transmission mask, RTX 4070 Laptop)
+showed per call about 5 ms re-uploading the cross-section tables — mostly `astype` and
+copy of the 12 MB float32 Goudsmit-Saunderson grid, although the host build was already
+cached — about 2 ms allocating and zeroing four queues of twelve columns plus RNG slots
+and counters, and a `synchronize_device` plus three or four synchronizing readbacks per
+batch. Transport kernels were a small fraction of the wall.
+
+Now kept per engine and device: the tables per `(ecut, pcut, e_max, with_gs)` (the GS
+grid shared across `pcut`), the transport grid and field, the last scoring geometry (by
+identity, held so the identity cannot be recycled), spectrum tables by identity, and a
+pool of transport workspaces — queues, slots, the energy counters in one array, lane
+streams — shared by `run` and `run_dij`. Invalidation is structural: every input that
+keys this state is a frozen field of the engine, so a different grid, field or source
+is a different engine; in-place mutation of those arrays is unsupported (it was already
+for the host table cache). `release_device_memory()` hands the device memory back.
+
+Decisions inside it, each measured or pinned:
+
+- **Bitwise inert.** Every call on a warmed engine is compared exactly against the same
+  call on a fresh engine (`tests/integration/test_warp_resident_session.py`, cpu and
+  cuda, including concurrent lanes and Dij), and pre-change golden arrays (run routes,
+  Dij, lanes, field, dose-to-water, scoring grid) matched exactly on both devices.
+  Reused queues need no clearing: every writer fills all fields of a slot before a count
+  publishes it, readers stop at the count, RNG slots are written before they are read.
+- **A smaller request keeps its own queue capacity** (`q.capacity` = the request, not
+  the buffer length), so overflow binds where a fresh queue's would.
+- **`run` grows the pool, a Dij shard refits it exactly.** Grow-only reuse let a Dij ride
+  on a large run's queues: peak device memory for run-then-Dij went 1325 -> 2054 MB
+  (64x64x48 water, 256 beamlets). With exact refit in the shard, peak equals the
+  pre-change engine in every sequence measured, and the Dij auto group size counts idle
+  pooled bytes as free, so it is the size a fresh engine gets.
+- **Dense dose maps stay per call.** Their size is the scoring grid's (tens of bytes per
+  voxel; gigabytes on a full CT) or, for a Dij, half the free memory; parking them
+  between calls would starve the next user of the card for a sub-millisecond saving.
+- **Books read in one transfer; the majorant check once per call.** The int64 counters
+  share one array (one 128-byte line each) and are still cleared and read per batch
+  (`run`) or per group (Dij), so no int64 sum spans more than before; the violation
+  counter only grows and is read once per call or shard (a new test pins that it still
+  raises and that an aborted call leaves the engine usable).
+
+Measured, interleaved A/B against the pre-change code in separate processes, best of 3
+loops / 30 tiny runs / 15 tiny Dij, on a GPU shared with other jobs (clock checked under
+load at 2.0-2.5 GHz, no power cap): ten-run loop 119-123 -> 22-24 ms; tiny `run`
+(64 histories) 7.9-8.4 -> 1.0-1.1 ms; tiny `run_dij` (16 beamlets x 16) 8.9-9.8 ->
+2.1-2.5 ms. On cpu (40k histories per run): loop 402-414 -> 73-76 ms, tiny run 8.0-8.2 ->
+0.71-0.73 ms, tiny Dij 23-25 -> 16-17 ms. Recorded in
+`tests/perf/test_warp_setup_overhead.py`. What remains of a tiny call is mostly the
+drain loop's per-round count readbacks and launch overhead, which this change left alone.
