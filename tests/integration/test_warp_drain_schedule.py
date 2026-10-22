@@ -136,6 +136,54 @@ class TestBlindRoundsAreBitInert:
         )
 
 
+@pytest.mark.gpu
+@pytest.mark.parametrize("rounds", [1, 3])
+def test_one_block_grid_walks_every_slot(monkeypatch, rounds: int) -> None:
+    """The grid-stride path: each thread transports many queued particles.
+
+    At the shipped grid a test-sized queue has a thread per slot, so the kernels'
+    count guard and Warp's grid-stride loop (``return`` becomes ``continue``) are
+    never exercised the way a production queue holding more than a chunk does.
+    A one-block grid makes 256 threads walk the whole capacity; the electron
+    queue's ~900 delta rays in the second round are several real particles per
+    thread. Bits must not move. (cpu has no grid: its launches loop every index.)
+    """
+    if not wp.is_cuda_available():
+        pytest.skip("no CUDA device")
+    import pyradmc.backends.warp.engine as engine_module
+
+    consulted = []
+
+    def one_block(device: str, capacity: int, queue_factor: int) -> int:
+        consulted.append(capacity)
+        return 1
+
+    monkeypatch.setattr(engine_module, "_blind_max_blocks", one_block)
+    got = _run(_engine("cuda:0", rounds))
+    assert consulted, "the blind schedule did not consult the grid size"
+    monkeypatch.undo()
+    _assert_run_bit_identical(got, _run(_engine("cuda:0", 0)))
+
+
+@pytest.mark.gpu
+def test_status_buffers_gain_a_pinned_element_when_a_lane_first_uses_them() -> None:
+    """A slot array drained on the default stream, then on a lane stream (pooled
+    buffers), must get the pinned readback element the lane path copies into."""
+    if not wp.is_cuda_available():
+        pytest.skip("no CUDA device")
+    from pyradmc.backends.warp.engine import _DrainState
+
+    state = _DrainState()
+    slots = wp.zeros(16, dtype=wp.uint32, device="cuda:0")
+    status, host = state.status_buffers(slots, "cuda:0", None)
+    assert host is None
+    lane_status, lane_host = state.status_buffers(slots, "cuda:0", wp.Stream("cuda:0"))
+    assert lane_status is status
+    assert lane_host is not None
+    assert lane_host.device.is_cpu
+    assert lane_host.pinned
+
+
 class TestNothingIsDropped:
     def test_energy_ledger_closes(self, device: str) -> None:
         """Every particle a blind block leaves queued is drained by a later block."""

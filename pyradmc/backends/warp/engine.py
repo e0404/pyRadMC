@@ -369,7 +369,14 @@ _DRAIN_MAX_BLOCK = 32
 """Cap on the adaptive block, so one pathological drain cannot set a huge one."""
 
 _DRAIN_THREADS_PER_SM = 2048
-"""Resident-thread ceiling per SM used to floor a blind launch's grid (Ada: 1536)."""
+"""Threads per SM a blind launch's grid is floored at.
+
+Deliberately at or above every current architecture's resident-thread ceiling
+(2048 on most; Ada caps at 1536), so the floor never leaves an SM idle."""
+
+_WARP_BLOCK_DIM = 256
+"""Warp's default CUDA block size, which every engine launch uses (``wp.launch``
+without ``block_dim``); the blind grid is counted in these blocks."""
 
 
 def _blind_max_blocks(device: str, capacity: int, queue_factor: int) -> int:
@@ -388,10 +395,9 @@ def _blind_max_blocks(device: str, capacity: int, queue_factor: int) -> int:
     d = wp.get_device(device)
     if not d.is_cuda:
         return 0
-    block_dim = 256
-    chunk_blocks = -(-max(1, capacity // max(1, queue_factor)) // block_dim)
+    chunk_blocks = -(-max(1, capacity // max(1, queue_factor)) // _WARP_BLOCK_DIM)
     sm_count = int(getattr(d, "sm_count", 0) or 0)
-    floor_blocks = sm_count * _DRAIN_THREADS_PER_SM // block_dim
+    floor_blocks = sm_count * _DRAIN_THREADS_PER_SM // _WARP_BLOCK_DIM
     return max(1, chunk_blocks, floor_blocks)
 
 
@@ -412,20 +418,28 @@ class _DrainState:
         self._lock = threading.Lock()
 
     def status_buffers(self, slots, device: str, stream):
+        """Return the (device status, pinned host element) pair for a slot array.
+
+        The pinned element is needed only for a lane-stream readback and is created
+        on the first such use, so a slot array first drained on the default stream
+        and later on a lane (pooled buffers) gets one too.
+        """
         with self._lock:
             cached = self._status.get(slots)
-        if cached is not None:
-            return cached
-        status = wp.zeros(kernels.DRAIN_STATUS_SLOTS, dtype=wp.int32, device=device)
-        host = None
-        if stream is not None:
-            # Allocated (and zeroed) on the device's default stream, then used on the
-            # lane's: wait for the default stream once, as the host-upload path does.
-            wp.synchronize_stream(wp.get_stream(device))
-            host = wp.zeros(kernels.DRAIN_STATUS_SLOTS, dtype=wp.int32, device="cpu", pinned=True)
-        with self._lock:
-            self._status[slots] = (status, host)
-        return status, host
+        if cached is None:
+            status = wp.zeros(kernels.DRAIN_STATUS_SLOTS, dtype=wp.int32, device=device)
+            cached = [status, None]
+            if stream is not None:
+                # Allocated (and zeroed) on the device's default stream, then used on
+                # the lane's: wait for the default stream once, as host uploads do.
+                wp.synchronize_stream(wp.get_stream(device))
+            with self._lock:
+                self._status[slots] = cached
+        if stream is not None and cached[1] is None:
+            cached[1] = wp.zeros(
+                kernels.DRAIN_STATUS_SLOTS, dtype=wp.int32, device="cpu", pinned=True
+            )
+        return cached[0], cached[1]
 
 
 def _queue_count(q: Queue, stream=None, staging=None) -> int:
@@ -492,7 +506,8 @@ class WarpEngine:
         the density and material maps, and a gridded map must cover the transport
         grid (checked at construction).
     drain_rounds
-        How the photon/electron queues are drained between chunks — bit-inert
+        Advanced; leave at the default unless profiling says otherwise. How the
+        photon/electron queues are drained between chunks — bit-inert
         scheduling, like ``chunk_size`` (test-pinned). ``0`` is the host-sized
         schedule: every launch is sized from a count read back to the host, one
         synchronization per launch. ``k >= 1`` is the blind schedule: rounds are
@@ -2997,6 +3012,10 @@ class WarpEngine:
         status, host = self._drain.status_buffers(slots, device, stream)
         _launch(kernels.fill_int32, kernels.DRAIN_STATUS_SLOTS, [status, 0], device, stream)
         capacity = q_photon.capacity
+        # One launch dimension serves every queue: they must share one capacity.
+        assert (
+            q_photon_alt.capacity == q_electron.capacity == q_electron_alt.capacity == capacity
+        ), "drain queues differ in capacity"
         max_blocks = _blind_max_blocks(device, capacity, self.queue_factor)
         issued = 0
         block = rounds

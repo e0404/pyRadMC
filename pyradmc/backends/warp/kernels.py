@@ -64,6 +64,11 @@ from pyradmc.transport.electron import (
 from pyradmc.transport.particles import ELECTRON, PHOTON, POSITRON
 
 __all__ = [
+    "DRAIN_ELECTRON_COUNT",
+    "DRAIN_LAST_BUSY_ROUND",
+    "DRAIN_OVERFLOW",
+    "DRAIN_PHOTON_COUNT",
+    "DRAIN_STATUS_SLOTS",
     "ENERGY_QUANTUM_MEV",
     "TRUNCATION_TARGET_THREADS",
     "GridInfo",
@@ -92,6 +97,8 @@ __all__ = [
     "make_beamlet_generator_kernel",
     "make_generator_kernel",
     "photon_kernel",
+    "retire_queue",
+    "snapshot_drain_status",
     "truncation_chunk_layout",
 ]
 
