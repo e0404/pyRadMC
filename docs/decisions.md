@@ -429,3 +429,55 @@ the loss.
 **Flipping a validated default re-rolls every fixed-seed statistical test.** Expect around
 a 1 % trip rate across the suite, and repair those by fixing the oracle, never by
 loosening the tolerance.
+
+## Segmented fans in one launch, 2026-10-22
+
+**A plan's segments are the beamlets of one source.** An aperture-optimization loop
+evaluated 10 segments of a 6 MV fan per iteration as 10 attenuation-mode device
+pre-solves plus 10 `run()` calls: 20 launches with their own buffers, drains and syncs,
+GPU utilization 0-35 %. `SegmentedFanSource` (`geometry/segments.py`) makes segment `s`
+beamlet `s`: a history samples the `SpectralBeamSource` fan and carries
+`exp(-sum_j mu_j(E) L_{s,j})`, the stack transmission at segment `s`'s settings. That is
+exactly the pre-solve's `mode="attenuation"` (and `CollimatedSource`): no head scatter, no
+leaf-scattered photons, no contaminant electrons — no approximation beyond those already
+stated for that mode. `run_dij` returns one column per segment; `plan(weights)` is a
+`Source` whose histories pick segment `s` with probability `w_s / W` and carry
+`W * exp(-tau_s)`, so one `run()` estimates `sum_s w_s column_s` with no Dij, no dense
+per-segment maps and no truncation.
+
+**Layout: one stack, per-segment columns.** Segments share the fan, the frame and the
+stack structure; they differ in jaw edges and leaf tips only. The device keeps the
+pre-solve's `StackArrays` unchanged plus a `SegmentArrays` of edges indexed
+`segment * n_devices + device` and tips `segment * n_tips + tip`, so the chord is the
+existing `jaw_path_length`/`mlc_path_length` twin at that segment's settings and the
+attenuation is the pre-solve's `MuArrays` table built from the same host `_MuTables`. The
+constructor takes the settings as arrays over a template stack, so an optimizer builds no
+`MLC` per segment (`with_settings`, 0.1 ms for 10 x 20 pairs, also reuses the attenuation
+table; ten validated `MLC` stacks cost 1.0 ms); the host route builds stacks lazily.
+Routing is exact-type: `SegmentedFanSource` with an exact `SpectralBeamSource` fan (and
+`SegmentedPlanSource` over both) generate in-kernel; any subclass is host pre-sampled.
+
+**Equivalence (fast tier, seed 20260711, batched chi-squared).** Column for column against
+the reference engine (2.4k histories per column, KERMA), against attenuation pre-solve +
+`run()` per segment (40k, cpu and cuda), plan run against the weighted column sum of an
+independent Dij, and in a one-off 6 MV electrons-on check (10 segments x 400k, cuda): all
+consistent. Every comparison — including known-equivalent controls (a route against
+itself with another seed, and the existing `CollimatedBeamletSource`) — sits *below* the
+batched null mean: chi-squared/null about 0.5 at 2.4k histories per column, 0.9 at 40k-400k.
+The batched oracle's null assumes normal batch means; skewed per-voxel deposits make it
+conservative at low statistics. It still rejects (a mutation dropping `W` from the plan
+weight fails), but its nominal power is optimistic there. Warp cpu and cuda draw the same
+counter-based streams, so their columns differ only by float rounding (~1e-5 relative):
+the two device parametrizations are not independent statistical trials.
+
+**Measured.** RTX 4070 laptop at 2535 MHz, no throttle reason, the GPU shared with other
+jobs, interleaved best of 7, the DAO workload (`tests/perf/test_segmented_fan_throughput.py`):
+ten pre-solve + runs 1085 ms; the same sharing one host fan sample (the DAO example's
+trick) 469 ms; one `run_dij` 78 ms (**6.0x**); one plan `run` 67 ms (**7.0x**). A single
+400k-history `run()` of a device phase space alone costs 39 ms, so the gain is the per-run
+fixed cost and the nine extra drains, not the generator.
+
+**Not done.** History allocation in the Dij route stays equal per segment (the `run_dij`
+contract); allocation in proportion to MU exists only in the plan view, and is
+multinomial, because `emit` never sees the history index. Stratified allocation needs
+either a per-column history count in `run_dij` on both engines or an index-aware emit.

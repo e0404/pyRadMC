@@ -237,7 +237,9 @@ exact for independent columns, a lower bound for correlated ones, against a dire
 forward run), `tabulated_demo.py` (EPDL/EEDL cross-sections), `materials_demo.py`
 (bone/lung heterogeneity), `ct_demo.py` (dose on a CT), `dose_grid_demo.py` (decoupled
 scoring grid and dose-to-water), `spectral_source_demo.py` (6 MV polyenergetic fan),
-`collimation_demo.py` (staircase MLC field), `magnetic_field_demo.py` (the electron
+`collimation_demo.py` (staircase MLC field), `segmented_fan_demo.py` (four MLC segments of
+one fan in a single launch: a dose column per segment, and the MU-weighted plan from one
+run), `magnetic_field_demo.py` (the electron
 return effect in a water / air / water slab at 0, 0.2, 0.7, 1.5 and 3 T), `virtual_source_demo.py`
 (measured-primary-fluence source model), `phasespace_demo.py` (IAEA phase-space source),
 `custom_source_demo.py`, `pencil_kernel_demo.py` and `pencil_kernel_database.py`
