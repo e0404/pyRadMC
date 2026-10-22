@@ -165,6 +165,7 @@ slab_entry_distance = _p.slab_entry_distance
 distance_to_voxel_boundary = _p.distance_to_voxel_boundary
 voxel_face_axis = _p.voxel_face_axis
 nudge_across_face = _p.nudge_across_face
+fan_primary = _p.fan_primary
 
 
 @wp.struct
@@ -2409,17 +2410,26 @@ def generate_spectral_beam(
     state = WarpRNGState()
     state.slots = slots
     state.idx = tid
-    u_bin = uniform(state)
-    u_within = uniform(state)
-    du = (uniform(state) - 0.5) * width_u
-    dv = (uniform(state) - 0.5) * width_v
-    k = wp.min(wp.lower_bound(cdf, u_bin), n_bins - 1)
-    lo = edges[k]
-    energy = lo + (edges[k + 1] - lo) * u_within
-    dx = ax + du * uxa + dv * vxa - fx
-    dy = ay + du * uya + dv * vya - fy
-    dz = az + du * uza + dv * vza - fz
-    inv_norm = 1.0 / wp.sqrt(dx * dx + dy * dy + dz * dz)
+    energy, dx, dy, dz = fan_primary(
+        state,
+        edges,
+        cdf,
+        n_bins,
+        fx,
+        fy,
+        fz,
+        ax,
+        ay,
+        az,
+        uxa,
+        uya,
+        uza,
+        vxa,
+        vya,
+        vza,
+        width_u,
+        width_v,
+    )
     q.kind[tid] = PHOTON
     q.beamlet[tid] = 0
     q.primary[tid] = 1  # source particle: the only one that may split
@@ -2428,9 +2438,9 @@ def generate_spectral_beam(
     q.x[tid] = fx
     q.y[tid] = fy
     q.z[tid] = fz
-    q.ux[tid] = dx * inv_norm
-    q.uy[tid] = dy * inv_norm
-    q.uz[tid] = dz * inv_norm
+    q.ux[tid] = dx
+    q.uy[tid] = dy
+    q.uz[tid] = dz
     q.rng[tid] = slots[tid]
     _escape(emitted, energy)
 
@@ -2489,20 +2499,26 @@ def generate_spectral_masked_beam(
     state = WarpRNGState()
     state.slots = slots
     state.idx = tid
-    u_bin = uniform(state)
-    u_within = uniform(state)
-    du = (uniform(state) - 0.5) * source_width_u
-    dv = (uniform(state) - 0.5) * source_width_v
-    k = wp.min(wp.lower_bound(cdf, u_bin), n_bins - 1)
-    lo = edges[k]
-    energy = lo + (edges[k + 1] - lo) * u_within
-    dx = ax + du * source_ux + dv * source_vx - fx
-    dy = ay + du * source_uy + dv * source_vy - fy
-    dz = az + du * source_uz + dv * source_vz - fz
-    inv_norm = 1.0 / wp.sqrt(dx * dx + dy * dy + dz * dz)
-    dx *= inv_norm
-    dy *= inv_norm
-    dz *= inv_norm
+    energy, dx, dy, dz = fan_primary(
+        state,
+        edges,
+        cdf,
+        n_bins,
+        fx,
+        fy,
+        fz,
+        ax,
+        ay,
+        az,
+        source_ux,
+        source_uy,
+        source_uz,
+        source_vx,
+        source_vy,
+        source_vz,
+        source_width_u,
+        source_width_v,
+    )
 
     normal_x = mask_uy * mask_vz - mask_uz * mask_vy
     normal_y = mask_uz * mask_vx - mask_ux * mask_vz
@@ -2677,17 +2693,26 @@ def generate_spectral_beamlets(
     state = WarpRNGState()
     state.slots = slots
     state.idx = tid
-    u_bin = uniform(state)
-    u_within = uniform(state)
-    du = (uniform(state) - 0.5) * width_u
-    dv = (uniform(state) - 0.5) * width_v
-    k = wp.min(wp.lower_bound(cdf, u_bin), n_bins - 1)
-    lo = edges[k]
-    energy = lo + (edges[k + 1] - lo) * u_within
-    dx = cx[local] + du * uxa + dv * vxa - fx
-    dy = cy[local] + du * uya + dv * vya - fy
-    dz = cz[local] + du * uza + dv * vza - fz
-    inv_norm = 1.0 / wp.sqrt(dx * dx + dy * dy + dz * dz)
+    energy, dx, dy, dz = fan_primary(
+        state,
+        edges,
+        cdf,
+        n_bins,
+        fx,
+        fy,
+        fz,
+        cx[local],
+        cy[local],
+        cz[local],
+        uxa,
+        uya,
+        uza,
+        vxa,
+        vya,
+        vza,
+        width_u,
+        width_v,
+    )
     q.kind[tid] = PHOTON
     q.beamlet[tid] = local
     q.primary[tid] = 1  # source photon: the only one that may split
@@ -2696,8 +2721,8 @@ def generate_spectral_beamlets(
     q.x[tid] = fx
     q.y[tid] = fy
     q.z[tid] = fz
-    q.ux[tid] = dx * inv_norm
-    q.uy[tid] = dy * inv_norm
-    q.uz[tid] = dz * inv_norm
+    q.ux[tid] = dx
+    q.uy[tid] = dy
+    q.uz[tid] = dz
     q.rng[tid] = slots[tid]
     _escape(emitted, energy)

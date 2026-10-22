@@ -15,7 +15,8 @@ import pytest
 wp = pytest.importorskip("warp", reason="warp-lang optional dependency not installed")
 
 import pyradmc.backends.warp.kernels  # noqa: E402
-import pyradmc.backends.warp.presolve  # noqa: E402, F401
+import pyradmc.backends.warp.presolve  # noqa: E402
+import pyradmc.backends.warp.segments  # noqa: E402, F401
 
 pytestmark = pytest.mark.warp
 
@@ -43,3 +44,14 @@ def test_presolve_keeps_precise_math() -> None:
     # The device pre-solve's attenuation mode is pinned float32-exact against the
     # host (test_device_presolve); approximate division would break that parity.
     assert _options("pyradmc.backends.warp.presolve")["fast_math"] is False
+
+
+def test_segment_generators_compile_like_the_transport_kernels() -> None:
+    # The segmented-fan generators share geometry.fan.fan_primary with the spectral
+    # generators in the kernels module; compiled with the same options, their
+    # energies and directions are bit-identical for one (seed, key) on one device
+    # (test_warp_segment_generators). The transmission is pinned at float32
+    # tolerance against the host, which fast math does not disturb.
+    options = _options("pyradmc.backends.warp.segments")
+    assert options["enable_backward"] is False
+    assert options["fast_math"] is _options("pyradmc.backends.warp.kernels")["fast_math"]
