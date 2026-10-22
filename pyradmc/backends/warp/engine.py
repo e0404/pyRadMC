@@ -56,7 +56,7 @@ from pyradmc.data.interface import CrossSectionSource
 from pyradmc.geometry.collimation import TransmissionMaskSource
 from pyradmc.geometry.field import FIELD_NONE, MagneticField
 from pyradmc.geometry.grid import VoxelGrid
-from pyradmc.geometry.segments import SegmentedFanSource
+from pyradmc.geometry.segments import SegmentedFanSource, SegmentedPlanSource
 from pyradmc.geometry.source import (
     BeamletGridSource,
     BeamletSource,
@@ -571,6 +571,13 @@ class WarpEngine:
         is_spectral_mask = (
             type(source) is TransmissionMaskSource and type(source.inner) is SpectralBeamSource
         )
+        # A segmented plan: exact plan, segments and fan types (an override of any
+        # of the three keeps the host route).
+        is_segment_plan = (
+            type(source) is SegmentedPlanSource
+            and type(source.segments) is SegmentedFanSource
+            and type(source.segments.fan) is SpectralBeamSource
+        )
         if is_device_ps and source.device != self.device:
             raise ValueError(
                 f"the device pre-solve buffer is on {source.device!r} but this engine "
@@ -628,7 +635,13 @@ class WarpEngine:
         # source books per chunk).
         generator = None
         emitted = None
-        wraps = not in_kernel and not is_device_ps and not is_spectral and not is_spectral_mask
+        wraps = (
+            not in_kernel
+            and not is_device_ps
+            and not is_spectral
+            and not is_spectral_mask
+            and not is_segment_plan
+        )
         if wraps and source.warp_sampler is not None:
             generator = kernels.make_generator_kernel(source.warp_sampler)
             emitted = wp.zeros(1, dtype=wp.int64, device=device)
@@ -654,6 +667,19 @@ class WarpEngine:
                 mask_table = wp.array(
                     source.mask.reshape(-1).astype(np.float32), dtype=float, device=device
                 )
+        segment_plan = None
+        if is_segment_plan:
+            # The segmented fan's device layout plus the plan's selection shares;
+            # each primary picks its segment and weight in-kernel.
+            from pyradmc.backends.warp import segments as segments_module
+
+            segment_plan = (
+                segments_module.upload_segmented_fan(source.segments, device),
+                wp.array(source.selection_cdf.astype(np.float32), dtype=float, device=device),
+            )
+            emitted = wp.zeros(1, dtype=wp.int64, device=device)
+            if lanes > 1:  # warp module loading is not thread-safe
+                wp.load_module(segments_module, device=device)
 
         n_voxels = scoring.n_voxels
         voxel_mass = wp.array(scoring.voxel_mass.reshape(n_voxels), dtype=wp.float64, device=device)
@@ -694,6 +720,7 @@ class WarpEngine:
                 is_device_ps=is_device_ps,
                 is_spectral=is_spectral,
                 is_spectral_mask=is_spectral_mask,
+                segment_plan=segment_plan,
                 generator=generator,
                 spectral_tables=spectral_tables,
                 mask_table=mask_table,
@@ -775,6 +802,35 @@ class WarpEngine:
                 elif is_device_ps:
                     self._transport_chunk_device_buffer(
                         source,
+                        seed,
+                        history,
+                        n_chunk,
+                        gi,
+                        si,
+                        density,
+                        material,
+                        tab,
+                        queues,
+                        slots,
+                        edep,
+                        escaped,
+                        unscored,
+                        deposited,
+                        violations,
+                        pcut,
+                        ecut,
+                        step_energy_fraction,
+                        deposit_resolution,
+                        msc_model_gs,
+                        transport_electrons,
+                        dose_to_water,
+                        emitted,
+                        device,
+                    )
+                elif segment_plan is not None:
+                    self._transport_chunk_segment_plan(
+                        source,
+                        segment_plan,
                         seed,
                         history,
                         n_chunk,
@@ -2082,6 +2138,7 @@ class WarpEngine:
         is_device_ps,
         is_spectral,
         is_spectral_mask,
+        segment_plan,
         generator,
         spectral_tables,
         mask_table,
@@ -2148,6 +2205,16 @@ class WarpEngine:
             elif is_device_ps:
                 self._transport_chunk_device_buffer(
                     source,
+                    *common,
+                    emitted,
+                    device,
+                    res.stream,
+                    res.staging,
+                )
+            elif segment_plan is not None:
+                self._transport_chunk_segment_plan(
+                    source,
+                    segment_plan,
                     *common,
                     emitted,
                     device,
@@ -2473,6 +2540,120 @@ class WarpEngine:
 
         # The generator atomically compacts exactly-zero mask weights, so its queue
         # count is already the number of primaries that need transport.
+        self._drain_queues(
+            q_photon,
+            q_photon_alt,
+            q_electron,
+            q_electron_alt,
+            gi,
+            si,
+            density,
+            material,
+            tab,
+            slots,
+            edep,
+            escaped,
+            unscored,
+            deposited,
+            violations,
+            pcut,
+            ecut,
+            step_energy_fraction,
+            deposit_resolution,
+            msc_model_gs,
+            transport_electrons,
+            dose_to_water,
+            device,
+            stream,
+            staging,
+        )
+
+    def _transport_chunk_segment_plan(
+        self,
+        source,
+        segment_plan,
+        seed,
+        history_offset,
+        n_chunk,
+        gi,
+        si,
+        density,
+        material,
+        tab,
+        queues,
+        slots,
+        edep,
+        escaped,
+        unscored,
+        deposited,
+        violations,
+        pcut,
+        ecut,
+        step_energy_fraction,
+        deposit_resolution,
+        msc_model_gs,
+        transport_electrons,
+        dose_to_water,
+        emitted,
+        device,
+        stream=None,
+        staging=None,
+    ) -> None:
+        """Generate one segmented-plan chunk in-kernel, then drain all queues.
+
+        Each primary chooses its segment by weight and carries ``W`` times that
+        segment's transmission
+        (:func:`~pyradmc.backends.warp.segments.generate_segmented_plan`); fixed
+        thread slots into the photon queue, emitted energy booked per primary.
+        """
+        from pyradmc.backends.warp.segments import generate_segmented_plan
+
+        q_photon, q_photon_alt, q_electron, q_electron_alt = queues
+        for q in queues:
+            _reset_count(q, device, stream)
+        upload, selection_cdf = segment_plan
+        fan = source.segments.fan
+        focal = fan.focal_point
+        center = fan.center
+        u_axis = fan.u_axis
+        v_axis = fan.v_axis
+        _launch(
+            generate_segmented_plan,
+            n_chunk,
+            [
+                seed,
+                history_offset,
+                selection_cdf,
+                int(selection_cdf.shape[0]),
+                float(source.total_weight),
+                upload.edges,
+                upload.cdf,
+                int(upload.cdf.shape[0]),
+                focal[0],
+                focal[1],
+                focal[2],
+                center[0],
+                center[1],
+                center[2],
+                u_axis[0],
+                u_axis[1],
+                u_axis[2],
+                v_axis[0],
+                v_axis[1],
+                v_axis[2],
+                fan.width_u,
+                fan.width_v,
+                upload.stack,
+                upload.segments,
+                upload.mu,
+                slots,
+                emitted,
+                q_photon,
+            ],
+            device,
+            stream,
+        )
+        _set_count(q_photon, n_chunk, device, stream)
         self._drain_queues(
             q_photon,
             q_photon_alt,

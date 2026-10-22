@@ -287,3 +287,59 @@ def test_malformed_setting_arrays_are_refused() -> None:
         SegmentedFanSource(
             _fan(), template, xs, jaw_neg=np.array([[1.0]]), jaw_pos=np.array([[0.0]])
         )
+
+
+# --- the plan view: segments summed with MU weights, for a plain run() ------------------
+
+
+def test_plan_emits_a_segment_drawn_by_weight_times_the_total_weight() -> None:
+    """One selection uniform, then the fan; weight W * T_s for the chosen segment."""
+    source = _source()
+    weights = np.array([1.0, 3.0, 0.0])
+    plan = source.plan(weights)
+    rng = HostRNG()
+    for history in range(200):
+        state = rng.init_state(SEED, history)
+        u = state.random()
+        chosen = int(np.searchsorted(np.cumsum(weights) / weights.sum(), u))
+        segment_primary = source.emit(chosen, state)  # the fan draws follow
+        got = plan.emit(rng.init_state(SEED, history))
+        assert got[:7] == segment_primary[:7]
+        assert got.weight == pytest.approx(weights.sum() * segment_primary.weight, rel=1e-12)
+
+
+def test_plan_batch_selects_in_proportion_and_is_chunk_invariant() -> None:
+    source = _source()
+    weights = np.array([1.0, 3.0, 6.0])
+    plan = source.plan(weights)
+    whole = plan.sample_batch(SEED, 0, 30_000)
+    parts = [plan.sample_batch(SEED, start, 10_000) for start in (0, 10_000, 20_000)]
+    for name, column in whole.items():
+        np.testing.assert_array_equal(column, np.concatenate([p[name] for p in parts]))
+    # The fan columns are the fan's own batch; only the weight carries the segment.
+    fan_batch = _fan().sample_batch(SEED, 0, 30_000)
+    for name in ("energy", "x", "y", "z", "ux", "uy", "uz"):
+        np.testing.assert_array_equal(whole[name], fan_batch[name])
+    segment = plan.segment_of(SEED, 0, 30_000)
+    counts = np.bincount(segment, minlength=3) / segment.size
+    np.testing.assert_allclose(counts, weights / weights.sum(), atol=0.01)
+    for s in range(3):
+        rows = segment == s
+        t = source.sample_beamlet_batch(SEED, 0, 30_000, s)["weight"][rows]
+        np.testing.assert_allclose(whole["weight"][rows], weights.sum() * t, rtol=1e-6)
+
+
+def test_plan_weights_are_validated() -> None:
+    source = _source()
+    with pytest.raises(ValueError, match="one weight per segment"):
+        source.plan([1.0, 2.0])
+    with pytest.raises(ValueError, match="non-negative"):
+        source.plan([1.0, -1.0, 1.0])
+    with pytest.raises(ValueError, match="positive"):
+        source.plan([0.0, 0.0, 0.0])
+    with pytest.raises(ValueError, match="finite"):
+        source.plan([1.0, np.inf, 1.0])
+    plan = source.plan([2.0, 1.0, 1.0])
+    assert plan.max_energy == SPECTRUM.max_energy
+    np.testing.assert_array_equal(plan.weights, [2.0, 1.0, 1.0])
+    assert plan.segments is source

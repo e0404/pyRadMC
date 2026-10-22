@@ -54,10 +54,10 @@ import numpy.typing as npt
 from pyradmc.data.interface import CrossSectionSource
 from pyradmc.geometry.collimation import MLC, BeamLimitingStack, JawPair
 from pyradmc.geometry.head import _MuTables
-from pyradmc.geometry.source import BeamletSource, Primary, SpectralBeamSource
-from pyradmc.rng import RNGState
+from pyradmc.geometry.source import BeamletSource, Primary, Source, SpectralBeamSource
+from pyradmc.rng import RNGState, uniform
 
-__all__ = ["SegmentedFanSource"]
+__all__ = ["SegmentedFanSource", "SegmentedPlanSource"]
 
 _F64 = npt.NDArray[np.float64]
 
@@ -65,6 +65,11 @@ _F64 = npt.NDArray[np.float64]
 # devices are positioned relative to the focal spot, so a frame anchored elsewhere
 # (the isocentre, say) is a setup error, not a geometry; anything above rounding is.
 _FOCAL_TOLERANCE_CM = 1.0e-6
+
+# Salt of the plan view's vectorized segment-selection stream, so it is independent
+# of the fan's own PCG64(seed) batch stream (which it must not shift: the fan
+# columns of a plan batch are the fan's batch, test-pinned).
+_PLAN_SELECTION_SALT = 0x504C414E
 
 
 def _jaws(stack: BeamLimitingStack) -> list[int]:
@@ -404,6 +409,15 @@ class SegmentedFanSource(BeamletSource):
             self._stacks[segment] = stack
         return stack
 
+    def plan(self, weights: npt.ArrayLike) -> SegmentedPlanSource:
+        """Return the open-field view of the segments summed with ``weights`` (e.g. MU).
+
+        ``run`` on the result estimates ``sum_s weights[s] * column_s`` of this
+        source's Dij in one launch, with histories allocated to segments in
+        proportion to their weight; see :class:`SegmentedPlanSource`.
+        """
+        return SegmentedPlanSource(self, weights)
+
     def _check(self, segment: int) -> None:
         if not 0 <= segment < self.n_segments:
             raise IndexError(f"segment {segment} outside fan of {self.n_segments}")
@@ -449,3 +463,110 @@ class SegmentedFanSource(BeamletSource):
     def attenuation_tables(self) -> _MuTables:
         """The per-device macroscopic attenuation tables (shared with the pre-solve)."""
         return self._tables
+
+
+class SegmentedPlanSource(Source):
+    """A segmented fan's plan dose as an open-field source: segments summed by weight.
+
+    Each history first chooses a segment with probability ``p_s = w_s / W``
+    (``W = sum_s w_s``; one uniform), then emits the fan exactly as
+    :meth:`SegmentedFanSource.emit` does for that segment, at weight
+    ``W * exp(-tau_s)``. ``run`` therefore estimates
+
+        sum_s p_s * W * column_s = sum_s w_s * column_s,
+
+    the weighted sum of the segments' Dij columns (each per fan history through
+    its segment), with no Dij, no per-segment dose maps and no truncation — the
+    plan-dose route of an optimization loop. Histories go to segments in
+    proportion to their weight, so a segment with more monitor units gets more of
+    them, multinomially (the history index is not visible to ``emit``, so the
+    allocation is sampled rather than stratified); a zero-weight segment is never
+    chosen (selection takes the first ``s`` whose cumulative share exceeds the
+    uniform). Build it with :meth:`SegmentedFanSource.plan`. The Warp engine
+    generates this exact type in-kernel when its segments and fan are exact types
+    too; anything else is host pre-sampled.
+    """
+
+    def __init__(self, segments: SegmentedFanSource, weights: npt.ArrayLike) -> None:
+        w = np.array(weights, dtype=np.float64).reshape(-1)
+        if w.size != segments.n_segments:
+            raise ValueError(f"need one weight per segment ({segments.n_segments}), got {w.size}")
+        if not np.all(np.isfinite(w)):
+            raise ValueError("segment weights must be finite")
+        if np.any(w < 0.0):
+            raise ValueError("segment weights must be non-negative")
+        total = float(w.sum())
+        if total <= 0.0:
+            raise ValueError("segment weights must sum to a positive value")
+        cdf = np.cumsum(w) / total
+        cdf[-1] = 1.0  # exact: a uniform in [0, 1) always finds a segment
+        self._segments = segments
+        self._weights = w
+        self._total = total
+        self._cdf = cdf
+
+    @property
+    def max_energy(self) -> float:
+        """The fan spectrum's top edge."""
+        return self._segments.max_energy
+
+    @property
+    def segments(self) -> SegmentedFanSource:
+        """The segmented fan whose columns this plan sums."""
+        return self._segments
+
+    @property
+    def weights(self) -> _F64:
+        """The per-segment weights (e.g. MU), as given."""
+        return self._weights
+
+    @property
+    def total_weight(self) -> float:
+        """``W = sum_s w_s``, the factor every primary's transmission is scaled by."""
+        return self._total
+
+    @property
+    def selection_cdf(self) -> _F64:
+        """Cumulative selection shares ``sum_{k<=s} w_k / W`` (last entry exactly 1)."""
+        return self._cdf
+
+    def _select(self, u: npt.ArrayLike) -> npt.NDArray[np.int64]:
+        index = np.searchsorted(self._cdf, u, side="right")
+        return np.minimum(index, self._cdf.size - 1).astype(np.int64)
+
+    def emit(self, rng_state: RNGState) -> Primary:
+        """Choose a segment by weight (one uniform), then emit its weighted primary."""
+        segment = int(self._select(uniform(rng_state)))
+        primary = self._segments.emit(segment, rng_state)
+        return primary._replace(weight=self._total * primary.weight)
+
+    def segment_of(self, seed: int, history_offset: int, n: int) -> npt.NDArray[np.int64]:
+        """Return the segment the vectorized batch gives each of ``n`` histories.
+
+        One uniform per history from a salted ``PCG64`` stream advanced to
+        ``history_offset``: chunk-invariant, and independent of the fan's batch.
+        """
+        bitgen = np.random.PCG64(np.random.SeedSequence((seed, _PLAN_SELECTION_SALT)))
+        bitgen.advance(history_offset)
+        return self._select(np.random.Generator(bitgen).random(n))
+
+    def sample_batch(self, seed: int, history_offset: int, n: int) -> dict[str, npt.NDArray[Any]]:
+        """Vectorized host batch: the fan's batch, each row weighted by its segment."""
+        columns = self._segments.fan.sample_batch(seed, history_offset, n)
+        segment = self.segment_of(seed, history_offset, n)
+        energies = columns["energy"].astype(np.float64)
+        origins = np.stack([columns["x"], columns["y"], columns["z"]], axis=1).astype(np.float64)
+        directions = np.stack([columns["ux"], columns["uy"], columns["uz"]], axis=1).astype(
+            np.float64
+        )
+        factors = np.zeros(n, dtype=np.float64)
+        for s in np.unique(segment):
+            rows = segment == s
+            factors[rows] = self._segments.transmission(
+                int(s), energies[rows], origins[rows], directions[rows]
+            )
+        out = dict(columns)
+        out["weight"] = (columns["weight"].astype(np.float64) * self._total * factors).astype(
+            np.float32
+        )
+        return out

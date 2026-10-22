@@ -43,6 +43,7 @@ __all__ = [
     "SegmentArrays",
     "SegmentedFanUpload",
     "generate_segmented_fan",
+    "generate_segmented_plan",
     "segment_transmission",
     "segment_transmission_kernel",
     "upload_segmented_fan",
@@ -314,6 +315,89 @@ def generate_segmented_fan(
     weight = segment_transmission(stack, segs, mu, seg, energy, fx, fy, fz, dx, dy, dz)
     q.kind[tid] = PHOTON
     q.beamlet[tid] = local
+    q.primary[tid] = 1  # source photon: the only one that may split
+    q.energy[tid] = energy
+    q.weight[tid] = weight
+    q.x[tid] = fx
+    q.y[tid] = fy
+    q.z[tid] = fz
+    q.ux[tid] = dx
+    q.uy[tid] = dy
+    q.uz[tid] = dz
+    q.rng[tid] = slots[tid]
+    _escape(emitted, weight * energy)
+
+
+@wp.kernel
+def generate_segmented_plan(
+    seed: int,
+    history_offset: int,
+    selection_cdf: wp.array(dtype=float),
+    n_segments: int,
+    total_weight: float,
+    edges: wp.array(dtype=float),
+    cdf: wp.array(dtype=float),
+    n_bins: int,
+    fx: float,
+    fy: float,
+    fz: float,
+    ax: float,
+    ay: float,
+    az: float,
+    uxa: float,
+    uya: float,
+    uza: float,
+    vxa: float,
+    vya: float,
+    vza: float,
+    width_u: float,
+    width_v: float,
+    stack: StackArrays,
+    segs: SegmentArrays,
+    mu: MuArrays,
+    slots: wp.array(dtype=wp.uint32),
+    emitted: wp.array(dtype=wp.int64),
+    q: Queue,
+):
+    """Plan-dose primaries: a segment chosen by weight, then its weighted fan photon.
+
+    The in-kernel twin of :meth:`~pyradmc.geometry.segments.SegmentedPlanSource.emit`:
+    one uniform selects the first segment whose cumulative share exceeds it, the
+    fan's four uniforms follow in the host order, and the weight is
+    ``total_weight`` times that segment's stack transmission. One open-field
+    history per thread at a fixed slot (``beamlet = 0``); ``weight * energy`` is
+    booked into ``emitted``.
+    """
+    tid = wp.tid()
+    slots[tid] = init_slot(seed, history_offset + tid)
+    state = WarpRNGState()
+    state.slots = slots
+    state.idx = tid
+    u_select = uniform(state)
+    seg = int(0)  # noqa: UP018, RUF046 - Warp needs int() to declare a loop-mutated var
+    for k in range(n_segments):
+        if selection_cdf[k] <= u_select:
+            seg = k + 1
+    seg = wp.min(seg, n_segments - 1)
+    u_bin = uniform(state)
+    u_within = uniform(state)
+    du = (uniform(state) - 0.5) * width_u
+    dv = (uniform(state) - 0.5) * width_v
+    k_bin = wp.min(wp.lower_bound(cdf, u_bin), n_bins - 1)
+    lo = edges[k_bin]
+    energy = lo + (edges[k_bin + 1] - lo) * u_within
+    dx = ax + du * uxa + dv * vxa - fx
+    dy = ay + du * uya + dv * vya - fy
+    dz = az + du * uza + dv * vza - fz
+    inv_norm = 1.0 / wp.sqrt(dx * dx + dy * dy + dz * dz)
+    dx = dx * inv_norm
+    dy = dy * inv_norm
+    dz = dz * inv_norm
+    weight = total_weight * segment_transmission(
+        stack, segs, mu, seg, energy, fx, fy, fz, dx, dy, dz
+    )
+    q.kind[tid] = PHOTON
+    q.beamlet[tid] = 0
     q.primary[tid] = 1  # source photon: the only one that may split
     q.energy[tid] = energy
     q.weight[tid] = weight
