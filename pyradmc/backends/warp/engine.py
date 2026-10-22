@@ -2275,7 +2275,7 @@ class WarpEngine:
                 emitted_counter,
                 device,
                 res.stream,
-                res.staging,
+                res.workspace,
             )
             return 0.0
         if beamlet_generator is not None:
@@ -2643,7 +2643,7 @@ class WarpEngine:
                     emitted,
                     device,
                     res.stream,
-                    res.staging,
+                    res.workspace,
                 )
             elif is_spectral_mask:
                 self._transport_chunk_spectral_mask(
@@ -3021,7 +3021,7 @@ class WarpEngine:
         emitted,
         device,
         stream=None,
-        staging=None,
+        workspace=None,
     ) -> None:
         """Generate one segmented-plan chunk in-kernel, then drain all queues.
 
@@ -3102,7 +3102,7 @@ class WarpEngine:
             dose_to_water,
             device,
             stream,
-            staging,
+            workspace,
         )
 
     def _transport_chunk_wrapped(
@@ -3962,7 +3962,7 @@ class WarpEngine:
         emitted,
         device,
         stream=None,
-        staging=None,
+        workspace=None,
     ) -> None:
         """Built-in segmented-fan Dij route: generate one batch of the group in-kernel.
 
@@ -4047,7 +4047,7 @@ class WarpEngine:
                 dose_to_water,
                 device,
                 stream,
-                staging,
+                workspace,
             )
             t += n_chunk
 
