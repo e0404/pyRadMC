@@ -56,6 +56,7 @@ from pyradmc.data.interface import CrossSectionSource
 from pyradmc.geometry.collimation import TransmissionMaskSource
 from pyradmc.geometry.field import FIELD_NONE, MagneticField
 from pyradmc.geometry.grid import VoxelGrid
+from pyradmc.geometry.segments import SegmentedFanSource
 from pyradmc.geometry.source import (
     BeamletGridSource,
     BeamletSource,
@@ -1227,6 +1228,11 @@ class WarpEngine:
         if len(device_list) > 1 or concurrent_batches > 1:
             for d in device_list:
                 wp.load_module(kernels, device=d)
+            if type(source) is SegmentedFanSource:
+                from pyradmc.backends.warp import segments
+
+                for d in device_list:
+                    wp.load_module(segments, device=d)
         if len(device_list) == 1:
             shard_results = [self._run_dij_shard(device_list[0], _next_group, **args)]
         else:
@@ -1321,14 +1327,27 @@ class WarpEngine:
         # source is host pre-sampled per beamlet and uploaded. Beamlet primaries are
         # photons carrying the source's statistical weight (the built-in routes are
         # unit-weight by construction; the other two take the weight from the
-        # sampler/emit, matching the reference Dij).
+        # sampler/emit, matching the reference Dij). The segmented fan weights each
+        # primary by its segment's stack transmission, evaluated in-kernel.
         use_lattice = type(source) is BeamletGridSource  # exact type: see run()
         use_spectral = type(source) is SpectralBeamletSource
+        # The segmented fan: exact type *and* exact fan type (the TransmissionMask
+        # precedent), so an override of either keeps the host route.
+        use_segments = type(source) is SegmentedFanSource and type(source.fan) is SpectralBeamSource
         beamlet_generator = None
         emitted_counter = None
         spectral_tables = None
-        if not use_lattice and not use_spectral and source.warp_beamlet_sampler is not None:
+        segment_upload = None
+        in_kernel_builtin = use_lattice or use_spectral or use_segments
+        if not in_kernel_builtin and source.warp_beamlet_sampler is not None:
             beamlet_generator = kernels.make_beamlet_generator_kernel(source.warp_beamlet_sampler)
+            emitted_counter = wp.zeros(1, dtype=wp.int64, device=device)
+        if use_segments:
+            # One stack layout + per-segment settings + the pre-solve's attenuation
+            # table, uploaded once per shard: every group indexes it by segment.
+            from pyradmc.backends.warp.segments import upload_segmented_fan
+
+            segment_upload = upload_segmented_fan(source, device)
             emitted_counter = wp.zeros(1, dtype=wp.int64, device=device)
         if use_spectral:
             spectrum = source.spectrum
@@ -1403,6 +1422,7 @@ class WarpEngine:
             emitted_counter=emitted_counter,
             use_lattice=use_lattice,
             use_spectral=use_spectral,
+            use_segments=use_segments,
             spectral_tables=spectral_tables,
             seed=seed,
             n_per=n_histories_per_beamlet,
@@ -1447,6 +1467,8 @@ class WarpEngine:
                 group_arrays = self._upload_lattice_bounds(source, group_start, group, device)
             elif use_spectral:
                 group_arrays = self._upload_spectral_centers(source, group_start, group, device)
+            elif use_segments:
+                group_arrays = segment_upload  # shard-wide; segments index it directly
             # Clear only what this group uses: the dense maps are allocated at
             # max_group, so zero_() would charge a trailing short group the full
             # group's clear. Every dense launch below is dimensioned from ``group``,
@@ -1627,6 +1649,7 @@ class WarpEngine:
         emitted_counter,
         use_lattice,
         use_spectral,
+        use_segments,
         spectral_tables,
         seed,
         n_per,
@@ -1652,12 +1675,14 @@ class WarpEngine:
     ) -> float:
         """Generate and drain one batch of one group with a lane's resources.
 
-        The single routing point for the four generation routes; sequential and
+        The single routing point for the five generation routes; sequential and
         lane execution differ only in which :class:`_LaneResources` they pass.
-        ``group_arrays`` carries the active in-kernel route's per-group upload
-        (lattice bounds or spectral aperture centres). Returns the batch's
-        host-summed emitted energy (nonzero only on the pre-sampled route; the
-        in-kernel routes book emitted energy on the device).
+        ``group_arrays`` carries the active in-kernel route's upload: lattice
+        bounds or spectral aperture centres per group, or the segmented fan's
+        shard-wide :class:`~pyradmc.backends.warp.segments.SegmentedFanUpload`.
+        Returns the batch's host-summed emitted energy (nonzero only on the
+        pre-sampled route; the in-kernel routes book emitted energy on the
+        device).
         """
         if use_lattice:
             self._generate_group_lattice(
@@ -1700,6 +1725,44 @@ class WarpEngine:
             self._generate_group_spectral(
                 source,
                 spectral_tables,
+                group_arrays,
+                group_start,
+                group,
+                seed,
+                n_per,
+                per_batch,
+                batch,
+                correlated,
+                chunk,
+                block_histories,
+                gi,
+                si,
+                density,
+                material,
+                tab,
+                res.queues,
+                res.slots,
+                res.edep,
+                escaped,
+                unscored,
+                deposited,
+                violations,
+                pcut,
+                ecut,
+                step_energy_fraction,
+                deposit_resolution,
+                msc_model_gs,
+                transport_electrons,
+                dose_to_water,
+                emitted_counter,
+                device,
+                res.stream,
+                res.staging,
+            )
+            return 0.0
+        if use_segments:
+            self._generate_group_segments(
+                source,
                 group_arrays,
                 group_start,
                 group,
@@ -3129,6 +3192,130 @@ class WarpEngine:
                     cx,
                     cy,
                     cz,
+                    slots,
+                    emitted,
+                    queues[0],
+                ],
+                device,
+                stream,
+            )
+            _set_count(queues[0], n_chunk, device, stream)
+            self._drain_queues(
+                queues[0],
+                queues[1],
+                queues[2],
+                queues[3],
+                gi,
+                si,
+                density,
+                material,
+                tab,
+                slots,
+                edep,
+                escaped,
+                unscored,
+                deposited,
+                violations,
+                pcut,
+                ecut,
+                step_energy_fraction,
+                deposit_resolution,
+                msc_model_gs,
+                transport_electrons,
+                dose_to_water,
+                device,
+                stream,
+                staging,
+            )
+            t += n_chunk
+
+    def _generate_group_segments(
+        self,
+        source,
+        upload,
+        group_start,
+        group,
+        seed,
+        n_per,
+        per_batch,
+        batch,
+        correlated,
+        chunk,
+        block_histories,
+        gi,
+        si,
+        density,
+        material,
+        tab,
+        queues,
+        slots,
+        edep,
+        escaped,
+        unscored,
+        deposited,
+        violations,
+        pcut,
+        ecut,
+        step_energy_fraction,
+        deposit_resolution,
+        msc_model_gs,
+        transport_electrons,
+        dose_to_water,
+        emitted,
+        device,
+        stream=None,
+        staging=None,
+    ) -> None:
+        """Built-in segmented-fan Dij route: generate one batch of the group in-kernel.
+
+        The spectral route's block chunking, with every primary weighted by its
+        segment's stack transmission on the device
+        (:func:`~pyradmc.backends.warp.segments.generate_segmented_fan`); the kernel
+        books ``weight * energy`` into ``emitted`` per primary.
+        """
+        from pyradmc.backends.warp.segments import generate_segmented_fan
+
+        fan = source.fan
+        focal = fan.focal_point
+        center = fan.center
+        u_axis = fan.u_axis
+        v_axis = fan.v_axis
+        t = 0
+        while t < block_histories:
+            n_chunk = min(chunk, block_histories - t)
+            for q in queues:
+                _reset_count(q, device, stream)
+            _launch(
+                generate_segmented_fan,
+                n_chunk,
+                [
+                    seed,
+                    group_start,
+                    n_per,
+                    per_batch,
+                    batch,
+                    t,
+                    1 if correlated else 0,
+                    upload.edges,
+                    upload.cdf,
+                    int(upload.cdf.shape[0]),
+                    focal[0],
+                    focal[1],
+                    focal[2],
+                    center[0],
+                    center[1],
+                    center[2],
+                    u_axis[0],
+                    u_axis[1],
+                    u_axis[2],
+                    v_axis[0],
+                    v_axis[1],
+                    v_axis[2],
+                    fan.width_u,
+                    fan.width_v,
+                    upload.stack,
+                    upload.segments,
+                    upload.mu,
                     slots,
                     emitted,
                     queues[0],
