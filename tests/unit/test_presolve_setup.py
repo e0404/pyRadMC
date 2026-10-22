@@ -267,3 +267,40 @@ def test_mlc_validation_raises_the_same_errors(overrides, match) -> None:
 
 def test_mlc_accepts_touching_tips_and_a_single_pair() -> None:
     MLC(46.0, 50.0, (-1.0, 1.0), (0.5,), (0.5,), 10.0, WATER, 1.0)
+
+
+def test_mu_tables_memo_is_keyed_on_pairs_and_grid(source) -> None:
+    from pyradmc.geometry.head import mu_tables
+
+    pairs_a = _pairs_for(source)[:2]
+    pairs_b = tuple((m, d * 0.6) for m, d in pairs_a)  # retuned densities
+    first = mu_tables(source, pairs_a, E_MIN, E_MAX, N_TABLE)
+    other = mu_tables(source, pairs_b, E_MIN, E_MAX, N_TABLE)
+    assert other is not first
+    for tables, pairs in ((first, pairs_a), (other, pairs_b)):
+        _, log_total, log_compton = _oracle(source, pairs, E_MIN, E_MAX, N_TABLE)
+        np.testing.assert_array_equal(tables._log_total, log_total)
+        np.testing.assert_array_equal(tables._log_compton, log_compton)
+    assert mu_tables(source, pairs_a, E_MIN, E_MAX, N_TABLE) is first  # a real hit
+    wider = mu_tables(source, pairs_a, E_MIN, 2.0 * E_MAX, N_TABLE)
+    finer = mu_tables(source, pairs_a, E_MIN, E_MAX, 2 * N_TABLE)
+    assert wider is not first
+    assert finer is not first
+    for tables, e_max, n in ((wider, 2.0 * E_MAX, N_TABLE), (finer, E_MAX, 2 * N_TABLE)):
+        log_e, log_total, _ = _oracle(source, pairs_a, E_MIN, e_max, n)
+        np.testing.assert_array_equal(tables._log_energies, log_e)
+        np.testing.assert_array_equal(tables._log_total, log_total)
+
+
+def test_mlc_is_immune_to_in_place_mutation_of_its_inputs() -> None:
+    edges = np.array([-3.0, -1.0, 1.0, 3.0])
+    neg, pos = np.array([-1.0, -1.0, -1.0]), np.array([1.0, 1.0, 1.0])
+    mlc = MLC(46.0, 50.0, edges, neg, pos, 10.0, WATER, 1.0)
+    before = (mlc.leaf_edges_v, mlc.tips_neg, mlc.tips_pos)
+    edges[:] = 0.0
+    neg[:] = 9.0
+    pos[:] = -9.0
+    assert (mlc.leaf_edges_v, mlc.tips_neg, mlc.tips_pos) == before
+    assert all(type(v) is float for v in mlc.tips_neg + mlc.tips_pos + mlc.leaf_edges_v)
+    stack = BeamLimitingStack(frame=BeamFrame(origin=(0, 0, 0)), devices=[mlc])  # type: ignore[arg-type]
+    assert isinstance(stack.devices, tuple)

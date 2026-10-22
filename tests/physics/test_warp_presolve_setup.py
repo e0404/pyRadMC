@@ -107,3 +107,137 @@ def test_as_float32_does_not_copy_a_matching_array() -> None:
     converted = _as_float32(f64)
     assert converted.dtype == np.float32
     np.testing.assert_array_equal(converted, f64.astype(np.float32))
+
+
+def _tweaked_stack(shift: float):
+    """The test stack with its MLC tips moved: same shapes, different leaf geometry."""
+    import dataclasses
+
+    base = _stack()
+    jaw, mlc = base.devices
+    moved = dataclasses.replace(
+        mlc,
+        tips_neg=tuple(t - shift for t in mlc.tips_neg),
+        tips_pos=tuple(t + shift for t in mlc.tips_pos),
+    )
+    return type(base)(frame=base.frame, devices=(jaw, moved))
+
+
+def _drop_caches() -> None:
+    from pyradmc.backends.warp import presolve
+
+    mucache.clear()
+    presolve._stack_cache.clear()
+    presolve._mu_device_cache.clear()
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_a_different_stack_is_never_served_the_cached_geometry(device: str) -> None:
+    _require(device)
+    xs = AnalyticCrossSections()
+    stack_a, stack_b = _tweaked_stack(0.0), _tweaked_stack(1.4)
+    _drop_caches()
+    a = _records(_run(device, stack_a, xs))
+    b_warm = _records(_run(device, stack_b, xs))  # caches hold A
+    _drop_caches()
+    b_cold = _records(_run(device, _tweaked_stack(1.4), xs))
+    assert b_warm.shape == b_cold.shape
+    np.testing.assert_array_equal(b_warm, b_cold)
+    assert a.shape != b_warm.shape or not np.array_equal(a, b_warm)
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_a_retuned_density_is_never_served_the_cached_table(device: str) -> None:
+    _require(device)
+    xs = AnalyticCrossSections()
+    stack_a, stack_b = _density_stack(1.0), _density_stack(0.6)
+    _drop_caches()
+    _run(device, stack_a, xs)
+    warm = _records(_run(device, stack_b, xs))
+    _drop_caches()
+    cold = _records(_run(device, _density_stack(0.6), xs))
+    np.testing.assert_array_equal(warm, cold)
+    assert not np.array_equal(warm, _records(_run(device, stack_a, xs)))
+
+
+def _density_stack(density: float):
+    import dataclasses
+
+    base = _stack()
+    return type(base)(
+        frame=base.frame,
+        devices=tuple(dataclasses.replace(d, density=density) for d in base.devices),
+    )
+
+
+def test_cpu_and_cuda_uploads_are_kept_apart() -> None:
+    _require("cuda:0")
+    xs = AnalyticCrossSections()
+    stack = _stack()
+    _drop_caches()
+    cpu_cold = _records(_run("cpu", stack, xs))
+    cuda_cold = _records(_run("cuda:0", stack, xs))  # same stack and table objects
+    np.testing.assert_array_equal(cpu_cold, _records(_run("cpu", stack, xs)))
+    np.testing.assert_array_equal(cuda_cold, _records(_run("cuda:0", stack, xs)))
+    _drop_caches()
+    np.testing.assert_array_equal(cuda_cold, _records(_run("cuda:0", _stack(), xs)))
+
+
+def test_numpy_scalar_densities_are_coerced_to_float() -> None:
+    """A float32 density used to build float32 tables; it is now a Python float."""
+    xs = AnalyticCrossSections()
+    base = _stack()
+    import dataclasses
+
+    stack32 = type(base)(
+        frame=base.frame,
+        devices=tuple(dataclasses.replace(d, density=np.float32(0.7)) for d in base.devices),
+    )
+    stack64 = type(base)(
+        frame=base.frame,
+        devices=tuple(dataclasses.replace(d, density=float(np.float32(0.7))) for d in base.devices),
+    )
+    _drop_caches()
+    a = _records(_run("cpu", stack32, xs))
+    _drop_caches()
+    b = _records(_run("cpu", stack64, xs))
+    np.testing.assert_array_equal(a, b)
+
+
+_GC_SCRIPT = """
+import gc
+gc.set_threshold(1)  # collect on nearly every allocation, including inside the lock
+from pyradmc.backends.warp import presolve
+from tests.physics.test_warp_presolve import _stack
+presolve.upload_stack = lambda compiled, device: object()  # isolate the cache locking
+for _ in range(20000):
+    stack = _stack()
+    holder = {"stack": stack}
+    holder["me"] = holder  # a reference cycle: only the cyclic GC can free the stack
+    presolve._device_stack(stack, "cpu")
+    del stack, holder
+gc.collect()
+print("ok")
+"""
+
+
+def test_gc_freeing_a_cached_stack_never_deadlocks_the_cache_lock() -> None:
+    """Weakref callbacks fire inside cyclic GC, possibly while the lock is held."""
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    env = {**os.environ, "PYTHONPATH": str(root)}
+    done = subprocess.run(
+        [sys.executable, "-c", _GC_SCRIPT],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=90,
+        check=False,
+    )
+    assert done.returncode == 0, done.stderr[-2000:]
+    assert done.stdout.strip().endswith("ok")

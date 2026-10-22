@@ -17,6 +17,15 @@ without a field, so results are not byte-identical to the previous release.
 
 ### Added
 
+- **Cheaper head pre-solve setup.** The attenuation curves the collimator pre-solve
+  and `CollimatedSource` read through `CrossSectionSource` are memoised per source object
+  (`pyradmc.geometry.mucache`; `mucache.clear()` drops them), and `presolve_head_device`
+  keeps the device uploads of its tables and stack. A setup-dominated pre-solve drops from
+  5.1 to 1.05 ms; the exit phase space is bit-identical on cpu and cuda. A
+  `CrossSectionSource` must now not change its answers after construction. `MLC` leaf
+  fields are stored as tuples of floats, and a numpy-scalar device density is coerced to
+  a Python float (a numpy `float32` density used to build float32 tables).
+
 - Charged-particle transport in a **static magnetic field** (MR-linac dose).
   `pyradmc.MagneticField` — uniform, one vector per transport voxel, or a trilinear
   vector map on its own rectilinear grid, in tesla and the engine frame — is handed to

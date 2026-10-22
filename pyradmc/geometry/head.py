@@ -65,7 +65,6 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
@@ -156,8 +155,6 @@ class _MuTables:
             compton_rows.append(np.log(np.maximum(density * compton, 1e-300)))
         self._log_total = np.stack(total_rows)
         self._log_compton = np.stack(compton_rows)
-        #: Per-device upload memo owned by the Warp pre-solve (device string -> arrays).
-        self.device_cache: dict[str, Any] = {}
 
     def total(self, row: int | NDArray[np.int64], energies: _F64) -> _F64:
         """Macroscopic total mu (1/cm), row-wise when ``row`` is an array."""
@@ -438,10 +435,10 @@ def presolve_head(
 
     pairs: tuple[tuple[int, float], ...] = ()
     if stack is not None:
-        pairs = tuple(zip(stack.materials, stack.densities, strict=True))
+        pairs = tuple((m, float(d)) for m, d in zip(stack.materials, stack.densities, strict=True))
     air_row = len(pairs)
     if air is not None:
-        pairs = (*pairs, (air.material, air.density))
+        pairs = (*pairs, (air.material, float(air.density)))
     tables = mu_tables(cross_sections, pairs, e_min, source.max_energy, n_table) if pairs else None
 
     population = _Population()

@@ -565,12 +565,13 @@ def _as_float32(values: np.ndarray) -> np.ndarray:
 
 
 # Device stack uploads, memoised per (stack object, device). A BeamLimitingStack is
-# frozen, so the arrays flattened from it never go stale; the kernel only reads
-# them. Keyed by object identity (never value: -0.0 == 0.0 would alias differing
-# bit patterns), entries die with the stack, and an optimizer that builds a fresh
-# stack per iteration simply misses, paying what it paid before.
+# frozen and its leaf arrays are coerced to tuples, so the arrays flattened from it
+# never go stale; the kernel only reads them. Keyed by object identity (never value:
+# -0.0 == 0.0 would alias differing bit patterns), entries die with the stack, and an
+# optimizer that builds a fresh stack per iteration simply misses, paying what it
+# paid before.
 _stack_cache: dict[tuple[int, str], tuple[weakref.ref, StackArrays]] = {}
-_stack_cache_lock = threading.Lock()
+_stack_cache_lock = threading.RLock()  # reentrant: a GC-run weakref callback may nest
 
 
 def _device_stack(stack: BeamLimitingStack, device: str) -> StackArrays:
@@ -583,21 +584,28 @@ def _device_stack(stack: BeamLimitingStack, device: str) -> StackArrays:
     arrays = upload_stack(stack.flatten(), device)
 
     def _evict(_ref: weakref.ref, key: tuple[int, str] = key) -> None:
-        with _stack_cache_lock:
-            entry = _stack_cache.get(key)
-            if entry is not None and entry[0] is _ref:
-                del _stack_cache[key]
+        # Lock-free on purpose: cyclic GC can run this callback on a thread that
+        # already holds the lock; single dict operations are atomic under the GIL.
+        entry = _stack_cache.get(key)
+        if entry is not None and entry[0] is _ref:
+            _stack_cache.pop(key, None)
 
     with _stack_cache_lock:
         _stack_cache[key] = (weakref.ref(stack, _evict), arrays)
     return arrays
 
 
+_mu_device_cache: weakref.WeakKeyDictionary[_MuTables, dict[str, MuArrays]] = (
+    weakref.WeakKeyDictionary()
+)
+
+
 def _device_mu(tables: _MuTables, device: str) -> MuArrays:
     """Upload the log-mu tables once per (table object, device); tables are read-only."""
-    cached = tables.device_cache.get(device)
+    per_device = _mu_device_cache.setdefault(tables, {})
+    cached = per_device.get(device)
     if cached is None:
-        cached = tables.device_cache[device] = _upload_mu(tables, device)
+        cached = per_device[device] = _upload_mu(tables, device)
     return cached
 
 
@@ -660,10 +668,12 @@ def presolve_head_device(
     if not np.all(columns["particle_type"] == IAEA_PHOTON):
         raise ValueError("the pre-solve transports photon sources only")
 
-    pairs: tuple[tuple[int, float], ...] = tuple(zip(stack.materials, stack.densities, strict=True))
+    pairs: tuple[tuple[int, float], ...] = tuple(
+        (m, float(d)) for m, d in zip(stack.materials, stack.densities, strict=True)
+    )
     air_row = len(pairs)
     if air is not None:
-        pairs = (*pairs, (air.material, air.density))
+        pairs = (*pairs, (air.material, float(air.density)))
     tables = mu_tables(cross_sections, pairs, e_min, source.max_energy, n_table)
 
     stack_dev = _device_stack(stack, device)

@@ -75,6 +75,7 @@ _F64 = NDArray[np.float64]
 
 _ORTHONORMAL_TOLERANCE = 1.0e-9
 _EYE3 = np.eye(3)
+_EYE3.setflags(write=False)
 
 
 def _as_unit(vector: tuple[float, float, float], name: str) -> tuple[float, float, float]:
@@ -637,6 +638,11 @@ class MLC:
     strips tile ``v`` exactly — interleaf leakage is absent by construction). The
     bank ends at the outer strip edges; the orthogonal jaws provide the lateral
     bound beyond them.
+
+    Immutable, leaf arrays included: ``leaf_edges_v``, ``tips_neg`` and ``tips_pos``
+    are coerced to tuples of floats on construction, so a stack's flattened (and
+    device-cached) geometry cannot change under a live object; build a new MLC to
+    move a leaf.
     """
 
     z_top: float
@@ -651,6 +657,11 @@ class MLC:
 
     def __post_init__(self) -> None:
         """Validate slab extents, tip-arc coverage, leaf tiling, and material data."""
+        # Coerce the per-leaf fields to tuples of Python floats: an MLC is immutable
+        # *including* its leaf arrays (a caller's numpy array can no longer be mutated
+        # underneath it), which the identity-keyed device upload cache relies on.
+        for name in ("leaf_edges_v", "tips_neg", "tips_pos"):
+            object.__setattr__(self, name, tuple(float(v) for v in getattr(self, name)))
         if self.z_top <= 0.0:
             raise ValueError(f"z_top must be downstream of the focal spot, got {self.z_top}")
         if self.z_bottom <= self.z_top:
@@ -664,19 +675,16 @@ class MLC:
         if len(self.leaf_edges_v) < 2:
             raise ValueError("leaf_edges_v needs at least two edges (one pair)")
         edges = np.asarray(self.leaf_edges_v, dtype=np.float64)
-        if not np.all(edges[1:] > edges[:-1]):  # == diff > 0, one fewer temporary
+        if not np.all(np.diff(edges) > 0.0):
             raise ValueError("leaf_edges_v must be strictly increasing")
         n_pairs = len(self.leaf_edges_v) - 1
         if len(self.tips_neg) != n_pairs:
             raise ValueError(f"tips_neg has {len(self.tips_neg)} entries for {n_pairs} pairs")
         if len(self.tips_pos) != n_pairs:
             raise ValueError(f"tips_pos has {len(self.tips_pos)} entries for {n_pairs} pairs")
-        crossed = np.asarray(self.tips_neg) > np.asarray(self.tips_pos)
-        if crossed.any():
-            i = int(np.argmax(crossed))  # the first crossing pair, as the scan reported
-            raise ValueError(
-                f"pair {i}: tip positions cross ({self.tips_neg[i]} > {self.tips_pos[i]})"
-            )
+        for i, (neg, pos) in enumerate(zip(self.tips_neg, self.tips_pos, strict=True)):
+            if neg > pos:
+                raise ValueError(f"pair {i}: tip positions cross ({neg} > {pos})")
         if self.material < 0:
             raise ValueError(f"material index must be non-negative, got {self.material}")
         if self.density <= 0.0:
@@ -753,6 +761,7 @@ class BeamLimitingStack:
 
     def __post_init__(self) -> None:
         """Validate that the devices are stacked: ascending and disjoint along w."""
+        object.__setattr__(self, "devices", tuple(self.devices))
         if not self.devices:
             raise ValueError("a stack needs at least one device")
         tops = [device.z_top for device in self.devices]

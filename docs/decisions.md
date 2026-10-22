@@ -448,8 +448,11 @@ returning the very arrays the removed loops built, element for element. Density 
 the key, so a retuned leaf density reuses the curve and only re-scales and re-logs.
 `geometry.head.mu_tables` also memoises the assembled `_MuTables` (bounded at 32 per
 source), and the Warp pre-solve keeps the device upload of the tables on that object and
-of the stack per stack *object* (frozen, so never stale; identity rather than value keys
-because `-0.0 == 0.0`). The same curve memo serves `_StackTransmission`. Primary columns
+of the stack per stack *object* (identity rather than value keys because `-0.0 == 0.0`; the
+object is frozen and `MLC` now coerces its leaf arrays to tuples of floats and the stack its
+devices to a tuple, so neither can be mutated in place under the cache; a test pins both
+the key and the lock-free weakref eviction, which deadlocked under cyclic GC when it took
+the cache lock). The same curve memo serves `_StackTransmission`. Primary columns
 go up through `np.ascontiguousarray(..., float32)`, a no-op when they already are.
 Vectorised array-valued lookup was rejected: `np.log` and `math.log` may differ in the
 last bit, so it could not promise the bit-identity the memo gives for free, and the cold
@@ -468,11 +471,12 @@ attenuation pre-solve:
 | `BeamFrame` construction | 40 us | 27 us |
 | `MLC` (60 pairs) / `BeamLimitingStack` | 10 us / 1 us | unchanged |
 
-The brief's "about 1 ms" per `MLC`/`BeamLimitingStack` did not reproduce here: 10 us and
-1 us before the change. The validators were still tightened where it was free
-(`np.allclose` in `BeamFrame` written out as the same inequality, the tip-crossing scan
-vectorised, same first-failing-pair message); `np.linalg.norm` in `_as_unit` was left
-alone because replacing it can move the last bit of every axis.
+A collimator object costs 10 us (`MLC`, 60 pairs) and 1 us (`BeamLimitingStack`) here, already
+far under the 0.2 ms target, so their validators were left as they were (a vectorised
+rewrite measured no gain and was not exactly equivalent on contrived inputs). Only
+`BeamFrame` changed: `np.allclose` written out as the same inequality, identical
+decisions. `np.linalg.norm` in `_as_unit` was left alone because replacing it can move the
+last bit of every axis.
 
 **Bit identity** was checked on saved outputs of the unchanged code: the three log-mu
 tables (analytic water; EPICS tungsten + air) and the seeded pre-solve exit phase space
@@ -482,4 +486,8 @@ Pinned in `tests/unit/test_presolve_setup.py` (against the scalar loops reproduc
 oracles) and `tests/physics/test_warp_presolve_setup.py` (warm call equals cold call).
 Not changed: `StackArrays`/`upload_stack` layout, the engine, any kernel, any default.
 The memo assumes a `CrossSectionSource` is immutable after construction, as every
-shipped source is.
+shipped source is (stated on the interface; `mucache.clear()` is the escape hatch).
+Bit-identity holds for Python-float densities. A numpy `float32` density used to build
+float32 tables under NEP 50 scalar rules; densities are now coerced with `float()` where the
+pre-solve builds its table key, so such inputs get float64 tables (a deliberate behaviour
+change, pinned in `tests/physics/test_warp_presolve_setup.py`).
