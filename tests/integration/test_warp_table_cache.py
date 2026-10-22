@@ -4,10 +4,11 @@
 query API over every grid node — seconds of fixed overhead per call for a tabulated
 source. The flattened :class:`~pyradmc.data.tables.CrossSectionTables` is frozen
 after construction, so one build can serve every run, batch lane, and device shard
-with the same cutoffs and energy ceiling; only the (cheap) device upload stays per
-call. These tests pin that caching contract: same key builds once, a different key
-rebuilds, and the cache leaves results bit-identical (the arrays are the same host
-objects, so anything else would be a harness bug, not a physics one).
+with the same cutoffs and energy ceiling. The device upload is cached on top of it,
+per device (``tests/integration/test_warp_resident_session.py``). These tests pin the
+host contract: same key builds once, a different key rebuilds, and the cache leaves
+results bit-identical (the arrays are the same host objects, so anything else would
+be a harness bug, not a physics one).
 """
 
 from __future__ import annotations
@@ -55,8 +56,8 @@ def test_same_key_builds_host_tables_once() -> None:
     first = engine._upload_tables(6.0, pcut=0.05, ecut=0.2, device="cpu")
     second = engine._upload_tables(6.0, pcut=0.05, ecut=0.2, device="cpu")
     assert xs.builds == 1
-    # Device structs are fresh per call (upload is not cached), built from one host table.
-    assert first is not second
+    # The device struct is resident too: one upload per key and device.
+    assert first is second
 
 
 def test_key_change_rebuilds() -> None:

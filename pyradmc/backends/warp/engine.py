@@ -338,6 +338,112 @@ class _LaneResources:
     edep: object
 
 
+class _Workspace:
+    """One batch lane's transport scratch, kept resident between calls.
+
+    Four queues (two ping-pong pairs), the RNG-slot array, the scalar energy and
+    violation counters, and — created on first concurrent use — the lane's stream
+    and pinned count-staging element. Pooled per engine and device
+    (:meth:`WarpEngine._acquire_workspaces`), so a loop of calls stops paying a
+    fresh allocation of every queue column per call.
+
+    Grown on demand, never shrunk: a smaller request reuses the arrays and sets
+    each queue's ``capacity`` to the *request*, so the kernels' write guard and the
+    engine's overflow check bind exactly where a freshly allocated queue of that
+    size would. Contents need no clearing between calls: every generator and every
+    push writes all fields of a slot before a count publishes it, the transport
+    reads only below the count, every RNG slot is written by its generator before
+    it is read, and each counter is zeroed by the call that uses it.
+    """
+
+    def __init__(self, device: str) -> None:
+        self.device = device
+        self.slots_allocated = 0
+        self.queues: list = []
+        self.slots = None
+        self.stream = None
+        self.staging = None
+        self.fold = None
+        self._counters: dict = {}
+
+    @property
+    def nbytes(self) -> int:
+        """Per-slot bytes held, in the accounting of :data:`_QUEUE_BYTES_PER_SLOT`.
+
+        The handful of scalar counters is left out, as in the sizing model.
+        """
+        return self.slots_allocated * _QUEUE_BYTES_PER_SLOT
+
+    def fit(self, capacity: int) -> None:
+        """Make room for ``capacity`` slots per queue and bind the queues to it."""
+        if capacity > self.slots_allocated:
+            # Release before growing, so the peak is the new size, not old + new.
+            self.queues = []
+            self.slots = None
+            self.slots_allocated = 0
+            self.queues = [_upload_queue(capacity, self.device) for _ in range(4)]
+            self.slots = wp.zeros(capacity, dtype=wp.uint32, device=self.device)
+            self.slots_allocated = capacity
+        for q in self.queues:
+            q.capacity = capacity
+
+    def fold_stream(self):
+        """Return the stream a concurrent call folds its lanes' batches on (made once)."""
+        if self.fold is None:
+            self.fold = wp.Stream(self.device)
+        return self.fold
+
+    def counter(self, name: str, dtype) -> wp.array:
+        """Return a resident one-element counter; the caller zeroes it before use."""
+        arr = self._counters.get(name)
+        if arr is None:
+            arr = wp.zeros(1, dtype=dtype, device=self.device)
+            self._counters[name] = arr
+        return arr
+
+    def lane(self, edep, concurrent: bool) -> _LaneResources:
+        """View the workspace as a lane, on its own stream only when lanes overlap."""
+        if not concurrent:
+            return _LaneResources(
+                stream=None, staging=None, queues=self.queues, slots=self.slots, edep=edep
+            )
+        if self.stream is None:
+            self.stream = wp.Stream(self.device)
+            self.staging = wp.zeros(1, dtype=wp.int32, device="cpu", pinned=True)
+        return _LaneResources(
+            stream=self.stream,
+            staging=self.staging,
+            queues=self.queues,
+            slots=self.slots,
+            edep=edep,
+        )
+
+
+@dataclass
+class _DeviceState:
+    """What one engine keeps resident on one device between calls.
+
+    All of it is a pure function of the engine's frozen inputs (grid, field,
+    cross-section source) plus the per-entry key, which is why it can outlive a
+    call: tables per ``(ecut, pcut, e_max, with_gs)``, the transport grid, the
+    last scoring geometry (held by identity, with a strong reference so the
+    identity cannot be recycled), spectrum inversion tables by spectrum identity
+    (their arrays are read-only), and the idle transport workspaces.
+    """
+
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    grid: tuple | None = None
+    tables: dict = field(default_factory=dict)
+    table_arrays: dict = field(default_factory=dict)
+    scoring: tuple | None = None
+    spectra: dict = field(default_factory=dict)
+    idle: list = field(default_factory=list)
+
+
+_SPECTRA_RESIDENT = 8
+"""Spectrum tables kept per device; a few hundred bytes each, bounded anyway."""
+
+
 def _launch(kernel, dim, inputs, device: str, stream) -> None:
     """Launch on the device's current stream, or on an explicit lane stream.
 
@@ -391,6 +497,19 @@ def _set_count(q: Queue, value: int, device: str, stream=None) -> None:
 class WarpEngine:
     """Dual-target production engine over a voxel grid.
 
+    The engine keeps its device state resident between calls: the cross-section
+    tables (per ``(ecut, pcut, e_max)``), the voxel maps, the last scoring
+    geometry, and one transport workspace (queues, RNG slots, counters) per batch
+    lane, grown on demand and reused by ``run`` and ``run_dij`` alike. A loop of
+    small runs — a plan optimization — therefore pays the uploads once. This is
+    bitwise inert (test-pinned against fresh engines) because everything kept is a
+    function of the engine's frozen inputs; treat ``grid``, ``cross_sections`` and
+    ``magnetic_field`` as immutable (a mutated array is not re-uploaded — build a
+    new engine). The device memory stays held while the engine lives; call
+    :meth:`release_device_memory` to hand it back sooner. The per-call dense dose
+    maps are *not* kept: their size is the scoring grid's (or, for a Dij, budgeted
+    from free memory), so they are allocated per call as before.
+
     Parameters
     ----------
     grid, cross_sections
@@ -427,12 +546,20 @@ class WarpEngine:
     # API over every grid node — seconds of fixed overhead for a tabulated source —
     # while its result is frozen after construction, so one build per
     # (ecut, pcut, e_max) serves every run and every device shard. Only the host
-    # flatten is cached; the device upload stays per call. The lock keeps concurrent
-    # Dij shards (one host thread per device) from building the same key twice.
+    # flatten is cached here; the device upload is cached per device in _resident.
+    # The lock keeps concurrent Dij shards (one host thread per device) from
+    # building the same key twice.
     _table_cache: dict = field(default_factory=dict, init=False, repr=False, compare=False)
     _table_cache_lock: threading.Lock = field(
         default_factory=threading.Lock, init=False, repr=False, compare=False
     )
+    # Device-resident state, one _DeviceState per device string (see the class
+    # docstring); the lock guards only the dict, each state carries its own.
+    _resident: dict = field(default_factory=dict, init=False, repr=False, compare=False)
+    _resident_lock: threading.Lock = field(
+        default_factory=threading.Lock, init=False, repr=False, compare=False
+    )
+    _default_scoring: dict = field(default_factory=dict, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         """Refuse a gridded field map that does not cover the transport grid."""
@@ -491,6 +618,120 @@ class WarpEngine:
             cached = _auto_chunk_size(key, self.queue_factor)
             self._auto_chunk[key] = cached
         return int(cached)
+
+    # -- device-resident state ----------------------------------------------------
+
+    def release_device_memory(self) -> None:
+        """Drop every device array this engine keeps between calls, on every device.
+
+        Results are unaffected — the next call re-uploads and reallocates what it
+        needs, bit-identically. Host-side caches (the flattened cross-section
+        tables, the Goudsmit-Saunderson grid) are kept: they cost seconds to
+        rebuild and no device memory. Not for use while a call on this engine is
+        running on another thread.
+        """
+        with self._resident_lock:
+            self._resident.clear()
+
+    def _state(self, device: str) -> _DeviceState:
+        with self._resident_lock:
+            state = self._resident.get(device)
+            if state is None:
+                state = _DeviceState()
+                self._resident[device] = state
+            return state
+
+    def _scoring_geometry(self, scoring_grid: ScoringGeometry | None) -> ScoringGeometry:
+        """Resolve a call's scoring geometry; the transport-grid default is built once."""
+        if scoring_grid is not None:
+            return scoring_grid
+        default = self._default_scoring.get("grid")
+        if default is None:
+            default = ScoringGrid.for_grid(self.grid)
+            self._default_scoring["grid"] = default
+        return default
+
+    def _upload_scoring(self, scoring: ScoringGeometry, device: str):
+        """Return scoring metadata and voxel masses on ``device``, kept for the last one.
+
+        Keyed by identity with the geometry itself held, so the key cannot be
+        recycled by a new object at the same address; one entry, because a loop
+        scores on one geometry and a dense mass map per entry is not free.
+        """
+        state = self._state(device)
+        with state.lock:
+            cached = state.scoring
+            if cached is not None and cached[0] is scoring:
+                return cached[1], cached[2]
+            state.scoring = None  # release the previous map before uploading this one
+            si = _scoring_info(scoring, device)
+            voxel_mass = wp.array(
+                scoring.voxel_mass.reshape(scoring.n_voxels), dtype=wp.float64, device=device
+            )
+            state.scoring = (scoring, si, voxel_mass)
+            return si, voxel_mass
+
+    def _spectral_tables(self, spectrum, device: str):
+        """Return the spectrum's float32 inversion tables on ``device``, by identity."""
+        state = self._state(device)
+        with state.lock:
+            cached = state.spectra.get(id(spectrum))
+            if cached is not None and cached[0] is spectrum:
+                return cached[1]
+            tables = (
+                wp.array(spectrum.edges.astype(np.float32), dtype=float, device=device),
+                wp.array(spectrum.cdf.astype(np.float32), dtype=float, device=device),
+            )
+            if len(state.spectra) >= _SPECTRA_RESIDENT:
+                state.spectra.pop(next(iter(state.spectra)))
+            state.spectra[id(spectrum)] = (spectrum, tables)
+            return tables
+
+    def _acquire_workspaces(self, device: str, n: int, capacity: int) -> list[_Workspace]:
+        """Take ``n`` transport workspaces fitted to ``capacity`` slots per queue.
+
+        Idle workspaces are reused (grown if too small) and any idle surplus is
+        released, so the memory parked between calls is what the last call used
+        and what :meth:`_reclaimable_workspace_bytes` may count as free. The caller
+        hands them back with :meth:`_release_workspaces` on success only: after an
+        exception a lane stream may still be writing into them, so they are left
+        to the garbage collector instead of being reused.
+        """
+        state = self._state(device)
+        with state.lock:
+            taken, state.idle = state.idle[:n], []
+        for ws in taken:
+            ws.fit(capacity)
+        while len(taken) < n:
+            ws = _Workspace(device)
+            ws.fit(capacity)
+            taken.append(ws)
+        return taken
+
+    def _release_workspaces(self, device: str, workspaces: list[_Workspace]) -> None:
+        state = self._state(device)
+        with state.lock:
+            state.idle.extend(workspaces)
+
+    def _idle_workspace_bytes(self, device: str) -> int:
+        state = self._state(device)
+        with state.lock:
+            return sum(ws.nbytes for ws in state.idle)
+
+    def _reclaimable_workspace_bytes(self, device: str, n: int, capacity: int) -> int:
+        """Count idle bytes a call taking ``n`` workspaces of ``capacity`` frees or uses.
+
+        The auto group size budgets the reported-free memory after charging this
+        call's queues; idle pooled bytes are not reported free but are either
+        released on acquire (the surplus) or reused for those very queues. Only a
+        reused workspace's excess over ``capacity`` stays occupied, so it is the one
+        part not counted — which keeps the budget what a fresh engine would see.
+        """
+        state = self._state(device)
+        with state.lock:
+            idle = list(state.idle)
+        need = capacity * _QUEUE_BYTES_PER_SLOT
+        return sum(ws.nbytes for ws in idle[n:]) + sum(min(ws.nbytes, need) for ws in idle[:n])
 
     def run(
         self,
@@ -592,34 +833,32 @@ class WarpEngine:
 
         device = self.device
         gi, density, material = self._upload_grid(device)
-        scoring = scoring_grid if scoring_grid is not None else ScoringGrid.for_grid(self.grid)
-        si = _scoring_info(scoring, device)
+        scoring = self._scoring_geometry(scoring_grid)
+        si, voxel_mass = self._upload_scoring(scoring, device)
         table_energy = source.max_energy
         tab = self._upload_tables(table_energy, pcut, ecut, device, with_gs=msc_model_gs == 1)
 
         chunk = min(self._chunk_histories(device), n_histories)
         capacity = chunk * self.queue_factor
         lanes = min(concurrent_batches, n_batches) if wp.get_device(device).is_cuda else 1
+        # Queues, RNG slots and counters come from the engine's resident pool (one
+        # workspace per lane); the batch dose map is per call, sized by the scoring
+        # grid. Handed back to the pool only on success (see _acquire_workspaces).
+        workspaces = self._acquire_workspaces(device, lanes, capacity)
         lane_resources = [
-            _LaneResources(
-                stream=wp.Stream(device) if lanes > 1 else None,
-                staging=(
-                    wp.zeros(1, dtype=wp.int32, device="cpu", pinned=True) if lanes > 1 else None
-                ),
-                queues=[_upload_queue(capacity, device) for _ in range(4)],
-                slots=wp.zeros(capacity, dtype=wp.uint32, device=device),
-                edep=wp.zeros(scoring.n_voxels, dtype=wp.int64, device=device),
-            )
-            for _ in range(lanes)
+            ws.lane(wp.zeros(scoring.n_voxels, dtype=wp.int64, device=device), lanes > 1)
+            for ws in workspaces
         ]
         queues = lane_resources[0].queues
         slots = lane_resources[0].slots
         edep = lane_resources[0].edep
-        fold_stream = wp.Stream(device) if lanes > 1 else None
-        escaped = wp.zeros(1, dtype=wp.int64, device=device)
-        unscored = wp.zeros(1, dtype=wp.int64, device=device)
-        deposited = wp.zeros(1, dtype=wp.int64, device=device)
-        violations = wp.zeros(1, dtype=wp.int32, device=device)
+        counters = workspaces[0]
+        fold_stream = counters.fold_stream() if lanes > 1 else None
+        escaped = counters.counter("escaped", wp.int64)
+        unscored = counters.counter("unscored", wp.int64)
+        deposited = counters.counter("deposited", wp.int64)
+        violations = counters.counter("violations", wp.int32)
+        violations.zero_()
 
         # Advanced route: a source exposing a warp_sampler is generated in-kernel by a
         # wrapper kernel (built once per sampler), which books emitted weight-energy
@@ -630,39 +869,38 @@ class WarpEngine:
         wraps = not in_kernel and not is_device_ps and not is_spectral and not is_spectral_mask
         if wraps and source.warp_sampler is not None:
             generator = kernels.make_generator_kernel(source.warp_sampler)
-            emitted = wp.zeros(1, dtype=wp.int64, device=device)
+            emitted = counters.counter("emitted", wp.int64)
         if is_device_ps:
             # The seeding kernel books emitted weight-energy into this counter,
             # like the wrapped-generator route, read once after the batches.
-            emitted = wp.zeros(1, dtype=wp.int64, device=device)
+            emitted = counters.counter("emitted", wp.int64)
         spectral_tables = None
         mask_table = None
         if is_spectral or is_spectral_mask:
             # Built-in in-kernel generation for the exact spectral type: the spectrum
-            # inversion tables upload once per run and each chunk samples on-device
-            # (the host pre-sampling was measured wall-dominant on CT-grade runs).
-            # Emitted energy is booked per primary, like the wrapped-generator route.
+            # inversion tables stay resident per spectrum and each chunk samples
+            # on-device (the host pre-sampling was measured wall-dominant on CT-grade
+            # runs). Emitted energy is booked per primary, like the wrapped-generator
+            # route.
             spectral_source = source.inner if is_spectral_mask else source
-            spectrum = spectral_source.spectrum
-            spectral_tables = (
-                wp.array(spectrum.edges.astype(np.float32), dtype=float, device=device),
-                wp.array(spectrum.cdf.astype(np.float32), dtype=float, device=device),
-            )
-            emitted = wp.zeros(1, dtype=wp.int64, device=device)
+            spectral_tables = self._spectral_tables(spectral_source.spectrum, device)
+            emitted = counters.counter("emitted", wp.int64)
             if is_spectral_mask:
                 mask_table = wp.array(
                     source.mask.reshape(-1).astype(np.float32), dtype=float, device=device
                 )
+        if emitted is not None:
+            emitted.zero_()
 
         n_voxels = scoring.n_voxels
-        voxel_mass = wp.array(scoring.voxel_mass.reshape(n_voxels), dtype=wp.float64, device=device)
         # Dose finalize on the device: per-voxel batch sums of dose and dose^2, folded
         # in batch order so the open-field reduction matches a 1x1 Dij column bitwise
         # on one device (kernels.accumulate_run_batch). Only the reduced maps read
         # back, not the dense per-batch fixed-point buffer.
         s1 = wp.zeros(n_voxels, dtype=wp.float64, device=device)
         s2 = wp.zeros(n_voxels, dtype=wp.float64, device=device)
-        dep_total = wp.zeros(1, dtype=wp.int64, device=device)  # dose-to-medium quanta
+        dep_total = counters.counter("dep_total", wp.int64)  # dose-to-medium quanta
+        dep_total.zero_()
         per_batch = n_histories // n_batches
         energy_escaped = 0.0
         energy_unscored = 0.0
@@ -971,9 +1209,12 @@ class WarpEngine:
         wp.synchronize_device(device)
         if dose_to_water == 0:
             energy_deposited = float(dep_total.numpy()[0]) * ENERGY_QUANTUM_MEV
+        dose = mean_dev.numpy().reshape(scoring.shape)
+        dose_sigma = sigma_dev.numpy().reshape(scoring.shape)
+        self._release_workspaces(device, workspaces)
         return TransportResult(
-            dose=mean_dev.numpy().reshape(scoring.shape),
-            dose_sigma=sigma_dev.numpy().reshape(scoring.shape),
+            dose=dose,
+            dose_sigma=dose_sigma,
             energy_emitted=energy_emitted,
             energy_deposited=energy_deposited,
             energy_escaped=energy_escaped,
@@ -1149,8 +1390,15 @@ class WarpEngine:
             def _fit(d: str) -> int:
                 lanes_d = min(concurrent_batches, n_batches) if wp.get_device(d).is_cuda else 1
                 chunk_d = min(self._chunk_histories(d), n_beamlets * per_batch)
+                free = _device_free_bytes(d)
+                if free > 0:
+                    # The engine's idle pooled queues are freed or reused by this
+                    # call, so they budget as free: the size a fresh engine gets.
+                    free += self._reclaimable_workspace_bytes(
+                        d, lanes_d, chunk_d * self.queue_factor
+                    )
                 return _auto_group_size(
-                    _device_free_bytes(d),
+                    free,
                     scoring.n_voxels,
                     n_beamlets,
                     lanes_d,
@@ -1308,7 +1556,7 @@ class WarpEngine:
         streams and always runs the sequential path.
         """
         gi, density, material = self._upload_grid(device)
-        si = _scoring_info(scoring, device)
+        si, voxel_mass = self._upload_scoring(scoring, device)
         tab = self._upload_tables(source.max_energy, pcut, ecut, device, with_gs=msc_model_gs == 1)
         n_beamlets = source.n_beamlets
         n_voxels = scoring.n_voxels
@@ -1325,24 +1573,11 @@ class WarpEngine:
         use_lattice = isinstance(source, BeamletGridSource)
         use_spectral = type(source) is SpectralBeamletSource
         beamlet_generator = None
-        emitted_counter = None
         spectral_tables = None
         if not use_lattice and not use_spectral and source.warp_beamlet_sampler is not None:
             beamlet_generator = kernels.make_beamlet_generator_kernel(source.warp_beamlet_sampler)
-            emitted_counter = wp.zeros(1, dtype=wp.int64, device=device)
         if use_spectral:
-            spectrum = source.spectrum
-            spectral_tables = (
-                wp.array(spectrum.edges.astype(np.float32), dtype=float, device=device),
-                wp.array(spectrum.cdf.astype(np.float32), dtype=float, device=device),
-            )
-            emitted_counter = wp.zeros(1, dtype=wp.int64, device=device)
-
-        voxel_mass = wp.array(scoring.voxel_mass.reshape(n_voxels), dtype=wp.float64, device=device)
-        escaped = wp.zeros(1, dtype=wp.int64, device=device)
-        unscored = wp.zeros(1, dtype=wp.int64, device=device)
-        deposited = wp.zeros(1, dtype=wp.int64, device=device)
-        violations = wp.zeros(1, dtype=wp.int32, device=device)
+            spectral_tables = self._spectral_tables(source.spectrum, device)
         shard = _DijShard()
         deposited_quanta = 0
         escaped_quanta = 0
@@ -1369,22 +1604,29 @@ class WarpEngine:
         lanes = 1
         if concurrent_batches > 1 and wp.get_device(device).is_cuda:
             lanes = min(concurrent_batches, n_batches)
+        # Queues, RNG slots and counters come from the engine's resident pool, one
+        # workspace per lane, shared with run(). The dense group maps stay per call:
+        # their size is budgeted from free memory at the call, and parking up to half
+        # the card between calls would starve whatever runs next.
+        workspaces = self._acquire_workspaces(device, lanes, max_capacity)
         lane_resources = [
-            _LaneResources(
-                stream=wp.Stream(device) if lanes > 1 else None,
-                staging=(
-                    wp.zeros(1, dtype=wp.int32, device="cpu", pinned=True) if lanes > 1 else None
-                ),
-                queues=[_upload_queue(max_capacity, device) for _ in range(4)],
-                slots=wp.zeros(max_capacity, dtype=wp.uint32, device=device),
-                edep=wp.zeros(max_group * n_voxels, dtype=wp.int64, device=device),
-            )
-            for _ in range(lanes)
+            ws.lane(wp.zeros(max_group * n_voxels, dtype=wp.int64, device=device), lanes > 1)
+            for ws in workspaces
         ]
-        fold_stream = wp.Stream(device) if lanes > 1 else None
+        counters = workspaces[0]
+        fold_stream = counters.fold_stream() if lanes > 1 else None
+        escaped = counters.counter("escaped", wp.int64)
+        unscored = counters.counter("unscored", wp.int64)
+        deposited = counters.counter("deposited", wp.int64)
+        violations = counters.counter("violations", wp.int32)
+        violations.zero_()
+        emitted_counter = None
+        if beamlet_generator is not None or use_spectral:
+            emitted_counter = counters.counter("emitted", wp.int64)
+            emitted_counter.zero_()
         s1 = wp.zeros(max_group * n_voxels, dtype=wp.float64, device=device)
         s2 = wp.zeros(max_group * n_voxels, dtype=wp.float64, device=device)
-        total_q = wp.zeros(1, dtype=wp.int64, device=device)
+        total_q = counters.counter("total_q", wp.int64)
         # Truncation runs one thread per (column, chunk) rather than one per column;
         # the layout is scheduling only and the output is independent of it. Sized
         # from the widest group and this device's SM count, so the launch fills the
@@ -1610,6 +1852,7 @@ class WarpEngine:
         shard.unscored_quanta = unscored_quanta
         if emitted_counter is not None:
             shard.emitted_quanta = int(emitted_counter.numpy()[0])
+        self._release_workspaces(device, workspaces)
         return shard
 
     def _run_dij_batch(
@@ -3375,6 +3618,14 @@ class WarpEngine:
         return emitted
 
     def _upload_grid(self, device: str):
+        """Return the transport grid (and field) on ``device``, uploaded once per device."""
+        state = self._state(device)
+        with state.lock:
+            if state.grid is None:
+                state.grid = self._build_grid(device)
+            return state.grid
+
+    def _build_grid(self, device: str):
         gi = GridInfo()
         gi.x_lo, gi.y_lo, gi.z_lo = self.grid.origin
         gi.x_hi, gi.y_hi, gi.z_hi = self.grid.upper_corner
@@ -3427,6 +3678,20 @@ class WarpEngine:
     def _upload_tables(
         self, e_max: float, pcut: float, ecut: float, device: str, with_gs: bool = False
     ) -> Tables:
+        """Return the flattened tables on ``device``, uploaded once per key and device.
+
+        Mirrors the host cache's ``(ecut, pcut, e_max)`` key, plus ``with_gs``
+        because the struct differs; the Goudsmit-Saunderson grid — the one large
+        table, independent of ``pcut`` — is uploaded once per ``(ecut, e_max)`` and
+        shared by every struct that carries it. The struct is read-only to the
+        kernels, so concurrent calls on one device may share it.
+        """
+        state = self._state(device)
+        full_key = (ecut, pcut, e_max, with_gs)
+        with state.lock:
+            tab = state.tables.get(full_key)
+        if tab is not None:
+            return tab
         key = (ecut, pcut, e_max)
         with self._table_cache_lock:
             host = self._table_cache.get(key)
@@ -3435,31 +3700,45 @@ class WarpEngine:
                     ecut=ecut, pcut=pcut, e_max=e_max * _E_MAX_MARGIN
                 )
                 self._table_cache[key] = host
+        gs_host = self._gs_grid_host(host, ecut, e_max) if with_gs else None
+        with state.lock:
+            tab = state.tables.get(full_key)
+            if tab is None:
+                tab = self._build_tables(state, host, gs_host, ecut, pcut, e_max, device)
+                state.tables[full_key] = tab
+            return tab
+
+    def _build_tables(
+        self, state: _DeviceState, host, gs_host, ecut, pcut, e_max, device
+    ) -> Tables:
+        """Assemble a ``Tables`` struct from device arrays shared across structs."""
+        base_key = ("base", ecut, pcut, e_max)
+        base = state.table_arrays.get(base_key)
+        if base is None:
+            base = {
+                name: wp.array(getattr(host, name).astype(np.float32), dtype=float, device=device)
+                for name in (
+                    "mu_compton",
+                    "mu_photo",
+                    "mu_pair",
+                    "mu_rayleigh",
+                    "majorant",
+                    "stopping_restricted",
+                    "stopping_radiative",
+                    "moller",
+                    "csda_range",
+                    "scattering_power",
+                    "log_eta",
+                    "restricted_range",
+                    "energy_of_restricted_range",
+                    "coherent_x",
+                    "coherent_cumulative",
+                )
+            }
+            state.table_arrays[base_key] = base
         tab = Tables()
-        for table_name in (
-            "mu_compton",
-            "mu_photo",
-            "mu_pair",
-            "mu_rayleigh",
-            "majorant",
-            "stopping_restricted",
-            "stopping_radiative",
-            "moller",
-            "csda_range",
-            "scattering_power",
-            "log_eta",
-            "restricted_range",
-            "energy_of_restricted_range",
-        ):
-            setattr(
-                tab,
-                table_name,
-                wp.array(getattr(host, table_name).astype(np.float32), dtype=float, device=device),
-            )
-        tab.coherent_x = wp.array(host.coherent_x.astype(np.float32), dtype=float, device=device)
-        tab.coherent_cumulative = wp.array(
-            host.coherent_cumulative.astype(np.float32), dtype=float, device=device
-        )
+        for name, arr in base.items():
+            setattr(tab, name, arr)
         tab.p_log_e_min = host.photon_log_e_min
         tab.p_inv_dlog = host.photon_inv_dlog
         tab.e_log_e_min = host.electron_log_e_min
@@ -3468,9 +3747,13 @@ class WarpEngine:
         tab.r_inv_dlog = host.range_inv_dlog
         tab.n_points = host.n_points
         tab.n_coherent = host.n_coherent
-        if with_gs:
-            gs_host = self._gs_grid_host(host, ecut, e_max)
-            tab.gs_values = wp.array(gs_host.values.astype(np.float32), dtype=float, device=device)
+        if gs_host is not None:
+            gs_key = ("gs", ecut, e_max)
+            gs_values = state.table_arrays.get(gs_key)
+            if gs_values is None:
+                gs_values = wp.array(gs_host.values.astype(np.float32), dtype=float, device=device)
+                state.table_arrays[gs_key] = gs_values
+            tab.gs_values = gs_values
             tab.gs_ix0 = gs_host.ix0
             tab.gs_iy0 = gs_host.iy0
             tab.gs_n_eta = gs_host.values.shape[0]
