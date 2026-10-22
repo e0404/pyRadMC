@@ -166,22 +166,38 @@ def test_one_block_grid_walks_every_slot(monkeypatch, rounds: int) -> None:
 
 
 @pytest.mark.gpu
-def test_status_buffers_gain_a_pinned_element_when_a_lane_first_uses_them() -> None:
-    """A slot array drained on the default stream, then on a lane stream (pooled
-    buffers), must get the pinned readback element the lane path copies into."""
+def test_drain_buffers_gain_a_pinned_element_when_a_lane_first_uses_them() -> None:
+    """A pooled workspace drained on the default stream, then on a lane stream,
+    must get the pinned readback element the lane path copies into, and keep its
+    status array across a capacity refit."""
     if not wp.is_cuda_available():
         pytest.skip("no CUDA device")
-    from pyradmc.backends.warp.engine import _DrainState
+    from pyradmc.backends.warp.engine import _Workspace
 
-    state = _DrainState()
-    slots = wp.zeros(16, dtype=wp.uint32, device="cuda:0")
-    status, host = state.status_buffers(slots, "cuda:0", None)
+    ws = _Workspace("cuda:0")
+    ws.fit(64)
+    status, host = ws.drain_buffers(None)
     assert host is None
-    lane_status, lane_host = state.status_buffers(slots, "cuda:0", wp.Stream("cuda:0"))
+    ws.fit(128)
+    lane_status, lane_host = ws.drain_buffers(wp.Stream("cuda:0"))
     assert lane_status is status
     assert lane_host is not None
     assert lane_host.device.is_cpu
     assert lane_host.pinned
+
+
+@pytest.mark.gpu
+def test_pooled_workspace_runs_sequential_then_lanes() -> None:
+    """One engine, its pooled workspace drained first without and then with lane
+    streams: both match a fresh host-sized engine bit for bit."""
+    if not wp.is_cuda_available():
+        pytest.skip("no CUDA device")
+    engine = _engine("cuda:0", 3)
+    sequential = _run(engine)
+    lanes = _run(engine, concurrent_batches=2)
+    reference = _run(_engine("cuda:0", 0))
+    _assert_run_bit_identical(sequential, reference)
+    _assert_run_bit_identical(lanes, reference)
 
 
 class TestNothingIsDropped:

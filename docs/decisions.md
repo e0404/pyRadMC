@@ -611,6 +611,8 @@ thread — the persistent-threads result again.
 enqueues a whole block in 0.49 ms (collimated) / 0.67 ms (open) while the block's GPU
 work takes 1.5 / 2.3 ms more after that, so the GPU is never starved inside a drain;
 replaying a captured graph could save only the first launch's issue latency. Against it:
-the queues are reallocated per run (so a capture per run), the round index is baked into
-the retire launches, and cpu has no graphs. Revisit only if per-run buffers become
-resident *and* a workload's per-drain GPU time falls below its host enqueue time.
+at the time the queues were reallocated per run (so a capture per run; the resident
+workspaces since remove that objection), the round index is baked into the retire
+launches, and cpu has no graphs. Revisit only if a workload's per-drain GPU time falls
+below its host enqueue time. The drain's status array and pinned readback element live
+in the pooled lane workspace, made on first use and kept across refits.

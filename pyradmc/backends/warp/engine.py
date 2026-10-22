@@ -33,7 +33,6 @@ This module is Warp backend code: exempt from ``mypy --strict`` (AGENTS.md 5).
 from __future__ import annotations
 
 import threading
-import weakref
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -332,6 +331,8 @@ class _LaneResources:
     batch's transport writes — queues, RNG slots, the quanta map — is per lane;
     the lane's ``stream`` orders its work and ``staging`` is the pinned element
     its count readbacks go through. The sequential path is lane 0 with no stream.
+    ``workspace`` is the pooled :class:`_Workspace` behind the lane; the drain loop
+    takes its readback buffers from it.
     """
 
     stream: object
@@ -339,6 +340,7 @@ class _LaneResources:
     queues: list
     slots: object
     edep: object
+    workspace: object = None
 
 
 class _Workspace:
@@ -374,6 +376,8 @@ class _Workspace:
         self.stream = None
         self.staging = None
         self.fold = None
+        self.drain_status = None
+        self.drain_host = None
         self._book = None
         self._book_views: dict = {}
 
@@ -403,6 +407,29 @@ class _Workspace:
         if self.fold is None:
             self.fold = wp.Stream(self.device)
         return self.fold
+
+    def drain_buffers(self, stream):
+        """Return the drain's (device status, pinned host element) pair, made on demand.
+
+        The status array is created on the first blind drain and the pinned element
+        on the first one that reads back through a lane stream, like
+        :meth:`fold_stream`; neither is tied to :meth:`fit`, so a capacity change
+        keeps them. The drain zero-fills the status at its start, so nothing stale
+        carries over between drains or calls.
+        """
+        if self.drain_status is None:
+            self.drain_status = wp.zeros(
+                kernels.DRAIN_STATUS_SLOTS, dtype=wp.int32, device=self.device
+            )
+            if stream is not None:
+                # Allocated (and zeroed) on the device's default stream, then used
+                # on the lane's: wait for the default stream once, as uploads do.
+                wp.synchronize_stream(wp.get_stream(self.device))
+        if stream is not None and self.drain_host is None:
+            self.drain_host = wp.zeros(
+                kernels.DRAIN_STATUS_SLOTS, dtype=wp.int32, device="cpu", pinned=True
+            )
+        return self.drain_status, self.drain_host
 
     def book(self, name: str) -> wp.array:
         """Return the one-element int64 energy counter ``name`` (a view of the book).
@@ -452,7 +479,12 @@ class _Workspace:
         """View the workspace as a lane, on its own stream only when lanes overlap."""
         if not concurrent:
             return _LaneResources(
-                stream=None, staging=None, queues=self.queues, slots=self.slots, edep=edep
+                stream=None,
+                staging=None,
+                queues=self.queues,
+                slots=self.slots,
+                edep=edep,
+                workspace=self,
             )
         if self.stream is None:
             self.stream = wp.Stream(self.device)
@@ -463,6 +495,7 @@ class _Workspace:
             queues=self.queues,
             slots=self.slots,
             edep=edep,
+            workspace=self,
         )
 
 
@@ -602,41 +635,12 @@ class _DrainState:
     """Mutable drain-schedule state an engine carries across runs.
 
     ``last_rounds`` is the number of rounds the latest blind drain on each device
-    needed — the adaptive schedule's next first block. The status buffers (the
-    device array the bookkeeping kernels write, and on a lane stream the pinned host
-    element its readback goes through) are cached per RNG-slot array, which is
-    private to one batch lane of one run: the buffers live and die with that lane,
-    and no two concurrent drains share one.
+    needed — the adaptive schedule's next first block. The drain's readback buffers
+    live in the lane's :class:`_Workspace` (:meth:`_Workspace.drain_buffers`).
     """
 
     def __init__(self) -> None:
         self.last_rounds: dict[str, int] = {}
-        self._status: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
-        self._lock = threading.Lock()
-
-    def status_buffers(self, slots, device: str, stream):
-        """Return the (device status, pinned host element) pair for a slot array.
-
-        The pinned element is needed only for a lane-stream readback and is created
-        on the first such use, so a slot array first drained on the default stream
-        and later on a lane (pooled buffers) gets one too.
-        """
-        with self._lock:
-            cached = self._status.get(slots)
-        if cached is None:
-            status = wp.zeros(kernels.DRAIN_STATUS_SLOTS, dtype=wp.int32, device=device)
-            cached = [status, None]
-            if stream is not None:
-                # Allocated (and zeroed) on the device's default stream, then used on
-                # the lane's: wait for the default stream once, as host uploads do.
-                wp.synchronize_stream(wp.get_stream(device))
-            with self._lock:
-                self._status[slots] = cached
-        if stream is not None and cached[1] is None:
-            cached[1] = wp.zeros(
-                kernels.DRAIN_STATUS_SLOTS, dtype=wp.int32, device="cpu", pinned=True
-            )
-        return cached[0], cached[1]
 
 
 def _queue_count(q: Queue, stream=None, staging=None) -> int:
@@ -2114,7 +2118,7 @@ class WarpEngine:
                 dose_to_water,
                 device,
                 res.stream,
-                res.staging,
+                res.workspace,
             )
             return 0.0
         if use_spectral:
@@ -2153,7 +2157,7 @@ class WarpEngine:
                 emitted_counter,
                 device,
                 res.stream,
-                res.staging,
+                res.workspace,
             )
             return 0.0
         if beamlet_generator is not None:
@@ -2190,7 +2194,7 @@ class WarpEngine:
                 emitted_counter,
                 device,
                 res.stream,
-                res.staging,
+                res.workspace,
             )
             return 0.0
         return self._generate_group_presampled(
@@ -2224,7 +2228,7 @@ class WarpEngine:
             dose_to_water,
             device,
             res.stream,
-            res.staging,
+            res.workspace,
         )
 
     def _fold_dij_batch(
@@ -2501,7 +2505,7 @@ class WarpEngine:
                     *common,
                     device,
                     res.stream,
-                    res.staging,
+                    res.workspace,
                 )
             elif is_device_ps:
                 self._transport_chunk_device_buffer(
@@ -2510,7 +2514,7 @@ class WarpEngine:
                     emitted,
                     device,
                     res.stream,
-                    res.staging,
+                    res.workspace,
                 )
             elif is_spectral_mask:
                 self._transport_chunk_spectral_mask(
@@ -2521,7 +2525,7 @@ class WarpEngine:
                     emitted,
                     device,
                     res.stream,
-                    res.staging,
+                    res.workspace,
                 )
             elif is_spectral:
                 self._transport_chunk_spectral(
@@ -2531,7 +2535,7 @@ class WarpEngine:
                     emitted,
                     device,
                     res.stream,
-                    res.staging,
+                    res.workspace,
                 )
             elif generator is not None:
                 self._transport_chunk_wrapped(
@@ -2540,7 +2544,7 @@ class WarpEngine:
                     emitted,
                     device,
                     res.stream,
-                    res.staging,
+                    res.workspace,
                 )
             else:
                 emitted_energy += self._transport_chunk_presampled(
@@ -2548,7 +2552,7 @@ class WarpEngine:
                     *common,
                     device,
                     res.stream,
-                    res.staging,
+                    res.workspace,
                 )
             history += n_chunk
             remaining -= n_chunk
@@ -2584,7 +2588,7 @@ class WarpEngine:
         dose_to_water,
         device,
         stream=None,
-        staging=None,
+        workspace=None,
     ) -> None:
         """Generate one chunk of primaries and drain all queues."""
         q_particle, q_particle_alt, q_other, q_other_alt = queues
@@ -2628,7 +2632,7 @@ class WarpEngine:
             dose_to_water,
             device,
             stream,
-            staging,
+            workspace,
         )
 
     def _transport_chunk_spectral(
@@ -2660,7 +2664,7 @@ class WarpEngine:
         emitted,
         device,
         stream=None,
-        staging=None,
+        workspace=None,
     ) -> None:
         """Generate one spectral-beam chunk in-kernel, then drain all queues.
 
@@ -2734,7 +2738,7 @@ class WarpEngine:
             dose_to_water,
             device,
             stream,
-            staging,
+            workspace,
         )
 
     def _transport_chunk_spectral_mask(
@@ -2767,7 +2771,7 @@ class WarpEngine:
         emitted,
         device,
         stream=None,
-        staging=None,
+        workspace=None,
     ) -> None:
         """Generate a spectral fan and transmission-mask it entirely on-device."""
         q_photon, q_photon_alt, q_electron, q_electron_alt = queues
@@ -2856,7 +2860,7 @@ class WarpEngine:
             dose_to_water,
             device,
             stream,
-            staging,
+            workspace,
         )
 
     def _transport_chunk_wrapped(
@@ -2887,7 +2891,7 @@ class WarpEngine:
         emitted,
         device,
         stream=None,
-        staging=None,
+        workspace=None,
     ) -> None:
         """Generate one chunk in-kernel via a wrapped user sampler, then drain.
 
@@ -2934,7 +2938,7 @@ class WarpEngine:
             dose_to_water,
             device,
             stream,
-            staging,
+            workspace,
         )
 
     def _transport_chunk_presampled(
@@ -2964,7 +2968,7 @@ class WarpEngine:
         dose_to_water,
         device,
         stream=None,
-        staging=None,
+        workspace=None,
     ) -> float:
         """Host-sample a chunk via ``source.sample_batch``, seed queues by kind, drain.
 
@@ -3043,7 +3047,7 @@ class WarpEngine:
             dose_to_water,
             device,
             stream,
-            staging,
+            workspace,
         )
 
         latent = np.where(pt == 3, 2.0 * ELECTRON_MASS_MEV, 0.0)
@@ -3081,7 +3085,7 @@ class WarpEngine:
         emitted,
         device,
         stream=None,
-        staging=None,
+        workspace=None,
     ) -> None:
         """Seed the transport queues straight from a device pre-solve buffer, then drain.
 
@@ -3145,7 +3149,7 @@ class WarpEngine:
             dose_to_water,
             device,
             stream,
-            staging,
+            workspace,
         )
 
     def _seed_queue(
@@ -3217,7 +3221,7 @@ class WarpEngine:
         dose_to_water,
         device,
         stream=None,
-        staging=None,
+        workspace=None,
     ) -> None:
         """Ping-pong the photon and electron kernels until every queue is empty.
 
@@ -3292,6 +3296,10 @@ class WarpEngine:
                 max_blocks,
             )
 
+        if workspace is None:
+            # Every engine route passes its lane's pooled workspace; a bare call
+            # gets a throwaway one, whose buffers are made on demand below.
+            workspace = _Workspace(device)
         rounds = self.drain_rounds
         if rounds is None:
             rounds = (
@@ -3301,6 +3309,7 @@ class WarpEngine:
             )
         if rounds == 0:
             # Host-sized: read each count back and launch exactly that many threads.
+            staging = workspace.staging
             while True:
                 n_photon = _queue_count(q_photon, stream, staging)
                 if n_photon > 0:
@@ -3322,7 +3331,7 @@ class WarpEngine:
         # Every queue a launch consumes is retired by a one-thread kernel on the same
         # stream, which books overflow and the last busy round on the device; the
         # alternate queue a launch pushes into is always a retired (empty) one.
-        status, host = self._drain.status_buffers(slots, device, stream)
+        status, host = workspace.drain_buffers(stream)
         _launch(kernels.fill_int32, kernels.DRAIN_STATUS_SLOTS, [status, 0], device, stream)
         capacity = q_photon.capacity
         # One launch dimension serves every queue: they must share one capacity.
@@ -3479,7 +3488,7 @@ class WarpEngine:
         dose_to_water,
         device,
         stream=None,
-        staging=None,
+        workspace=None,
     ) -> None:
         """Built-in lattice: generate one batch of the group's block in-kernel, in chunks."""
         x_lo, x_extent, y_lo, y_extent = lattice_bounds
@@ -3537,7 +3546,7 @@ class WarpEngine:
                 dose_to_water,
                 device,
                 stream,
-                staging,
+                workspace,
             )
             t += n_chunk
 
@@ -3592,7 +3601,7 @@ class WarpEngine:
         emitted,
         device,
         stream=None,
-        staging=None,
+        workspace=None,
     ) -> None:
         """Built-in spectral Dij route: generate one batch of the group in-kernel.
 
@@ -3672,7 +3681,7 @@ class WarpEngine:
                 dose_to_water,
                 device,
                 stream,
-                staging,
+                workspace,
             )
             t += n_chunk
 
@@ -3710,7 +3719,7 @@ class WarpEngine:
         emitted,
         device,
         stream=None,
-        staging=None,
+        workspace=None,
     ) -> None:
         """Advanced Dij route: generate one batch of the group in-kernel via a sampler.
 
@@ -3768,7 +3777,7 @@ class WarpEngine:
                 dose_to_water,
                 device,
                 stream,
-                staging,
+                workspace,
             )
             t += n_chunk
 
@@ -3804,7 +3813,7 @@ class WarpEngine:
         dose_to_water,
         device,
         stream=None,
-        staging=None,
+        workspace=None,
     ) -> float:
         """Host pre-sample one batch of each beamlet's primaries and upload them.
 
@@ -3879,7 +3888,7 @@ class WarpEngine:
                     dose_to_water,
                     device,
                     stream,
-                    staging,
+                    workspace,
                 )
                 r0 = r1
         return emitted
