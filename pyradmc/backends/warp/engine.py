@@ -3,7 +3,9 @@
 Production backend, ``cpu`` and ``cuda`` from one kernel source (AGENTS.md section 3:
 nothing physical lives here). The run loop is:
 
-1. Flatten the cross-sections (``build_tables``) and upload everything as float32.
+1. Flatten the cross-sections (``build_tables``) and upload everything as float32 —
+   once per engine and device: tables, voxel maps and the transport workspaces stay
+   resident between calls (see :class:`WarpEngine`).
 2. Per batch, per chunk of histories: generate primaries into a queue, then
    ping-pong the photon and electron kernels until every queue drains. Photons
    spawn charged secondaries into the electron queue; electrons spawn
@@ -56,6 +58,7 @@ from pyradmc.data.interface import CrossSectionSource
 from pyradmc.geometry.collimation import TransmissionMaskSource
 from pyradmc.geometry.field import FIELD_NONE, MagneticField
 from pyradmc.geometry.grid import VoxelGrid
+from pyradmc.geometry.segments import SegmentedFanSource, SegmentedPlanSource
 from pyradmc.geometry.source import (
     BeamletGridSource,
     BeamletSource,
@@ -329,6 +332,8 @@ class _LaneResources:
     batch's transport writes — queues, RNG slots, the quanta map — is per lane;
     the lane's ``stream`` orders its work and ``staging`` is the pinned element
     its count readbacks go through. The sequential path is lane 0 with no stream.
+    ``workspace`` is the pooled :class:`_Workspace` behind the lane; the drain loop
+    takes its readback buffers from it.
     """
 
     stream: object
@@ -336,19 +341,307 @@ class _LaneResources:
     queues: list
     slots: object
     edep: object
+    workspace: object = None
 
 
-def _launch(kernel, dim, inputs, device: str, stream) -> None:
+class _Workspace:
+    """One batch lane's transport scratch, kept resident between calls.
+
+    Four queues (two ping-pong pairs), the RNG-slot array, the scalar energy and
+    violation counters, and — created on first concurrent use — the lane's stream
+    and pinned count-staging element. Pooled per engine and device
+    (:meth:`WarpEngine._acquire_workspaces`), so a loop of calls stops paying a
+    fresh allocation of every queue column per call.
+
+    Every call refits it *exactly* to its own requirement, growing or shrinking:
+    the pool holds what the last call needed, never the largest call so far. A
+    steady workload (an optimizer's loop of equal calls) therefore reuses it
+    untouched, while an alternating big/small workload reallocates on each change,
+    as every call did before the pool existed. Holding the largest-ever size
+    instead parked up to 1.7 GB behind tiny calls, and let a Dij's dense group maps
+    ride on top of a big run's queues (peak 1.33 -> 2.05 GB, measured). An exact
+    fit also makes each queue's ``capacity`` — the kernels' write guard and the
+    engine's overflow bound — the one a fresh engine would allocate.
+
+    Contents need no clearing between calls: every generator and every push
+    writes all fields of a slot before a count publishes it, the transport reads
+    only below the count, every RNG slot is written by its generator before it is
+    read, and each counter is zeroed by the call that uses it.
+    """
+
+    def __init__(self, device: str) -> None:
+        self.device = device
+        self.slots_allocated = 0
+        self.queues: list = []
+        self.slots = None
+        self.stream = None
+        self.staging = None
+        self.fold = None
+        self.drain_status = None
+        self.drain_host = None
+        self._book = None
+        self._book_views: dict = {}
+
+    @property
+    def nbytes(self) -> int:
+        """Per-slot bytes held, in the accounting of :data:`_QUEUE_BYTES_PER_SLOT`.
+
+        The handful of scalar counters is left out, as in the sizing model.
+        """
+        return self.slots_allocated * _QUEUE_BYTES_PER_SLOT
+
+    def fit(self, capacity: int) -> None:
+        """Hold exactly ``capacity`` slots per queue, reallocating only on a change."""
+        if capacity != self.slots_allocated:
+            # Release before reallocating, so the peak is the new size, not old + new.
+            self.queues = []
+            self.slots = None
+            self.slots_allocated = 0
+            self.queues = [_upload_queue(capacity, self.device) for _ in range(4)]
+            self.slots = wp.zeros(capacity, dtype=wp.uint32, device=self.device)
+            self.slots_allocated = capacity
+        for q in self.queues:
+            q.capacity = capacity
+
+    def fold_stream(self):
+        """Return the stream a concurrent call folds its lanes' batches on (made once)."""
+        if self.fold is None:
+            self.fold = wp.Stream(self.device)
+        return self.fold
+
+    def drain_buffers(self, stream):
+        """Return the drain's (device status, pinned host element) pair, made on demand.
+
+        The status array is created on the first blind drain and the pinned element
+        on the first one that reads back through a lane stream, like
+        :meth:`fold_stream`; neither is tied to :meth:`fit`, so a capacity change
+        keeps them. The drain zero-fills the status at its start, so nothing stale
+        carries over between drains or calls.
+        """
+        if self.drain_status is None:
+            self.drain_status = wp.zeros(
+                kernels.DRAIN_STATUS_SLOTS, dtype=wp.int32, device=self.device
+            )
+            if stream is not None:
+                # Allocated (and zeroed) on the device's default stream, then used
+                # on the lane's: wait for the default stream once, as uploads do.
+                wp.synchronize_stream(wp.get_stream(self.device))
+        if stream is not None and self.drain_host is None:
+            self.drain_host = wp.zeros(
+                kernels.DRAIN_STATUS_SLOTS, dtype=wp.int32, device="cpu", pinned=True
+            )
+        return self.drain_status, self.drain_host
+
+    def book(self, name: str) -> wp.array:
+        """Return the one-element int64 energy counter ``name`` (a view of the book).
+
+        The counters share one array so a call clears them in one memset and reads
+        them in one readback instead of one synchronizing ``numpy()`` each. Each
+        sits on its own 128-byte line, so the kernels' atomics on different
+        counters never share a cache line — the layout the kernels had when
+        every counter was its own allocation.
+        """
+        if self._book is None:
+            book = wp.zeros(len(_BOOK) * _BOOK_STRIDE, dtype=wp.int64, device=self.device)
+            views = {
+                key: book[i * _BOOK_STRIDE : i * _BOOK_STRIDE + 1] for i, key in enumerate(_BOOK)
+            }
+            # The kernels count majorant violations in an int32; that counter is the
+            # low half of a zeroed int64 slot (little-endian on every Warp target),
+            # so the readback every pass already makes checks it for free. It only
+            # grows and is never cleared per pass; any nonzero value is a violation.
+            # The view does not own the memory: ``_book`` keeps it alive.
+            views["violations"] = wp.array(
+                ptr=book.ptr + _BOOK.index("violations") * _BOOK_STRIDE * 8,
+                dtype=wp.int32,
+                shape=(1,),
+                device=self.device,
+            )
+            self._book, self._book_views = book, views
+        return self._book_views[name]
+
+    def clear_pass_books(self) -> None:
+        """Zero the per-pass counters (the first :data:`_BOOK_PER_PASS` of the book)."""
+        self.book(_BOOK[0])
+        self._book[: _BOOK_PER_PASS * _BOOK_STRIDE].zero_()
+
+    def clear_books(self) -> None:
+        """Zero every counter in the book, the violation count included."""
+        self.book(_BOOK[0])
+        self._book.zero_()
+
+    def read_books(self) -> dict[str, int]:
+        """Read every counter back in one transfer (synchronizes the default stream)."""
+        self.book(_BOOK[0])
+        host = self._book.numpy()
+        return {key: int(host[i * _BOOK_STRIDE]) for i, key in enumerate(_BOOK)}
+
+    def lane(self, edep, concurrent: bool) -> _LaneResources:
+        """View the workspace as a lane, on its own stream only when lanes overlap."""
+        if not concurrent:
+            return _LaneResources(
+                stream=None,
+                staging=None,
+                queues=self.queues,
+                slots=self.slots,
+                edep=edep,
+                workspace=self,
+            )
+        if self.stream is None:
+            self.stream = wp.Stream(self.device)
+            self.staging = wp.zeros(1, dtype=wp.int32, device="cpu", pinned=True)
+        return _LaneResources(
+            stream=self.stream,
+            staging=self.staging,
+            queues=self.queues,
+            slots=self.slots,
+            edep=edep,
+            workspace=self,
+        )
+
+
+_BOOK = ("escaped", "unscored", "deposited", "total_q", "dep_total", "emitted", "violations")
+"""The counters a workspace keeps in one int64 array. The first
+:data:`_BOOK_PER_PASS` are cleared and read once per pass — a batch of ``run``, a
+group of ``run_dij`` — so no int64 sum spans more than the pass it always did; the
+rest accumulate over the whole call. ``violations`` is the kernels' int32
+majorant-violation count, aliased onto its slot (see :meth:`_Workspace.book`), so
+the per-pass readback raises on a violation in the pass that made it."""
+
+_BOOK_PER_PASS = 4
+
+_BOOK_STRIDE = 16
+"""int64 elements between counters: 128 bytes, one cache line each."""
+
+
+@dataclass
+class _DeviceState:
+    """What one engine keeps resident on one device between calls.
+
+    The tables (per ``(ecut, pcut, e_max, with_gs)``, least recently used evicted
+    past :data:`_TABLES_RESIDENT`) and the transport grid are functions of the
+    engine's frozen fields plus the key. The scoring geometry and the spectra are
+    per-call arguments instead, matched by identity with a strong reference held
+    (so the identity cannot be recycled) — safe because their arrays are
+    read-only. The idle transport workspaces are what the last call used.
+    """
+
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    grid: tuple | None = None
+    tables: dict = field(default_factory=dict)
+    table_arrays: dict = field(default_factory=dict)
+    scoring: tuple | None = None
+    spectra: dict = field(default_factory=dict)
+    idle: list = field(default_factory=list)
+
+
+_SPECTRA_RESIDENT = 8
+"""Spectrum tables kept per device; a few hundred bytes each, bounded anyway."""
+
+_TABLES_RESIDENT = 4
+"""Table structs kept per device (and twice as many base or GS array sets), least
+recently used evicted. Each GS grid is about 12 MB of float32 on the device, so an
+unbounded cache would park one per ECUT of a sweep; the host cache keeps the
+flattened tables, so an evicted key costs only its re-upload."""
+
+
+def _lru_get(cache: dict, key):
+    """Look ``key`` up in an insertion-ordered dict, marking it most recently used."""
+    value = cache.pop(key, None)
+    if value is not None:
+        cache[key] = value
+    return value
+
+
+def _lru_put(cache: dict, key, value, bound: int) -> None:
+    """Insert ``key`` as most recently used, evicting the oldest beyond ``bound``."""
+    cache[key] = value
+    while len(cache) > bound:
+        cache.pop(next(iter(cache)))
+
+
+def _check_majorant(books: dict[str, int]) -> None:
+    """Raise if the kernels counted a Woodcock majorant violation (book readback)."""
+    if books["violations"] != 0:
+        raise RuntimeError(
+            "Woodcock majorant violated in the kernel despite table headroom. "
+            "The geometry contains material or density the majorant "
+            "declaration did not cover."
+        )
+
+
+def _launch(kernel, dim, inputs, device: str, stream, max_blocks: int = 0) -> None:
     """Launch on the device's current stream, or on an explicit lane stream.
 
     Warp takes *either* ``device`` or ``stream`` (a stream names its device);
     every launch on a Dij code path routes through here so that a batch lane's
     work is ordered on the lane's stream and nothing leaks onto the default one.
+    ``max_blocks`` caps the CUDA grid (Warp's grid-stride loop covers the rest of
+    ``dim``); 0 is Warp's default of one thread per index.
     """
     if stream is None:
-        wp.launch(kernel, dim=dim, inputs=inputs, device=device)
+        wp.launch(kernel, dim=dim, inputs=inputs, device=device, max_blocks=max_blocks)
     else:
-        wp.launch(kernel, dim=dim, inputs=inputs, stream=stream)
+        wp.launch(kernel, dim=dim, inputs=inputs, stream=stream, max_blocks=max_blocks)
+
+
+_DRAIN_FIRST_BLOCK = 4
+"""Blind rounds before the first count readback when no drain has been seen yet.
+
+Measured 2026-10-22 on 6 MV-class photon chunks in water: a drain needs 3-5 rounds
+(primary photons, their electrons, then bremsstrahlung and delta-ray generations
+of a few hundred and a few dozen particles). Overshooting by a round costs four
+near-empty launches; undershooting costs a readback."""
+
+_DRAIN_FOLLOW_UP_BLOCK = 2
+"""Blind rounds per block after the first came back non-empty: the tail is short."""
+
+_DRAIN_MAX_BLOCK = 32
+"""Cap on the adaptive block, so one pathological drain cannot set a huge one."""
+
+_DRAIN_THREADS_PER_SM = 2048
+"""Threads per SM a blind launch's grid is floored at.
+
+Deliberately at or above every current architecture's resident-thread ceiling
+(2048 on most; Ada caps at 1536), so the floor never leaves an SM idle."""
+
+_WARP_BLOCK_DIM = 256
+"""Warp's default CUDA block size, which every engine launch uses (``wp.launch``
+without ``block_dim``); the blind grid is counted in these blocks."""
+
+
+def _blind_max_blocks(device: str, capacity: int, queue_factor: int) -> int:
+    """CUDA grid of a blind drain launch, which spans the whole queue capacity.
+
+    A blind round is launched at ``capacity`` so that no count readback is needed,
+    but a queue rarely holds more than about a chunk. One thread per capacity slot
+    would schedule ``queue_factor`` times more blocks than the work needs; instead
+    the grid is one chunk wide (at least enough threads to fill every SM), and
+    Warp's grid-stride loop walks the remaining slots, where the kernels' count
+    guard returns at once. A queue holding more than a chunk is still drained in
+    full — its threads take a second slot each. Scheduling only: which thread
+    transports a particle never changes its history (``slots[tid]`` is scratch
+    for the particle's own stream). 0 (Warp's default) on cpu.
+    """
+    d = wp.get_device(device)
+    if not d.is_cuda:
+        return 0
+    chunk_blocks = -(-max(1, capacity // max(1, queue_factor)) // _WARP_BLOCK_DIM)
+    sm_count = int(getattr(d, "sm_count", 0) or 0)
+    floor_blocks = sm_count * _DRAIN_THREADS_PER_SM // _WARP_BLOCK_DIM
+    return max(1, chunk_blocks, floor_blocks)
+
+
+class _DrainState:
+    """Mutable drain-schedule state an engine carries across runs.
+
+    ``last_rounds`` is the number of rounds the latest blind drain on each device
+    needed — the adaptive schedule's next first block. The drain's readback buffers
+    live in the lane's :class:`_Workspace` (:meth:`_Workspace.drain_buffers`).
+    """
+
+    def __init__(self) -> None:
+        self.last_rounds: dict[str, int] = {}
 
 
 def _queue_count(q: Queue, stream=None, staging=None) -> int:
@@ -391,6 +684,26 @@ def _set_count(q: Queue, value: int, device: str, stream=None) -> None:
 class WarpEngine:
     """Dual-target production engine over a voxel grid.
 
+    The engine keeps its device state resident between calls, per device: the
+    cross-section tables (per ``(ecut, pcut, e_max, with_gs)``, the four most
+    recently used), the voxel maps and field, the last scoring geometry and recent
+    spectra (by identity), and one transport workspace (queues, RNG slots,
+    counters) per batch lane, refitted exactly to each call by ``run`` and
+    ``run_dij`` alike. A loop of equal calls — a plan optimization — therefore pays
+    the uploads and allocations once. This is bitwise inert (test-pinned against
+    fresh engines). The engine-level keys are frozen fields, so treat ``grid``,
+    ``cross_sections`` and ``magnetic_field`` as immutable (a mutated array is not
+    re-uploaded — build a new engine); the per-call scoring grid and spectrum are
+    matched by identity, and their arrays are read-only for that reason.
+
+    **Device memory stays held between calls** while the engine lives: the tables
+    and voxel maps, plus the queues the *last* call needed — about 0.9 GB after a
+    full-width ``run`` on a 36-SM card at the auto chunk size, times its
+    ``concurrent_batches`` lanes; a smaller call shrinks it again. Call
+    :meth:`release_device_memory` to hand it all back. The dense dose maps are not
+    kept: their size is the scoring grid's (or, for a Dij, budgeted from free
+    memory), so they are allocated per call as before.
+
     Parameters
     ----------
     grid, cross_sections
@@ -414,6 +727,19 @@ class WarpEngine:
         each device. World data like ``grid``: uploaded once per device next to
         the density and material maps, and a gridded map must cover the transport
         grid (checked at construction).
+    drain_rounds
+        Advanced; leave at the default unless profiling says otherwise. How the
+        photon/electron queues are drained between chunks — bit-inert
+        scheduling, like ``chunk_size`` (test-pinned). ``0`` is the host-sized
+        schedule: every launch is sized from a count read back to the host, one
+        synchronization per launch. ``k >= 1`` is the blind schedule: rounds are
+        launched at queue capacity (the kernels guard against the device-side
+        count) and the counts read back once per ``k`` rounds, issuing further
+        blocks until both queues are empty — the end check, never ``k``, decides
+        termination. Default ``None``: blind with ``k`` adapted to the round count
+        the previous drain on the device needed on CUDA, where each readback idles
+        the GPU for a host round trip; host-sized on cpu, where a readback is a
+        plain memory read and a capacity-wide launch would loop over every slot.
     """
 
     grid: VoxelGrid
@@ -422,20 +748,32 @@ class WarpEngine:
     chunk_size: int | None = None
     queue_factor: int = 16
     magnetic_field: MagneticField | None = None
+    drain_rounds: int | None = None
     _auto_chunk: dict = field(default_factory=dict, init=False, repr=False, compare=False)
+    _drain: _DrainState = field(default_factory=_DrainState, init=False, repr=False, compare=False)
     # Host-table cache: build_tables flattens the source by looping the Python query
     # API over every grid node — seconds of fixed overhead for a tabulated source —
     # while its result is frozen after construction, so one build per
     # (ecut, pcut, e_max) serves every run and every device shard. Only the host
-    # flatten is cached; the device upload stays per call. The lock keeps concurrent
-    # Dij shards (one host thread per device) from building the same key twice.
+    # flatten is cached here; the device upload is cached per device in _resident.
+    # The lock keeps concurrent Dij shards (one host thread per device) from
+    # building the same key twice.
     _table_cache: dict = field(default_factory=dict, init=False, repr=False, compare=False)
     _table_cache_lock: threading.Lock = field(
         default_factory=threading.Lock, init=False, repr=False, compare=False
     )
+    # Device-resident state, one _DeviceState per device string (see the class
+    # docstring); the lock guards only the dict, each state carries its own.
+    _resident: dict = field(default_factory=dict, init=False, repr=False, compare=False)
+    _resident_lock: threading.Lock = field(
+        default_factory=threading.Lock, init=False, repr=False, compare=False
+    )
+    _default_scoring: dict = field(default_factory=dict, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        """Refuse a gridded field map that does not cover the transport grid."""
+        """Refuse a negative drain block or a field map that misses the grid."""
+        if self.drain_rounds is not None and self.drain_rounds < 0:
+            raise ValueError(f"drain_rounds must be None or >= 0, got {self.drain_rounds}")
         if self.magnetic_field is not None and not self.magnetic_field.covers(self.grid):
             raise ValueError(
                 "the magnetic field map does not cover the transport grid: "
@@ -492,6 +830,111 @@ class WarpEngine:
             self._auto_chunk[key] = cached
         return int(cached)
 
+    # -- device-resident state ----------------------------------------------------
+
+    def release_device_memory(self) -> None:
+        """Drop every device array this engine keeps between calls, on every device.
+
+        Use it to hand the card to something else between phases of work: an engine
+        otherwise holds its tables, voxel maps and the last call's queues for as
+        long as it lives. Results are unaffected — the next call re-uploads and
+        reallocates what it needs, bit-identically. Host-side caches (the flattened cross-section
+        tables, the Goudsmit-Saunderson grid) are kept: they cost seconds to
+        rebuild and no device memory. Not for use while a call on this engine is
+        running on another thread.
+        """
+        with self._resident_lock:
+            self._resident.clear()
+
+    def _state(self, device: str) -> _DeviceState:
+        with self._resident_lock:
+            state = self._resident.get(device)
+            if state is None:
+                state = _DeviceState()
+                self._resident[device] = state
+            return state
+
+    def _scoring_geometry(self, scoring_grid: ScoringGeometry | None) -> ScoringGeometry:
+        """Resolve a call's scoring geometry; the transport-grid default is built once."""
+        if scoring_grid is not None:
+            return scoring_grid
+        default = self._default_scoring.get("grid")
+        if default is None:
+            default = ScoringGrid.for_grid(self.grid)
+            self._default_scoring["grid"] = default
+        return default
+
+    def _upload_scoring(self, scoring: ScoringGeometry, device: str):
+        """Return scoring metadata and voxel masses on ``device``, kept for the last one.
+
+        Keyed by identity with the geometry itself held, so the key cannot be
+        recycled by a new object at the same address; one entry, because a loop
+        scores on one geometry and a dense mass map per entry is not free.
+        """
+        state = self._state(device)
+        with state.lock:
+            cached = state.scoring
+            if cached is not None and cached[0] is scoring:
+                return cached[1], cached[2]
+            state.scoring = None  # release the previous map before uploading this one
+            si = _scoring_info(scoring, device)
+            voxel_mass = wp.array(
+                scoring.voxel_mass.reshape(scoring.n_voxels), dtype=wp.float64, device=device
+            )
+            state.scoring = (scoring, si, voxel_mass)
+            return si, voxel_mass
+
+    def _spectral_tables(self, spectrum, device: str):
+        """Return the spectrum's float32 inversion tables on ``device``, by identity."""
+        state = self._state(device)
+        with state.lock:
+            cached = state.spectra.get(id(spectrum))
+            if cached is not None and cached[0] is spectrum:
+                return cached[1]
+            tables = (
+                wp.array(spectrum.edges.astype(np.float32), dtype=float, device=device),
+                wp.array(spectrum.cdf.astype(np.float32), dtype=float, device=device),
+            )
+            if len(state.spectra) >= _SPECTRA_RESIDENT:
+                state.spectra.pop(next(iter(state.spectra)))
+            state.spectra[id(spectrum)] = (spectrum, tables)
+            return tables
+
+    def _acquire_workspaces(self, device: str, n: int, capacity: int) -> list[_Workspace]:
+        """Take ``n`` transport workspaces fitted to exactly ``capacity`` slots per queue.
+
+        Idle workspaces are reused and refitted (see :class:`_Workspace`), any idle
+        surplus beyond ``n`` is released before anything is allocated, and fresh ones
+        make up a shortfall. The pool therefore never holds more than the last
+        successful call used, and an acquirer may count every idle byte as free
+        (each is either released or reused for its own queues). The caller
+        hands them back with :meth:`_release_workspaces` on success only: after an
+        exception a lane stream may still be writing into them, so they are left
+        to the garbage collector instead of being reused.
+        """
+        state = self._state(device)
+        with state.lock:
+            # Dropping the idle list releases the surplus here, before anything below
+            # allocates.
+            taken, state.idle = state.idle[:n], []
+        for ws in taken:
+            ws.fit(capacity)
+        while len(taken) < n:
+            ws = _Workspace(device)
+            ws.fit(capacity)
+            taken.append(ws)
+        return taken
+
+    def _release_workspaces(self, device: str, workspaces: list[_Workspace]) -> None:
+        state = self._state(device)
+        with state.lock:
+            state.idle.extend(workspaces)
+
+    def _idle_workspace_bytes(self, device: str) -> int:
+        state = self._state(device)
+        with state.lock:
+            return sum(ws.nbytes for ws in state.idle)
+
     def run(
         self,
         source: Source,
@@ -544,8 +987,8 @@ class WarpEngine:
         :func:`pyradmc.transport.electron.electron_steps`): ``"gs"`` — the
         shipped default — samples Goudsmit-Saunderson deflections from an
         eagerly precomputed table grid (built host-side on the first GS run
-        for this ``(ecut, e_max)``, persisted to the user cache, uploaded per
-        run) and does not apply the Gaussian-validity angular cap; the
+        for this ``(ecut, e_max)``, persisted to the user cache, uploaded once
+        per device and kept resident) and does not apply the Gaussian-validity angular cap; the
         ``"gaussian"`` hinge survives as the paired-comparison test
         instrument. ``step_energy_fraction=None`` resolves to the selected
         model's validated fraction.
@@ -561,14 +1004,21 @@ class WarpEngine:
             )
         from pyradmc.backends.warp.presolve import DevicePhaseSpace
 
-        in_kernel = isinstance(source, PencilBeamSource | ParallelBeamSource)
-        is_device_ps = isinstance(source, DevicePhaseSpace)
         # Exact type, not isinstance: a subclass may override emit/sample_batch, and
         # the built-in generator would silently bypass the override; a subclass keeps
-        # the host pre-sampling route (test-pinned).
+        # the host pre-sampling route (test-pinned, for every built-in generator).
+        in_kernel = type(source) in (PencilBeamSource, ParallelBeamSource)
+        is_device_ps = isinstance(source, DevicePhaseSpace)
         is_spectral = type(source) is SpectralBeamSource
         is_spectral_mask = (
             type(source) is TransmissionMaskSource and type(source.inner) is SpectralBeamSource
+        )
+        # A segmented plan: exact plan, segments and fan types (an override of any
+        # of the three keeps the host route).
+        is_segment_plan = (
+            type(source) is SegmentedPlanSource
+            and type(source.segments) is SegmentedFanSource
+            and type(source.segments.fan) is SpectralBeamSource
         )
         if is_device_ps and source.device != self.device:
             raise ValueError(
@@ -592,34 +1042,32 @@ class WarpEngine:
 
         device = self.device
         gi, density, material = self._upload_grid(device)
-        scoring = scoring_grid if scoring_grid is not None else ScoringGrid.for_grid(self.grid)
-        si = _scoring_info(scoring, device)
+        scoring = self._scoring_geometry(scoring_grid)
+        si, voxel_mass = self._upload_scoring(scoring, device)
         table_energy = source.max_energy
         tab = self._upload_tables(table_energy, pcut, ecut, device, with_gs=msc_model_gs == 1)
 
         chunk = min(self._chunk_histories(device), n_histories)
         capacity = chunk * self.queue_factor
         lanes = min(concurrent_batches, n_batches) if wp.get_device(device).is_cuda else 1
+        # Queues, RNG slots and counters come from the engine's resident pool (one
+        # workspace per lane); the batch dose map is per call, sized by the scoring
+        # grid. Handed back to the pool only on success (see _acquire_workspaces).
+        workspaces = self._acquire_workspaces(device, lanes, capacity)
         lane_resources = [
-            _LaneResources(
-                stream=wp.Stream(device) if lanes > 1 else None,
-                staging=(
-                    wp.zeros(1, dtype=wp.int32, device="cpu", pinned=True) if lanes > 1 else None
-                ),
-                queues=[_upload_queue(capacity, device) for _ in range(4)],
-                slots=wp.zeros(capacity, dtype=wp.uint32, device=device),
-                edep=wp.zeros(scoring.n_voxels, dtype=wp.int64, device=device),
-            )
-            for _ in range(lanes)
+            ws.lane(wp.zeros(scoring.n_voxels, dtype=wp.int64, device=device), lanes > 1)
+            for ws in workspaces
         ]
         queues = lane_resources[0].queues
         slots = lane_resources[0].slots
         edep = lane_resources[0].edep
-        fold_stream = wp.Stream(device) if lanes > 1 else None
-        escaped = wp.zeros(1, dtype=wp.int64, device=device)
-        unscored = wp.zeros(1, dtype=wp.int64, device=device)
-        deposited = wp.zeros(1, dtype=wp.int64, device=device)
-        violations = wp.zeros(1, dtype=wp.int32, device=device)
+        counters = workspaces[0]
+        fold_stream = counters.fold_stream() if lanes > 1 else None
+        counters.clear_books()
+        escaped = counters.book("escaped")
+        unscored = counters.book("unscored")
+        deposited = counters.book("deposited")
+        violations = counters.book("violations")  # zeroed with the book
 
         # Advanced route: a source exposing a warp_sampler is generated in-kernel by a
         # wrapper kernel (built once per sampler), which books emitted weight-energy
@@ -627,42 +1075,57 @@ class WarpEngine:
         # source books per chunk).
         generator = None
         emitted = None
-        wraps = not in_kernel and not is_device_ps and not is_spectral and not is_spectral_mask
+        wraps = (
+            not in_kernel
+            and not is_device_ps
+            and not is_spectral
+            and not is_spectral_mask
+            and not is_segment_plan
+        )
         if wraps and source.warp_sampler is not None:
             generator = kernels.make_generator_kernel(source.warp_sampler)
-            emitted = wp.zeros(1, dtype=wp.int64, device=device)
+            emitted = counters.book("emitted")
         if is_device_ps:
             # The seeding kernel books emitted weight-energy into this counter,
             # like the wrapped-generator route, read once after the batches.
-            emitted = wp.zeros(1, dtype=wp.int64, device=device)
+            emitted = counters.book("emitted")
         spectral_tables = None
         mask_table = None
         if is_spectral or is_spectral_mask:
             # Built-in in-kernel generation for the exact spectral type: the spectrum
-            # inversion tables upload once per run and each chunk samples on-device
-            # (the host pre-sampling was measured wall-dominant on CT-grade runs).
-            # Emitted energy is booked per primary, like the wrapped-generator route.
+            # inversion tables stay resident per spectrum and each chunk samples
+            # on-device (the host pre-sampling was measured wall-dominant on CT-grade
+            # runs). Emitted energy is booked per primary, like the wrapped-generator
+            # route.
             spectral_source = source.inner if is_spectral_mask else source
-            spectrum = spectral_source.spectrum
-            spectral_tables = (
-                wp.array(spectrum.edges.astype(np.float32), dtype=float, device=device),
-                wp.array(spectrum.cdf.astype(np.float32), dtype=float, device=device),
-            )
-            emitted = wp.zeros(1, dtype=wp.int64, device=device)
+            spectral_tables = self._spectral_tables(spectral_source.spectrum, device)
+            emitted = counters.book("emitted")
             if is_spectral_mask:
                 mask_table = wp.array(
                     source.mask.reshape(-1).astype(np.float32), dtype=float, device=device
                 )
+        segment_plan = None
+        if is_segment_plan:
+            # The segmented fan's device layout plus the plan's selection shares;
+            # each primary picks its segment and weight in-kernel.
+            from pyradmc.backends.warp import segments as segments_module
+
+            segment_plan = (
+                segments_module.upload_segmented_fan(source.segments, device),
+                wp.array(source.selection_cdf.astype(np.float32), dtype=float, device=device),
+            )
+            emitted = counters.book("emitted")
+            if lanes > 1:  # warp module loading is not thread-safe
+                wp.load_module(segments_module, device=device)
 
         n_voxels = scoring.n_voxels
-        voxel_mass = wp.array(scoring.voxel_mass.reshape(n_voxels), dtype=wp.float64, device=device)
         # Dose finalize on the device: per-voxel batch sums of dose and dose^2, folded
         # in batch order so the open-field reduction matches a 1x1 Dij column bitwise
         # on one device (kernels.accumulate_run_batch). Only the reduced maps read
         # back, not the dense per-batch fixed-point buffer.
         s1 = wp.zeros(n_voxels, dtype=wp.float64, device=device)
         s2 = wp.zeros(n_voxels, dtype=wp.float64, device=device)
-        dep_total = wp.zeros(1, dtype=wp.int64, device=device)  # dose-to-medium quanta
+        dep_total = counters.book("dep_total")  # dose-to-medium quanta
         per_batch = n_histories // n_batches
         energy_escaped = 0.0
         energy_unscored = 0.0
@@ -675,12 +1138,9 @@ class WarpEngine:
 
         if lanes > 1:
             # Shared counters use integer atomics and therefore need only one clear
-            # for the whole concurrent run. Each lane owns the state whose writes
-            # are not commutative (queues, RNG slots, and its batch dose map).
-            escaped.zero_()
-            unscored.zero_()
-            deposited.zero_()
-            violations.zero_()
+            # for the whole concurrent run (done above). Each lane owns the state
+            # whose writes are not commutative (queues, RNG slots, and its batch dose
+            # map).
             energy_emitted += self._run_forward_batch_lanes(
                 lane_resources,
                 fold_stream,
@@ -693,6 +1153,7 @@ class WarpEngine:
                 is_device_ps=is_device_ps,
                 is_spectral=is_spectral,
                 is_spectral_mask=is_spectral_mask,
+                segment_plan=segment_plan,
                 generator=generator,
                 spectral_tables=spectral_tables,
                 mask_table=mask_table,
@@ -723,23 +1184,17 @@ class WarpEngine:
                 emitter=emitter,
             )
             wp.synchronize_device(device)
-            if int(violations.numpy()[0]) != 0:
-                raise RuntimeError(
-                    "Woodcock majorant violated in the kernel despite table headroom. "
-                    "The geometry contains material or density the majorant "
-                    "declaration did not cover."
-                )
-            escaped_quanta = int(escaped.numpy()[0])
-            unscored_quanta = int(unscored.numpy()[0])
+            books = counters.read_books()
+            _check_majorant(books)
+            escaped_quanta = books["escaped"]
+            unscored_quanta = books["unscored"]
             if dose_to_water != 0:
-                deposited_quanta = int(deposited.numpy()[0])
+                deposited_quanta = books["deposited"]
 
         history = 0
         for _ in range(n_batches if lanes == 1 else 0):
             edep.zero_()
-            escaped.zero_()
-            unscored.zero_()
-            deposited.zero_()
+            counters.clear_pass_books()
             remaining = per_batch
             while remaining > 0:
                 n_chunk = min(chunk, remaining)
@@ -770,6 +1225,7 @@ class WarpEngine:
                         transport_electrons,
                         dose_to_water,
                         device,
+                        workspace=counters,
                     )
                 elif is_device_ps:
                     self._transport_chunk_device_buffer(
@@ -798,6 +1254,37 @@ class WarpEngine:
                         dose_to_water,
                         emitted,
                         device,
+                        workspace=counters,
+                    )
+                elif segment_plan is not None:
+                    self._transport_chunk_segment_plan(
+                        source,
+                        segment_plan,
+                        seed,
+                        history,
+                        n_chunk,
+                        gi,
+                        si,
+                        density,
+                        material,
+                        tab,
+                        queues,
+                        slots,
+                        edep,
+                        escaped,
+                        unscored,
+                        deposited,
+                        violations,
+                        pcut,
+                        ecut,
+                        step_energy_fraction,
+                        deposit_resolution,
+                        msc_model_gs,
+                        transport_electrons,
+                        dose_to_water,
+                        emitted,
+                        device,
+                        workspace=counters,
                     )
                 elif is_spectral_mask:
                     self._transport_chunk_spectral_mask(
@@ -828,6 +1315,7 @@ class WarpEngine:
                         dose_to_water,
                         emitted,
                         device,
+                        workspace=counters,
                     )
                 elif is_spectral:
                     self._transport_chunk_spectral(
@@ -857,6 +1345,7 @@ class WarpEngine:
                         dose_to_water,
                         emitted,
                         device,
+                        workspace=counters,
                     )
                 elif generator is not None:
                     self._transport_chunk_wrapped(
@@ -885,6 +1374,7 @@ class WarpEngine:
                         dose_to_water,
                         emitted,
                         device,
+                        workspace=counters,
                     )
                 else:
                     energy_emitted += self._transport_chunk_presampled(
@@ -912,16 +1402,10 @@ class WarpEngine:
                         transport_electrons,
                         dose_to_water,
                         device,
+                        workspace=counters,
                     )
                 history += n_chunk
                 remaining -= n_chunk
-            wp.synchronize_device(device)
-            if int(violations.numpy()[0]) != 0:
-                raise RuntimeError(
-                    "Woodcock majorant violated in the kernel despite table headroom. "
-                    "The geometry contains material or density the majorant "
-                    "declaration did not cover."
-                )
             # Fold this batch into the running dose sums on the device; the dense
             # fixed-point map never leaves the GPU. dep_total sums the physical
             # quanta (dose-to-medium book); dose-to-water reads its own counter.
@@ -939,10 +1423,16 @@ class WarpEngine:
                 ],
                 device=device,
             )
-            escaped_quanta += int(escaped.numpy()[0])
-            unscored_quanta += int(unscored.numpy()[0])
+            # One readback per batch for all three per-batch books; it synchronizes
+            # the default stream, which carries every launch of this path, so the
+            # tick still marks a finished batch. The int64 sums stay per batch, as
+            # before (a whole-run int64 sum could overflow at ~9e9 MeV).
+            books = counters.read_books()
+            _check_majorant(books)
+            escaped_quanta += books["escaped"]
+            unscored_quanta += books["unscored"]
             if dose_to_water != 0:
-                deposited_quanta += int(deposited.numpy()[0])
+                deposited_quanta += books["deposited"]
             emitter.tick(per_batch)
 
         # Convert the exact integer books once, after aggregation. Besides avoiding
@@ -953,13 +1443,6 @@ class WarpEngine:
         if dose_to_water != 0:
             energy_deposited = float(deposited_quanta) * ENERGY_QUANTUM_MEV
 
-        if in_kernel:
-            # Mono beams: every primary is one unit-weight photon at the beam energy
-            # (max_energy == energy), so the device need not report emitted energy.
-            energy_emitted = n_histories * source.max_energy
-        elif emitted is not None:
-            energy_emitted = float(emitted.numpy()[0]) * ENERGY_QUANTUM_MEV
-
         mean_dev = wp.zeros(n_voxels, dtype=wp.float64, device=device)
         sigma_dev = wp.zeros(n_voxels, dtype=wp.float64, device=device)
         wp.launch(
@@ -968,12 +1451,22 @@ class WarpEngine:
             inputs=[s1, s2, n_batches, mean_dev, sigma_dev],
             device=device,
         )
-        wp.synchronize_device(device)
+        books = counters.read_books()
+        if in_kernel:
+            # Mono beams: every primary is one unit-weight photon at the beam energy
+            # (max_energy == energy), so the device need not report emitted energy.
+            energy_emitted = n_histories * source.max_energy
+        elif emitted is not None:
+            energy_emitted = float(books["emitted"]) * ENERGY_QUANTUM_MEV
+
         if dose_to_water == 0:
-            energy_deposited = float(dep_total.numpy()[0]) * ENERGY_QUANTUM_MEV
+            energy_deposited = float(books["dep_total"]) * ENERGY_QUANTUM_MEV
+        dose = mean_dev.numpy().reshape(scoring.shape)
+        dose_sigma = sigma_dev.numpy().reshape(scoring.shape)
+        self._release_workspaces(device, workspaces)
         return TransportResult(
-            dose=mean_dev.numpy().reshape(scoring.shape),
-            dose_sigma=sigma_dev.numpy().reshape(scoring.shape),
+            dose=dose,
+            dose_sigma=dose_sigma,
             energy_emitted=energy_emitted,
             energy_deposited=energy_deposited,
             energy_escaped=energy_escaped,
@@ -1131,7 +1624,7 @@ class WarpEngine:
         # sentinel, matching pyradmc.transport.electron.substep_pieces.
         deposit_resolution = 0.0 if deposit_resolution_cm is None else deposit_resolution_cm
 
-        scoring = scoring_grid if scoring_grid is not None else ScoringGrid.for_grid(self.grid)
+        scoring = self._scoring_geometry(scoring_grid)
         n_beamlets = source.n_beamlets
         per_batch = n_histories_per_beamlet // n_batches
 
@@ -1149,8 +1642,14 @@ class WarpEngine:
             def _fit(d: str) -> int:
                 lanes_d = min(concurrent_batches, n_batches) if wp.get_device(d).is_cuda else 1
                 chunk_d = min(self._chunk_histories(d), n_beamlets * per_batch)
+                free = _device_free_bytes(d)
+                if free > 0:
+                    # The shard refits the engine's idle pooled queues to its own
+                    # size (releasing the rest) before allocating, so they budget
+                    # as free: the group size a fresh engine gets.
+                    free += self._idle_workspace_bytes(d)
                 return _auto_group_size(
-                    _device_free_bytes(d),
+                    free,
                     scoring.n_voxels,
                     n_beamlets,
                     lanes_d,
@@ -1227,6 +1726,11 @@ class WarpEngine:
         if len(device_list) > 1 or concurrent_batches > 1:
             for d in device_list:
                 wp.load_module(kernels, device=d)
+            if type(source) is SegmentedFanSource:
+                from pyradmc.backends.warp import segments
+
+                for d in device_list:
+                    wp.load_module(segments, device=d)
         if len(device_list) == 1:
             shard_results = [self._run_dij_shard(device_list[0], _next_group, **args)]
         else:
@@ -1258,7 +1762,7 @@ class WarpEngine:
             counts, indices, dose, sigma = blocks[group_start]
             assembler.add_sparse_block(group_start, counts, indices, dose, sigma)
 
-        use_lattice = isinstance(source, BeamletGridSource)
+        use_lattice = type(source) is BeamletGridSource  # exact type: see run()
         if use_lattice:
             emitted_energy = n_beamlets * n_histories_per_beamlet * source.max_energy
         elif emitted_quanta:
@@ -1308,7 +1812,7 @@ class WarpEngine:
         streams and always runs the sequential path.
         """
         gi, density, material = self._upload_grid(device)
-        si = _scoring_info(scoring, device)
+        si, voxel_mass = self._upload_scoring(scoring, device)
         tab = self._upload_tables(source.max_energy, pcut, ecut, device, with_gs=msc_model_gs == 1)
         n_beamlets = source.n_beamlets
         n_voxels = scoring.n_voxels
@@ -1321,28 +1825,27 @@ class WarpEngine:
         # source is host pre-sampled per beamlet and uploaded. Beamlet primaries are
         # photons carrying the source's statistical weight (the built-in routes are
         # unit-weight by construction; the other two take the weight from the
-        # sampler/emit, matching the reference Dij).
-        use_lattice = isinstance(source, BeamletGridSource)
+        # sampler/emit, matching the reference Dij). The segmented fan weights each
+        # primary by its segment's stack transmission, evaluated in-kernel.
+        use_lattice = type(source) is BeamletGridSource  # exact type: see run()
         use_spectral = type(source) is SpectralBeamletSource
+        # The segmented fan: exact type *and* exact fan type (the TransmissionMask
+        # precedent), so an override of either keeps the host route.
+        use_segments = type(source) is SegmentedFanSource and type(source.fan) is SpectralBeamSource
         beamlet_generator = None
-        emitted_counter = None
         spectral_tables = None
-        if not use_lattice and not use_spectral and source.warp_beamlet_sampler is not None:
+        segment_upload = None
+        in_kernel_builtin = use_lattice or use_spectral or use_segments
+        if not in_kernel_builtin and source.warp_beamlet_sampler is not None:
             beamlet_generator = kernels.make_beamlet_generator_kernel(source.warp_beamlet_sampler)
-            emitted_counter = wp.zeros(1, dtype=wp.int64, device=device)
-        if use_spectral:
-            spectrum = source.spectrum
-            spectral_tables = (
-                wp.array(spectrum.edges.astype(np.float32), dtype=float, device=device),
-                wp.array(spectrum.cdf.astype(np.float32), dtype=float, device=device),
-            )
-            emitted_counter = wp.zeros(1, dtype=wp.int64, device=device)
+        if use_segments:
+            # One stack layout + per-segment settings + the pre-solve's attenuation
+            # table, uploaded once per shard: every group indexes it by segment.
+            from pyradmc.backends.warp.segments import upload_segmented_fan
 
-        voxel_mass = wp.array(scoring.voxel_mass.reshape(n_voxels), dtype=wp.float64, device=device)
-        escaped = wp.zeros(1, dtype=wp.int64, device=device)
-        unscored = wp.zeros(1, dtype=wp.int64, device=device)
-        deposited = wp.zeros(1, dtype=wp.int64, device=device)
-        violations = wp.zeros(1, dtype=wp.int32, device=device)
+            segment_upload = upload_segmented_fan(source, device)
+        if use_spectral:
+            spectral_tables = self._spectral_tables(source.spectrum, device)
         shard = _DijShard()
         deposited_quanta = 0
         escaped_quanta = 0
@@ -1369,22 +1872,28 @@ class WarpEngine:
         lanes = 1
         if concurrent_batches > 1 and wp.get_device(device).is_cuda:
             lanes = min(concurrent_batches, n_batches)
+        # Queues, RNG slots and counters come from the engine's resident pool, one
+        # workspace per lane, shared with run(). The dense group maps stay per call:
+        # their size is budgeted from free memory at the call, and parking up to half
+        # the card between calls would starve whatever runs next.
+        workspaces = self._acquire_workspaces(device, lanes, max_capacity)
         lane_resources = [
-            _LaneResources(
-                stream=wp.Stream(device) if lanes > 1 else None,
-                staging=(
-                    wp.zeros(1, dtype=wp.int32, device="cpu", pinned=True) if lanes > 1 else None
-                ),
-                queues=[_upload_queue(max_capacity, device) for _ in range(4)],
-                slots=wp.zeros(max_capacity, dtype=wp.uint32, device=device),
-                edep=wp.zeros(max_group * n_voxels, dtype=wp.int64, device=device),
-            )
-            for _ in range(lanes)
+            ws.lane(wp.zeros(max_group * n_voxels, dtype=wp.int64, device=device), lanes > 1)
+            for ws in workspaces
         ]
-        fold_stream = wp.Stream(device) if lanes > 1 else None
+        counters = workspaces[0]
+        fold_stream = counters.fold_stream() if lanes > 1 else None
+        counters.clear_books()
+        escaped = counters.book("escaped")
+        unscored = counters.book("unscored")
+        deposited = counters.book("deposited")
+        violations = counters.book("violations")  # zeroed with the book
+        emitted_counter = None
+        if beamlet_generator is not None or use_spectral or use_segments:
+            emitted_counter = counters.book("emitted")
         s1 = wp.zeros(max_group * n_voxels, dtype=wp.float64, device=device)
         s2 = wp.zeros(max_group * n_voxels, dtype=wp.float64, device=device)
-        total_q = wp.zeros(1, dtype=wp.int64, device=device)
+        total_q = counters.book("total_q")
         # Truncation runs one thread per (column, chunk) rather than one per column;
         # the layout is scheduling only and the output is independent of it. Sized
         # from the widest group and this device's SM count, so the launch fills the
@@ -1403,6 +1912,7 @@ class WarpEngine:
             emitted_counter=emitted_counter,
             use_lattice=use_lattice,
             use_spectral=use_spectral,
+            use_segments=use_segments,
             spectral_tables=spectral_tables,
             seed=seed,
             n_per=n_histories_per_beamlet,
@@ -1447,6 +1957,8 @@ class WarpEngine:
                 group_arrays = self._upload_lattice_bounds(source, group_start, group, device)
             elif use_spectral:
                 group_arrays = self._upload_spectral_centers(source, group_start, group, device)
+            elif use_segments:
+                group_arrays = segment_upload  # shard-wide; segments index it directly
             # Clear only what this group uses: the dense maps are allocated at
             # max_group, so zero_() would charge a trailing short group the full
             # group's clear. Every dense launch below is dimensioned from ``group``,
@@ -1461,10 +1973,7 @@ class WarpEngine:
             # being the last one. Each lane keeps its own map, so clear them all.
             for res in lane_resources:
                 wp.launch(kernels.fill_int64, dim=span, inputs=[res.edep, 0], device=device)
-            total_q.zero_()
-            escaped.zero_()
-            unscored.zero_()
-            deposited.zero_()
+            counters.clear_pass_books()  # escaped, unscored, deposited, total_q
 
             if lanes == 1:
                 # One drain per batch, folded into s1/s2 before the next batch
@@ -1497,13 +2006,11 @@ class WarpEngine:
                     fold_args,
                 )
 
-            wp.synchronize_device(device)
-            if int(violations.numpy()[0]) != 0:
-                raise RuntimeError(
-                    "Woodcock majorant violated in the kernel despite table headroom. "
-                    "The geometry contains material or density the majorant "
-                    "declaration did not cover."
-                )
+            if lanes > 1:
+                # Order the lanes' streams before the default-stream reduction. The
+                # sequential path needs nothing here: every launch it made is on the
+                # default stream, and the readbacks below synchronize that stream.
+                wp.synchronize_device(device)
             # Turn the group's accumulated sums into per-column dose mean and sigma,
             # in place: each thread reads s1[tid]/s2[tid] and writes only its own
             # element, so aliasing the outputs onto the inputs is safe and saves two
@@ -1517,13 +2024,16 @@ class WarpEngine:
                 device=device,
             )
             mean_dev, sigma_dev = s1, s2
-            wp.synchronize_device(device)
+            # One readback for the group's books (per group, so no int64 sum spans
+            # more than it did); it synchronizes the default stream.
+            books = counters.read_books()
+            _check_majorant(books)
             if dose_to_water != 0:
-                deposited_quanta += int(deposited.numpy()[0])
+                deposited_quanta += books["deposited"]
             else:
-                deposited_quanta += int(total_q.numpy()[0])
-            escaped_quanta += int(escaped.numpy()[0])
-            unscored_quanta += int(unscored.numpy()[0])
+                deposited_quanta += books["total_q"]
+            escaped_quanta += books["escaped"]
+            unscored_quanta += books["unscored"]
 
             # Truncate + compact each column on the device; only the surviving sparse
             # CSC entries read back, never the dense per-column dose maps. col_max is
@@ -1555,7 +2065,6 @@ class WarpEngine:
                 ],
                 device=device,
             )
-            wp.synchronize_device(device)
             per_chunk = chunk_counts_dev.numpy()[: group * n_chunks].reshape(group, n_chunks)
             counts = per_chunk.sum(axis=1).astype(np.int32)
             column_base = np.zeros(group, dtype=np.int64)
@@ -1585,7 +2094,6 @@ class WarpEngine:
                 ],
                 device=device,
             )
-            wp.synchronize_device(device)
             # Copy, do not alias: on a cpu device ``numpy()`` is a *view* of the warp
             # array, and these blocks outlive both the reused ``counts_dev`` and this
             # group's compaction buffers. (The blocks are the sparse result itself, so
@@ -1609,7 +2117,8 @@ class WarpEngine:
         shard.escaped_quanta = escaped_quanta
         shard.unscored_quanta = unscored_quanta
         if emitted_counter is not None:
-            shard.emitted_quanta = int(emitted_counter.numpy()[0])
+            shard.emitted_quanta = counters.read_books()["emitted"]
+        self._release_workspaces(device, workspaces)
         return shard
 
     def _run_dij_batch(
@@ -1627,6 +2136,7 @@ class WarpEngine:
         emitted_counter,
         use_lattice,
         use_spectral,
+        use_segments,
         spectral_tables,
         seed,
         n_per,
@@ -1652,12 +2162,14 @@ class WarpEngine:
     ) -> float:
         """Generate and drain one batch of one group with a lane's resources.
 
-        The single routing point for the four generation routes; sequential and
+        The single routing point for the five generation routes; sequential and
         lane execution differ only in which :class:`_LaneResources` they pass.
-        ``group_arrays`` carries the active in-kernel route's per-group upload
-        (lattice bounds or spectral aperture centres). Returns the batch's
-        host-summed emitted energy (nonzero only on the pre-sampled route; the
-        in-kernel routes book emitted energy on the device).
+        ``group_arrays`` carries the active in-kernel route's upload: lattice
+        bounds or spectral aperture centres per group, or the segmented fan's
+        shard-wide :class:`~pyradmc.backends.warp.segments.SegmentedFanUpload`.
+        Returns the batch's host-summed emitted energy (nonzero only on the
+        pre-sampled route; the in-kernel routes book emitted energy on the
+        device).
         """
         if use_lattice:
             self._generate_group_lattice(
@@ -1693,7 +2205,7 @@ class WarpEngine:
                 dose_to_water,
                 device,
                 res.stream,
-                res.staging,
+                res.workspace,
             )
             return 0.0
         if use_spectral:
@@ -1732,7 +2244,45 @@ class WarpEngine:
                 emitted_counter,
                 device,
                 res.stream,
-                res.staging,
+                res.workspace,
+            )
+            return 0.0
+        if use_segments:
+            self._generate_group_segments(
+                source,
+                group_arrays,
+                group_start,
+                group,
+                seed,
+                n_per,
+                per_batch,
+                batch,
+                correlated,
+                chunk,
+                block_histories,
+                gi,
+                si,
+                density,
+                material,
+                tab,
+                res.queues,
+                res.slots,
+                res.edep,
+                escaped,
+                unscored,
+                deposited,
+                violations,
+                pcut,
+                ecut,
+                step_energy_fraction,
+                deposit_resolution,
+                msc_model_gs,
+                transport_electrons,
+                dose_to_water,
+                emitted_counter,
+                device,
+                res.stream,
+                res.workspace,
             )
             return 0.0
         if beamlet_generator is not None:
@@ -1769,7 +2319,7 @@ class WarpEngine:
                 emitted_counter,
                 device,
                 res.stream,
-                res.staging,
+                res.workspace,
             )
             return 0.0
         return self._generate_group_presampled(
@@ -1803,7 +2353,7 @@ class WarpEngine:
             dose_to_water,
             device,
             res.stream,
-            res.staging,
+            res.workspace,
         )
 
     def _fold_dij_batch(
@@ -2019,6 +2569,7 @@ class WarpEngine:
         is_device_ps,
         is_spectral,
         is_spectral_mask,
+        segment_plan,
         generator,
         spectral_tables,
         mask_table,
@@ -2080,7 +2631,7 @@ class WarpEngine:
                     *common,
                     device,
                     res.stream,
-                    res.staging,
+                    res.workspace,
                 )
             elif is_device_ps:
                 self._transport_chunk_device_buffer(
@@ -2089,7 +2640,17 @@ class WarpEngine:
                     emitted,
                     device,
                     res.stream,
-                    res.staging,
+                    res.workspace,
+                )
+            elif segment_plan is not None:
+                self._transport_chunk_segment_plan(
+                    source,
+                    segment_plan,
+                    *common,
+                    emitted,
+                    device,
+                    res.stream,
+                    res.workspace,
                 )
             elif is_spectral_mask:
                 self._transport_chunk_spectral_mask(
@@ -2100,7 +2661,7 @@ class WarpEngine:
                     emitted,
                     device,
                     res.stream,
-                    res.staging,
+                    res.workspace,
                 )
             elif is_spectral:
                 self._transport_chunk_spectral(
@@ -2110,7 +2671,7 @@ class WarpEngine:
                     emitted,
                     device,
                     res.stream,
-                    res.staging,
+                    res.workspace,
                 )
             elif generator is not None:
                 self._transport_chunk_wrapped(
@@ -2119,7 +2680,7 @@ class WarpEngine:
                     emitted,
                     device,
                     res.stream,
-                    res.staging,
+                    res.workspace,
                 )
             else:
                 emitted_energy += self._transport_chunk_presampled(
@@ -2127,7 +2688,7 @@ class WarpEngine:
                     *common,
                     device,
                     res.stream,
-                    res.staging,
+                    res.workspace,
                 )
             history += n_chunk
             remaining -= n_chunk
@@ -2163,7 +2724,7 @@ class WarpEngine:
         dose_to_water,
         device,
         stream=None,
-        staging=None,
+        workspace=None,
     ) -> None:
         """Generate one chunk of primaries and drain all queues."""
         q_particle, q_particle_alt, q_other, q_other_alt = queues
@@ -2207,7 +2768,7 @@ class WarpEngine:
             dose_to_water,
             device,
             stream,
-            staging,
+            workspace,
         )
 
     def _transport_chunk_spectral(
@@ -2239,7 +2800,7 @@ class WarpEngine:
         emitted,
         device,
         stream=None,
-        staging=None,
+        workspace=None,
     ) -> None:
         """Generate one spectral-beam chunk in-kernel, then drain all queues.
 
@@ -2313,7 +2874,7 @@ class WarpEngine:
             dose_to_water,
             device,
             stream,
-            staging,
+            workspace,
         )
 
     def _transport_chunk_spectral_mask(
@@ -2346,7 +2907,7 @@ class WarpEngine:
         emitted,
         device,
         stream=None,
-        staging=None,
+        workspace=None,
     ) -> None:
         """Generate a spectral fan and transmission-mask it entirely on-device."""
         q_photon, q_photon_alt, q_electron, q_electron_alt = queues
@@ -2435,7 +2996,120 @@ class WarpEngine:
             dose_to_water,
             device,
             stream,
-            staging,
+            workspace,
+        )
+
+    def _transport_chunk_segment_plan(
+        self,
+        source,
+        segment_plan,
+        seed,
+        history_offset,
+        n_chunk,
+        gi,
+        si,
+        density,
+        material,
+        tab,
+        queues,
+        slots,
+        edep,
+        escaped,
+        unscored,
+        deposited,
+        violations,
+        pcut,
+        ecut,
+        step_energy_fraction,
+        deposit_resolution,
+        msc_model_gs,
+        transport_electrons,
+        dose_to_water,
+        emitted,
+        device,
+        stream=None,
+        workspace=None,
+    ) -> None:
+        """Generate one segmented-plan chunk in-kernel, then drain all queues.
+
+        Each primary chooses its segment by its normalized share and carries that
+        segment's transmission
+        (:func:`~pyradmc.backends.warp.segments.generate_segmented_plan`); fixed
+        thread slots into the photon queue, emitted energy booked per primary.
+        """
+        from pyradmc.backends.warp.segments import generate_segmented_plan
+
+        q_photon, q_photon_alt, q_electron, q_electron_alt = queues
+        for q in queues:
+            _reset_count(q, device, stream)
+        upload, selection_cdf = segment_plan
+        fan = source.segments.fan
+        focal = fan.focal_point
+        center = fan.center
+        u_axis = fan.u_axis
+        v_axis = fan.v_axis
+        _launch(
+            generate_segmented_plan,
+            n_chunk,
+            [
+                seed,
+                history_offset,
+                selection_cdf,
+                int(selection_cdf.shape[0]),
+                upload.edges,
+                upload.cdf,
+                int(upload.cdf.shape[0]),
+                focal[0],
+                focal[1],
+                focal[2],
+                center[0],
+                center[1],
+                center[2],
+                u_axis[0],
+                u_axis[1],
+                u_axis[2],
+                v_axis[0],
+                v_axis[1],
+                v_axis[2],
+                fan.width_u,
+                fan.width_v,
+                upload.stack,
+                upload.segments,
+                upload.mu,
+                slots,
+                emitted,
+                q_photon,
+            ],
+            device,
+            stream,
+        )
+        _set_count(q_photon, n_chunk, device, stream)
+        self._drain_queues(
+            q_photon,
+            q_photon_alt,
+            q_electron,
+            q_electron_alt,
+            gi,
+            si,
+            density,
+            material,
+            tab,
+            slots,
+            edep,
+            escaped,
+            unscored,
+            deposited,
+            violations,
+            pcut,
+            ecut,
+            step_energy_fraction,
+            deposit_resolution,
+            msc_model_gs,
+            transport_electrons,
+            dose_to_water,
+            device,
+            stream,
+            workspace,
         )
 
     def _transport_chunk_wrapped(
@@ -2466,7 +3140,7 @@ class WarpEngine:
         emitted,
         device,
         stream=None,
-        staging=None,
+        workspace=None,
     ) -> None:
         """Generate one chunk in-kernel via a wrapped user sampler, then drain.
 
@@ -2513,7 +3187,7 @@ class WarpEngine:
             dose_to_water,
             device,
             stream,
-            staging,
+            workspace,
         )
 
     def _transport_chunk_presampled(
@@ -2543,7 +3217,7 @@ class WarpEngine:
         dose_to_water,
         device,
         stream=None,
-        staging=None,
+        workspace=None,
     ) -> float:
         """Host-sample a chunk via ``source.sample_batch``, seed queues by kind, drain.
 
@@ -2622,7 +3296,7 @@ class WarpEngine:
             dose_to_water,
             device,
             stream,
-            staging,
+            workspace,
         )
 
         latent = np.where(pt == 3, 2.0 * ELECTRON_MASS_MEV, 0.0)
@@ -2660,7 +3334,7 @@ class WarpEngine:
         emitted,
         device,
         stream=None,
-        staging=None,
+        workspace=None,
     ) -> None:
         """Seed the transport queues straight from a device pre-solve buffer, then drain.
 
@@ -2724,7 +3398,7 @@ class WarpEngine:
             dose_to_water,
             device,
             stream,
-            staging,
+            workspace,
         )
 
     def _seed_queue(
@@ -2796,80 +3470,174 @@ class WarpEngine:
         dose_to_water,
         device,
         stream=None,
-        staging=None,
+        workspace=None,
     ) -> None:
         """Ping-pong the photon and electron kernels until every queue is empty.
+
+        One *round* is a photon launch then an electron launch; each consumes its
+        queue, pushing photons and electrons into the others. The schedule
+        (``drain_rounds``, see the class docstring) decides only how often the
+        counts come back to the host: a run is a function of the multiset of
+        particles each launch consumes, and an empty launch consumes nothing, so
+        every schedule gives the same bits.
 
         With ``stream`` set (a Dij batch lane), every launch, count reset, and
         count readback is ordered on that stream, so lanes on the same device
         never observe each other's queues.
         """
+
+        def photon_round(dim, q_in, q_electron_out, q_photon_out, max_blocks=0):
+            _launch(
+                kernels.photon_kernel,
+                dim,
+                [
+                    gi,
+                    si,
+                    density,
+                    material,
+                    tab,
+                    q_in,
+                    q_electron_out,
+                    q_photon_out,
+                    slots,
+                    edep,
+                    escaped,
+                    unscored,
+                    deposited,
+                    pcut,
+                    ecut,
+                    1 if transport_electrons else 0,
+                    dose_to_water,
+                    violations,
+                ],
+                device,
+                stream,
+                max_blocks,
+            )
+
+        def electron_round(dim, q_in, q_photon_out, q_electron_out, max_blocks=0):
+            _launch(
+                kernels.electron_kernel,
+                dim,
+                [
+                    gi,
+                    si,
+                    density,
+                    material,
+                    tab,
+                    q_in,
+                    q_photon_out,
+                    q_electron_out,
+                    slots,
+                    edep,
+                    escaped,
+                    unscored,
+                    deposited,
+                    pcut,
+                    ecut,
+                    step_energy_fraction,
+                    deposit_resolution,
+                    msc_model_gs,
+                    dose_to_water,
+                ],
+                device,
+                stream,
+                max_blocks,
+            )
+
+        if workspace is None:
+            # Every engine route passes its lane's pooled workspace; a bare call
+            # gets a throwaway one, whose buffers are made on demand below.
+            workspace = _Workspace(device)
+        rounds = self.drain_rounds
+        if rounds is None:
+            rounds = (
+                self._drain.last_rounds.get(device, _DRAIN_FIRST_BLOCK)
+                if wp.get_device(device).is_cuda
+                else 0
+            )
+        if rounds == 0:
+            # Host-sized: read each count back and launch exactly that many threads.
+            staging = workspace.staging
+            while True:
+                n_photon = _queue_count(q_photon, stream, staging)
+                if n_photon > 0:
+                    photon_round(n_photon, q_photon, q_electron, q_photon_alt)
+                    _reset_count(q_photon, device, stream)
+                    q_photon, q_photon_alt = q_photon_alt, q_photon
+
+                n_electron = _queue_count(q_electron, stream, staging)
+                if n_electron > 0:
+                    electron_round(n_electron, q_electron, q_photon, q_electron_alt)
+                    _reset_count(q_electron, device, stream)
+                    q_electron, q_electron_alt = q_electron_alt, q_electron
+
+                if n_photon == 0 and n_electron == 0:
+                    break
+            return
+
+        # Blind: launch whole blocks of rounds at capacity, read back once per block.
+        # Every queue a launch consumes is retired by a one-thread kernel on the same
+        # stream, which books overflow and the last busy round on the device; the
+        # alternate queue a launch pushes into is always a retired (empty) one.
+        status, host = workspace.drain_buffers(stream)
+        _launch(kernels.fill_int32, kernels.DRAIN_STATUS_SLOTS, [status, 0], device, stream)
+        capacity = q_photon.capacity
+        # One launch dimension serves every queue: they must share one capacity.
+        assert (
+            q_photon_alt.capacity == q_electron.capacity == q_electron_alt.capacity == capacity
+        ), "drain queues differ in capacity"
+        max_blocks = _blind_max_blocks(device, capacity, self.queue_factor)
+        issued = 0
+        block = rounds
         while True:
-            n_photon = _queue_count(q_photon, stream, staging)
-            if n_photon > 0:
+            for _ in range(block):
+                photon_round(capacity, q_photon, q_electron, q_photon_alt, max_blocks)
                 _launch(
-                    kernels.photon_kernel,
-                    n_photon,
-                    [
-                        gi,
-                        si,
-                        density,
-                        material,
-                        tab,
-                        q_photon,
-                        q_electron,
-                        q_photon_alt,
-                        slots,
-                        edep,
-                        escaped,
-                        unscored,
-                        deposited,
-                        pcut,
-                        ecut,
-                        1 if transport_electrons else 0,
-                        dose_to_water,
-                        violations,
-                    ],
+                    kernels.retire_queue,
+                    1,
+                    [q_photon.count, capacity, issued, status],
                     device,
                     stream,
                 )
-                _reset_count(q_photon, device, stream)
                 q_photon, q_photon_alt = q_photon_alt, q_photon
-
-            n_electron = _queue_count(q_electron, stream, staging)
-            if n_electron > 0:
+                electron_round(capacity, q_electron, q_photon, q_electron_alt, max_blocks)
                 _launch(
-                    kernels.electron_kernel,
-                    n_electron,
-                    [
-                        gi,
-                        si,
-                        density,
-                        material,
-                        tab,
-                        q_electron,
-                        q_photon,
-                        q_electron_alt,
-                        slots,
-                        edep,
-                        escaped,
-                        unscored,
-                        deposited,
-                        pcut,
-                        ecut,
-                        step_energy_fraction,
-                        deposit_resolution,
-                        msc_model_gs,
-                        dose_to_water,
-                    ],
+                    kernels.retire_queue,
+                    1,
+                    [q_electron.count, capacity, issued, status],
                     device,
                     stream,
                 )
-                _reset_count(q_electron, device, stream)
                 q_electron, q_electron_alt = q_electron_alt, q_electron
-
+                issued += 1
+            _launch(
+                kernels.snapshot_drain_status,
+                1,
+                [q_photon.count, q_electron.count, status],
+                device,
+                stream,
+            )
+            if stream is None:
+                books = status.numpy()
+            else:
+                wp.copy(host, status, stream=stream)
+                wp.synchronize_stream(stream)
+                books = host.numpy()
+            n_photon = int(books[kernels.DRAIN_PHOTON_COUNT])
+            n_electron = int(books[kernels.DRAIN_ELECTRON_COUNT])
+            overflow = max(int(books[kernels.DRAIN_OVERFLOW]), n_photon, n_electron)
+            if overflow > capacity:
+                raise RuntimeError(
+                    f"particle queue overflow: {overflow} > capacity {capacity}. "
+                    "Lower chunk_size or raise queue_factor on the WarpEngine."
+                )
             if n_photon == 0 and n_electron == 0:
                 break
+            block = rounds if self.drain_rounds is not None else _DRAIN_FOLLOW_UP_BLOCK
+        self._drain.last_rounds[device] = min(
+            max(1, int(books[kernels.DRAIN_LAST_BUSY_ROUND])), _DRAIN_MAX_BLOCK
+        )
 
     def _generate(
         self, source, kind, seed, history_offset, n, queue, slots, device, stream=None
@@ -2969,7 +3737,7 @@ class WarpEngine:
         dose_to_water,
         device,
         stream=None,
-        staging=None,
+        workspace=None,
     ) -> None:
         """Built-in lattice: generate one batch of the group's block in-kernel, in chunks."""
         x_lo, x_extent, y_lo, y_extent = lattice_bounds
@@ -3027,7 +3795,7 @@ class WarpEngine:
                 dose_to_water,
                 device,
                 stream,
-                staging,
+                workspace,
             )
             t += n_chunk
 
@@ -3082,7 +3850,7 @@ class WarpEngine:
         emitted,
         device,
         stream=None,
-        staging=None,
+        workspace=None,
     ) -> None:
         """Built-in spectral Dij route: generate one batch of the group in-kernel.
 
@@ -3162,7 +3930,131 @@ class WarpEngine:
                 dose_to_water,
                 device,
                 stream,
-                staging,
+                workspace,
+            )
+            t += n_chunk
+
+    def _generate_group_segments(
+        self,
+        source,
+        upload,
+        group_start,
+        group,
+        seed,
+        n_per,
+        per_batch,
+        batch,
+        correlated,
+        chunk,
+        block_histories,
+        gi,
+        si,
+        density,
+        material,
+        tab,
+        queues,
+        slots,
+        edep,
+        escaped,
+        unscored,
+        deposited,
+        violations,
+        pcut,
+        ecut,
+        step_energy_fraction,
+        deposit_resolution,
+        msc_model_gs,
+        transport_electrons,
+        dose_to_water,
+        emitted,
+        device,
+        stream=None,
+        workspace=None,
+    ) -> None:
+        """Built-in segmented-fan Dij route: generate one batch of the group in-kernel.
+
+        The spectral route's block chunking, with every primary weighted by its
+        segment's stack transmission on the device
+        (:func:`~pyradmc.backends.warp.segments.generate_segmented_fan`); the kernel
+        books ``weight * energy`` into ``emitted`` per primary.
+        """
+        from pyradmc.backends.warp.segments import generate_segmented_fan
+
+        fan = source.fan
+        focal = fan.focal_point
+        center = fan.center
+        u_axis = fan.u_axis
+        v_axis = fan.v_axis
+        t = 0
+        while t < block_histories:
+            n_chunk = min(chunk, block_histories - t)
+            for q in queues:
+                _reset_count(q, device, stream)
+            _launch(
+                generate_segmented_fan,
+                n_chunk,
+                [
+                    seed,
+                    group_start,
+                    n_per,
+                    per_batch,
+                    batch,
+                    t,
+                    1 if correlated else 0,
+                    upload.edges,
+                    upload.cdf,
+                    int(upload.cdf.shape[0]),
+                    focal[0],
+                    focal[1],
+                    focal[2],
+                    center[0],
+                    center[1],
+                    center[2],
+                    u_axis[0],
+                    u_axis[1],
+                    u_axis[2],
+                    v_axis[0],
+                    v_axis[1],
+                    v_axis[2],
+                    fan.width_u,
+                    fan.width_v,
+                    upload.stack,
+                    upload.segments,
+                    upload.mu,
+                    slots,
+                    emitted,
+                    queues[0],
+                ],
+                device,
+                stream,
+            )
+            _set_count(queues[0], n_chunk, device, stream)
+            self._drain_queues(
+                queues[0],
+                queues[1],
+                queues[2],
+                queues[3],
+                gi,
+                si,
+                density,
+                material,
+                tab,
+                slots,
+                edep,
+                escaped,
+                unscored,
+                deposited,
+                violations,
+                pcut,
+                ecut,
+                step_energy_fraction,
+                deposit_resolution,
+                msc_model_gs,
+                transport_electrons,
+                dose_to_water,
+                device,
+                stream,
+                workspace,
             )
             t += n_chunk
 
@@ -3200,7 +4092,7 @@ class WarpEngine:
         emitted,
         device,
         stream=None,
-        staging=None,
+        workspace=None,
     ) -> None:
         """Advanced Dij route: generate one batch of the group in-kernel via a sampler.
 
@@ -3258,7 +4150,7 @@ class WarpEngine:
                 dose_to_water,
                 device,
                 stream,
-                staging,
+                workspace,
             )
             t += n_chunk
 
@@ -3294,7 +4186,7 @@ class WarpEngine:
         dose_to_water,
         device,
         stream=None,
-        staging=None,
+        workspace=None,
     ) -> float:
         """Host pre-sample one batch of each beamlet's primaries and upload them.
 
@@ -3369,12 +4261,20 @@ class WarpEngine:
                     dose_to_water,
                     device,
                     stream,
-                    staging,
+                    workspace,
                 )
                 r0 = r1
         return emitted
 
     def _upload_grid(self, device: str):
+        """Return the transport grid (and field) on ``device``, uploaded once per device."""
+        state = self._state(device)
+        with state.lock:
+            if state.grid is None:
+                state.grid = self._build_grid(device)
+            return state.grid
+
+    def _build_grid(self, device: str):
         gi = GridInfo()
         gi.x_lo, gi.y_lo, gi.z_lo = self.grid.origin
         gi.x_hi, gi.y_hi, gi.z_hi = self.grid.upper_corner
@@ -3427,6 +4327,20 @@ class WarpEngine:
     def _upload_tables(
         self, e_max: float, pcut: float, ecut: float, device: str, with_gs: bool = False
     ) -> Tables:
+        """Return the flattened tables on ``device``, uploaded once per key and device.
+
+        Mirrors the host cache's ``(ecut, pcut, e_max)`` key, plus ``with_gs``
+        because the struct differs; the Goudsmit-Saunderson grid — the one large
+        table, independent of ``pcut`` — is uploaded once per ``(ecut, e_max)`` and
+        shared by every struct that carries it. The struct is read-only to the
+        kernels, so concurrent calls on one device may share it.
+        """
+        state = self._state(device)
+        full_key = (ecut, pcut, e_max, with_gs)
+        with state.lock:
+            tab = _lru_get(state.tables, full_key)
+        if tab is not None:
+            return tab
         key = (ecut, pcut, e_max)
         with self._table_cache_lock:
             host = self._table_cache.get(key)
@@ -3435,31 +4349,45 @@ class WarpEngine:
                     ecut=ecut, pcut=pcut, e_max=e_max * _E_MAX_MARGIN
                 )
                 self._table_cache[key] = host
+        gs_host = self._gs_grid_host(host, ecut, e_max) if with_gs else None
+        with state.lock:
+            tab = _lru_get(state.tables, full_key)
+            if tab is None:
+                tab = self._build_tables(state, host, gs_host, ecut, pcut, e_max, device)
+                _lru_put(state.tables, full_key, tab, _TABLES_RESIDENT)
+            return tab
+
+    def _build_tables(
+        self, state: _DeviceState, host, gs_host, ecut, pcut, e_max, device
+    ) -> Tables:
+        """Assemble a ``Tables`` struct from device arrays shared across structs."""
+        base_key = ("base", ecut, pcut, e_max)
+        base = _lru_get(state.table_arrays, base_key)
+        if base is None:
+            base = {
+                name: wp.array(getattr(host, name).astype(np.float32), dtype=float, device=device)
+                for name in (
+                    "mu_compton",
+                    "mu_photo",
+                    "mu_pair",
+                    "mu_rayleigh",
+                    "majorant",
+                    "stopping_restricted",
+                    "stopping_radiative",
+                    "moller",
+                    "csda_range",
+                    "scattering_power",
+                    "log_eta",
+                    "restricted_range",
+                    "energy_of_restricted_range",
+                    "coherent_x",
+                    "coherent_cumulative",
+                )
+            }
+            _lru_put(state.table_arrays, base_key, base, 2 * _TABLES_RESIDENT)
         tab = Tables()
-        for table_name in (
-            "mu_compton",
-            "mu_photo",
-            "mu_pair",
-            "mu_rayleigh",
-            "majorant",
-            "stopping_restricted",
-            "stopping_radiative",
-            "moller",
-            "csda_range",
-            "scattering_power",
-            "log_eta",
-            "restricted_range",
-            "energy_of_restricted_range",
-        ):
-            setattr(
-                tab,
-                table_name,
-                wp.array(getattr(host, table_name).astype(np.float32), dtype=float, device=device),
-            )
-        tab.coherent_x = wp.array(host.coherent_x.astype(np.float32), dtype=float, device=device)
-        tab.coherent_cumulative = wp.array(
-            host.coherent_cumulative.astype(np.float32), dtype=float, device=device
-        )
+        for name, arr in base.items():
+            setattr(tab, name, arr)
         tab.p_log_e_min = host.photon_log_e_min
         tab.p_inv_dlog = host.photon_inv_dlog
         tab.e_log_e_min = host.electron_log_e_min
@@ -3468,9 +4396,13 @@ class WarpEngine:
         tab.r_inv_dlog = host.range_inv_dlog
         tab.n_points = host.n_points
         tab.n_coherent = host.n_coherent
-        if with_gs:
-            gs_host = self._gs_grid_host(host, ecut, e_max)
-            tab.gs_values = wp.array(gs_host.values.astype(np.float32), dtype=float, device=device)
+        if gs_host is not None:
+            gs_key = ("gs", ecut, e_max)
+            gs_values = _lru_get(state.table_arrays, gs_key)
+            if gs_values is None:
+                gs_values = wp.array(gs_host.values.astype(np.float32), dtype=float, device=device)
+                _lru_put(state.table_arrays, gs_key, gs_values, 2 * _TABLES_RESIDENT)
+            tab.gs_values = gs_values
             tab.gs_ix0 = gs_host.ix0
             tab.gs_iy0 = gs_host.iy0
             tab.gs_n_eta = gs_host.values.shape[0]

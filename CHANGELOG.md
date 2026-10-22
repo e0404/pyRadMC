@@ -17,6 +17,30 @@ without a field, so results are not byte-identical to the previous release.
 
 ### Added
 
+- **Cheaper head pre-solve setup.** The attenuation curves the collimator pre-solve
+  and `CollimatedSource` read through `CrossSectionSource` are memoised per source object
+  (`pyradmc.geometry.mucache`; `mucache.clear()` drops them), and `presolve_head_device`
+  keeps the device uploads of its tables and stack. A setup-dominated pre-solve drops from
+  5.1 to 1.05 ms; the exit phase space is bit-identical on cpu and cuda. A
+  `CrossSectionSource` must now not change its answers after construction. `MLC` leaf
+  fields are stored as tuples of floats, and a numpy-scalar device density is coerced to
+  a Python float (a numpy `float32` density used to build float32 tables).
+
+- **All segments of one collimated fan in one engine launch.**
+  `pyradmc.geometry.segments.SegmentedFanSource` makes each collimator setting of a
+  `SpectralBeamSource` fan a beamlet: `run_dij` returns one dose column per segment
+  (the Dij of a segmented plan), and its `plan(weights)` view (`SegmentedPlanSource`)
+  returns the MU-mixed plan dose from one `run` — `sum_s (w_s / W) column_s` per
+  history, to be scaled by `total_weight` `W`. Physics is the head pre-solve's
+  `mode="attenuation"` without an air column (narrow-beam transmission; no head
+  scatter, contaminant electrons or air attenuation). Settings are per-segment jaw-edge
+  and leaf-tip arrays over one template stack (`with_settings` for an optimizer's
+  per-iteration update, no `MLC` objects built). The Warp engine generates the exact
+  types in-kernel; subclasses keep host pre-sampling. Measured on a laptop RTX 4070,
+  10 segments x 400k histories: 6.0x (Dij) and 7.0x (plan) faster than ten
+  attenuation pre-solves plus runs. Demonstrated by `examples/segmented_fan_demo.py`.
+  New Warp module `pyradmc.backends.warp.segments`.
+
 - Charged-particle transport in a **static magnetic field** (MR-linac dose).
   `pyradmc.MagneticField` — uniform, one vector per transport voxel, or a trilinear
   vector map on its own rectilinear grid, in tesla and the engine frame — is handed to
@@ -47,6 +71,9 @@ without a field, so results are not byte-identical to the previous release.
   it under-reports the plan variance by a measured 1.02 / 1.07 / 1.4 at those pitches,
   because the positive cross-column covariance is not carried. Pinned on the reference
   engine in `tests/dij/test_dij_correlated.py`.
+- `WarpEngine.release_device_memory()`: drops every device array the engine keeps
+  between calls (see Changed), on every device; host-side table caches are kept.
+  Results are unaffected.
 
 ### Fixed
 
@@ -98,6 +125,18 @@ without a field, so results are not byte-identical to the previous release.
 
 ### Changed
 
+- Warp queue drain: rounds are launched blind at queue capacity and the counts read back
+  once per block instead of before every launch (`WarpEngine(drain_rounds=...)`; default
+  adaptive on CUDA, host-sized on cpu, `0` restores the old schedule). Results are
+  byte-identical on each target; measured 0.93x wall on a loop of small collimated runs
+  and 0.97x on a 1e6-history open field (RTX 4070, contended).
+
+- The in-kernel spectral generators (open field, transmission-masked, beamlet fan)
+  now draw through one single-source sampler, `pyradmc.geometry.fan.fan_primary`
+  (with `cdf_lower_bound` and the discrete selector `select_by_cdf`), instead of a
+  copy each. No dose moves: their queue output was verified bit-identical before and
+  after on cpu and cuda.
+
 - `examples/magnetic_field_demo.py` docstring: the electron return effect is *not*
   "much weaker" at 0.35 T for a broad beam over a thick gap — it is as large as at
   1.5 T (Raaijmakers et al. 2008), and the lateral skew of the exit profile is wider at
@@ -109,6 +148,24 @@ without a field, so results are not byte-identical to the previous release.
   quantified as above rather than stated as a blanket prohibition; the
   `DijResult.variance_csc` caveat says what the quadrature omits and points at the
   measurement. The export itself is unchanged.
+- **`WarpEngine` keeps its device state resident between calls**, so a loop of small
+  calls (a plan optimization) no longer pays the uploads and allocations each time:
+  ten collimated 400k-history runs 111-120 -> 20-22 ms, a 64-history run 7.4-8.7 ->
+  0.88-0.92 ms on a laptop RTX 4070 (details in `docs/decisions.md`). Kept per device:
+  the tables (four most recent `(ecut, pcut, e_max, with_gs)` keys), voxel maps and
+  field, the last scoring geometry, recent spectra, and the transport queues refitted
+  exactly to each call. **Device memory therefore stays held between calls** while the
+  engine lives — the tables and maps plus the last call's queues, about 0.9 GB per
+  batch lane after a full-width `run` at the auto chunk size; call
+  `release_device_memory()` to free it. Peak memory per call is unchanged. Results are
+  byte-identical to a fresh engine on each target (test-pinned). The energy books are
+  read in one transfer per batch or group, which also carries the majorant-violation
+  check.
+- `ScoringGrid.voxel_mass` and `CylindricalScoringGrid.voxel_mass` are now private
+  read-only copies, like `Spectrum`'s arrays: mutating the mass map after
+  construction raises, and mutating the array passed in no longer affects the grid.
+  The Warp engine matches a scoring grid by identity, so an in-place edit would
+  otherwise have scored against the stale upload.
 
 ## [0.2.1] — 2026-09-06
 

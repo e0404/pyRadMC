@@ -72,6 +72,7 @@ from numpy.typing import NDArray
 from pyradmc import ECUT_MEV, ELECTRON_MASS_MEV, PCUT_MEV
 from pyradmc.data.interface import CrossSectionSource, PhotonProcess
 from pyradmc.data.materials import AIR
+from pyradmc.geometry import mucache
 from pyradmc.geometry.collimation import BeamFrame, BeamLimitingStack
 from pyradmc.geometry.phasespace import (
     IAEA_ELECTRON,
@@ -136,28 +137,23 @@ class _MuTables:
                 "a device or air material index is beyond this cross-section source; "
                 "tungsten devices need the tabulated backend"
             )
-        energies = np.geomspace(e_min, max(e_max, e_min * (1.0 + 1e-9)), n_table)
+        # Mass-coefficient curves come from the per-source memo (mucache): the same
+        # scalar queries at the same float(e) nodes as the loops they replace, so the
+        # tables are bit-identical, but paid once per (source, material, grid) rather
+        # than once per call. Only the density scaling and the log are per call.
+        e_hi = max(e_max, e_min * (1.0 + 1e-9))
+        energies = mucache.energy_grid(e_min, e_hi, n_table)
         self._log_energies = np.log(energies)
-        self._log_total = np.stack(
-            [
-                np.log(
-                    [
-                        density * cross_sections.mu_over_rho_total(float(e), material)
-                        for e in energies
-                    ]
-                )
-                for material, density in pairs
-            ]
-        )
+        total_rows = []
         compton_rows = []
         for material, density in pairs:
-            values = np.array(
-                [
-                    density * cross_sections.mu_over_rho(float(e), material, PhotonProcess.COMPTON)
-                    for e in energies
-                ]
+            _, total = mucache.mu_curve(cross_sections, material, e_min, e_hi, n_table, None)
+            _, compton = mucache.mu_curve(
+                cross_sections, material, e_min, e_hi, n_table, PhotonProcess.COMPTON
             )
-            compton_rows.append(np.log(np.maximum(values, 1e-300)))
+            total_rows.append(np.log(density * total))
+            compton_rows.append(np.log(np.maximum(density * compton, 1e-300)))
+        self._log_total = np.stack(total_rows)
         self._log_compton = np.stack(compton_rows)
 
     def total(self, row: int | NDArray[np.int64], energies: _F64) -> _F64:
@@ -177,6 +173,29 @@ class _MuTables:
             mask = row == index
             out[mask] = np.exp(np.interp(log_e[mask], self._log_energies, table[int(index)]))
         return out
+
+
+def mu_tables(
+    cross_sections: CrossSectionSource,
+    pairs: tuple[tuple[int, float], ...],
+    e_min: float,
+    e_max: float,
+    n_table: int,
+) -> _MuTables:
+    """Memoised :class:`_MuTables`: one build per (source, pairs, grid).
+
+    The tables are read-only after construction, so repeated pre-solves with the
+    same device materials (an aperture optimizer's inner loop) share one object,
+    and, on the Warp backend, its device upload. See :mod:`pyradmc.geometry.mucache`.
+    """
+    key = ("mu_tables", pairs, float(e_min), float(e_max), int(n_table))
+    cached = mucache.assembled(cross_sections, key)
+    if cached is not None:
+        assert isinstance(cached, _MuTables)
+        return cached
+    tables = _MuTables(cross_sections, pairs, e_min, e_max, n_table)
+    mucache.store_assembled(cross_sections, key, tables)
+    return tables
 
 
 def _sample_compton_ratios(energies: _F64, generator: np.random.Generator) -> _F64:
@@ -416,11 +435,11 @@ def presolve_head(
 
     pairs: tuple[tuple[int, float], ...] = ()
     if stack is not None:
-        pairs = tuple(zip(stack.materials, stack.densities, strict=True))
+        pairs = tuple((m, float(d)) for m, d in zip(stack.materials, stack.densities, strict=True))
     air_row = len(pairs)
     if air is not None:
-        pairs = (*pairs, (air.material, air.density))
-    tables = _MuTables(cross_sections, pairs, e_min, source.max_energy, n_table) if pairs else None
+        pairs = (*pairs, (air.material, float(air.density)))
+    tables = mu_tables(cross_sections, pairs, e_min, source.max_energy, n_table) if pairs else None
 
     population = _Population()
     dropped = 0.0

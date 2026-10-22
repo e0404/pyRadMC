@@ -64,6 +64,11 @@ from pyradmc.transport.electron import (
 from pyradmc.transport.particles import ELECTRON, PHOTON, POSITRON
 
 __all__ = [
+    "DRAIN_ELECTRON_COUNT",
+    "DRAIN_LAST_BUSY_ROUND",
+    "DRAIN_OVERFLOW",
+    "DRAIN_PHOTON_COUNT",
+    "DRAIN_STATUS_SLOTS",
     "ENERGY_QUANTUM_MEV",
     "TRUNCATION_TARGET_THREADS",
     "GridInfo",
@@ -92,6 +97,8 @@ __all__ = [
     "make_beamlet_generator_kernel",
     "make_generator_kernel",
     "photon_kernel",
+    "retire_queue",
+    "snapshot_drain_status",
     "truncation_chunk_layout",
 ]
 
@@ -158,6 +165,7 @@ slab_entry_distance = _p.slab_entry_distance
 distance_to_voxel_boundary = _p.distance_to_voxel_boundary
 voxel_face_axis = _p.voxel_face_axis
 nudge_across_face = _p.nudge_across_face
+fan_primary = _p.fan_primary
 
 
 @wp.struct
@@ -273,7 +281,9 @@ class Queue:
 
     Overflow does not write (the slot does not exist) but the counter keeps
     counting, so the engine detects ``count > capacity`` after the launch and
-    raises — secondaries are never silently dropped.
+    raises — secondaries are never silently dropped. (Under the blind drain
+    schedule the consuming launch clamps to capacity and ``retire_queue`` books
+    the overflow on the device for the next readback.)
 
     ``beamlet`` is the Dij tag: the group-local index of the beamlet whose
     primary this particle descends from. Secondaries inherit it unchanged, so a
@@ -981,6 +991,48 @@ def fill_float64(a: wp.array(dtype=wp.float64), value: wp.float64):
     a[wp.tid()] = value
 
 
+# Drain-status slots (see ``retire_queue`` / ``snapshot_drain_status``).
+DRAIN_PHOTON_COUNT = 0
+DRAIN_ELECTRON_COUNT = 1
+DRAIN_LAST_BUSY_ROUND = 2
+DRAIN_OVERFLOW = 3
+DRAIN_STATUS_SLOTS = 4
+
+
+@wp.kernel
+def retire_queue(
+    count: wp.array(dtype=wp.int32),
+    capacity: int,
+    round_index: int,
+    status: wp.array(dtype=wp.int32),
+):
+    """Reset a queue a blind drain round has just consumed, keeping what it held.
+
+    Single-thread bookkeeping launched on the drain's stream after the kernel that
+    consumed the queue, so the count it reads is the count that kernel saw. It
+    records the latest round that had work (the engine's adaptive block size) and
+    any overflow: a blind launch clamps to capacity, so an overflowed queue would
+    otherwise be truncated without the host ever seeing its count.
+    """
+    n = count[0]
+    if n > 0:
+        status[DRAIN_LAST_BUSY_ROUND] = wp.max(status[DRAIN_LAST_BUSY_ROUND], round_index + 1)
+    if n > capacity:
+        status[DRAIN_OVERFLOW] = wp.max(status[DRAIN_OVERFLOW], n)
+    count[0] = 0
+
+
+@wp.kernel
+def snapshot_drain_status(
+    photon_count: wp.array(dtype=wp.int32),
+    electron_count: wp.array(dtype=wp.int32),
+    status: wp.array(dtype=wp.int32),
+):
+    """Gather both live queue counts next to the drain's books, for one readback."""
+    status[DRAIN_PHOTON_COUNT] = photon_count[0]
+    status[DRAIN_ELECTRON_COUNT] = electron_count[0]
+
+
 @wp.kernel
 def count_kept_per_column(
     mean: wp.array(dtype=wp.float64),
@@ -1227,6 +1279,10 @@ def photon_kernel(
     stay physical either way.
     """
     tid = wp.tid()
+    # A blind drain round launches at queue capacity; only the first ``count``
+    # slots hold particles. A launch sized from the count never takes this.
+    if tid >= wp.min(q_in.count[0], q_in.capacity):
+        return
     e = q_in.energy[tid]
     beamlet = q_in.beamlet[tid]
     base = beamlet * si.n_voxels
@@ -1591,6 +1647,9 @@ def electron_kernel(
     (E, material) the restricted stopping power charged the loss with.
     """
     tid = wp.tid()
+    # Blind drain rounds launch at capacity; see photon_kernel.
+    if tid >= wp.min(q_in.count[0], q_in.capacity):
+        return
     is_positron = q_in.kind[tid] == POSITRON
     e = q_in.energy[tid]
     # Nudge walked into the current voxel, charged by its first substep there.
@@ -2351,17 +2410,26 @@ def generate_spectral_beam(
     state = WarpRNGState()
     state.slots = slots
     state.idx = tid
-    u_bin = uniform(state)
-    u_within = uniform(state)
-    du = (uniform(state) - 0.5) * width_u
-    dv = (uniform(state) - 0.5) * width_v
-    k = wp.min(wp.lower_bound(cdf, u_bin), n_bins - 1)
-    lo = edges[k]
-    energy = lo + (edges[k + 1] - lo) * u_within
-    dx = ax + du * uxa + dv * vxa - fx
-    dy = ay + du * uya + dv * vya - fy
-    dz = az + du * uza + dv * vza - fz
-    inv_norm = 1.0 / wp.sqrt(dx * dx + dy * dy + dz * dz)
+    energy, dx, dy, dz = fan_primary(
+        state,
+        edges,
+        cdf,
+        n_bins,
+        fx,
+        fy,
+        fz,
+        ax,
+        ay,
+        az,
+        uxa,
+        uya,
+        uza,
+        vxa,
+        vya,
+        vza,
+        width_u,
+        width_v,
+    )
     q.kind[tid] = PHOTON
     q.beamlet[tid] = 0
     q.primary[tid] = 1  # source particle: the only one that may split
@@ -2370,9 +2438,9 @@ def generate_spectral_beam(
     q.x[tid] = fx
     q.y[tid] = fy
     q.z[tid] = fz
-    q.ux[tid] = dx * inv_norm
-    q.uy[tid] = dy * inv_norm
-    q.uz[tid] = dz * inv_norm
+    q.ux[tid] = dx
+    q.uy[tid] = dy
+    q.uz[tid] = dz
     q.rng[tid] = slots[tid]
     _escape(emitted, energy)
 
@@ -2431,20 +2499,26 @@ def generate_spectral_masked_beam(
     state = WarpRNGState()
     state.slots = slots
     state.idx = tid
-    u_bin = uniform(state)
-    u_within = uniform(state)
-    du = (uniform(state) - 0.5) * source_width_u
-    dv = (uniform(state) - 0.5) * source_width_v
-    k = wp.min(wp.lower_bound(cdf, u_bin), n_bins - 1)
-    lo = edges[k]
-    energy = lo + (edges[k + 1] - lo) * u_within
-    dx = ax + du * source_ux + dv * source_vx - fx
-    dy = ay + du * source_uy + dv * source_vy - fy
-    dz = az + du * source_uz + dv * source_vz - fz
-    inv_norm = 1.0 / wp.sqrt(dx * dx + dy * dy + dz * dz)
-    dx *= inv_norm
-    dy *= inv_norm
-    dz *= inv_norm
+    energy, dx, dy, dz = fan_primary(
+        state,
+        edges,
+        cdf,
+        n_bins,
+        fx,
+        fy,
+        fz,
+        ax,
+        ay,
+        az,
+        source_ux,
+        source_uy,
+        source_uz,
+        source_vx,
+        source_vy,
+        source_vz,
+        source_width_u,
+        source_width_v,
+    )
 
     normal_x = mask_uy * mask_vz - mask_uz * mask_vy
     normal_y = mask_uz * mask_vx - mask_ux * mask_vz
@@ -2619,17 +2693,26 @@ def generate_spectral_beamlets(
     state = WarpRNGState()
     state.slots = slots
     state.idx = tid
-    u_bin = uniform(state)
-    u_within = uniform(state)
-    du = (uniform(state) - 0.5) * width_u
-    dv = (uniform(state) - 0.5) * width_v
-    k = wp.min(wp.lower_bound(cdf, u_bin), n_bins - 1)
-    lo = edges[k]
-    energy = lo + (edges[k + 1] - lo) * u_within
-    dx = cx[local] + du * uxa + dv * vxa - fx
-    dy = cy[local] + du * uya + dv * vya - fy
-    dz = cz[local] + du * uza + dv * vza - fz
-    inv_norm = 1.0 / wp.sqrt(dx * dx + dy * dy + dz * dz)
+    energy, dx, dy, dz = fan_primary(
+        state,
+        edges,
+        cdf,
+        n_bins,
+        fx,
+        fy,
+        fz,
+        cx[local],
+        cy[local],
+        cz[local],
+        uxa,
+        uya,
+        uza,
+        vxa,
+        vya,
+        vza,
+        width_u,
+        width_v,
+    )
     q.kind[tid] = PHOTON
     q.beamlet[tid] = local
     q.primary[tid] = 1  # source photon: the only one that may split
@@ -2638,8 +2721,8 @@ def generate_spectral_beamlets(
     q.x[tid] = fx
     q.y[tid] = fy
     q.z[tid] = fz
-    q.ux[tid] = dx * inv_norm
-    q.uy[tid] = dy * inv_norm
-    q.uz[tid] = dz * inv_norm
+    q.ux[tid] = dx
+    q.uy[tid] = dy
+    q.uz[tid] = dz
     q.rng[tid] = slots[tid]
     _escape(emitted, energy)
