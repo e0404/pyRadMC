@@ -700,6 +700,29 @@ low). The test runs at `SEED + 1`. Warp cpu and cuda draw the same counter-based
 streams, so their columns differ only by float rounding (about 1e-5 relative): the two
 device parametrizations of a test are one statistical trial, not two.
 
+**The device pre-solve route cannot be a fixed-seed oracle on cuda, and a pre-solved
+phase space hides variance.** After the integration merge, the comparison against
+`presolve_head_device` + `run()` failed about 2 cuda executions in 12. Two causes, neither
+a bias. (1) The device pre-solve appends its exit phase space with atomics, so on cuda
+the same seed yields the same population in a different order (weight sum identical to
+the last digit) and the run, which resamples records by index, a different dose: the
+fixed-seed p-value of one segment came out 0.38, 0.0000 and 0.40 on three identical runs
+— the seed is not load-bearing there. (2) A run that resamples an `n`-record phase space
+with replacement reports a batch sigma blind to that phase space's own sampling error
+(the latent variance `geometry.phasespace` already warns about). With records = run
+histories (40k), 100 reseeded pairs per segment on cuda gave 10 of 300 p-values below
+0.01 and 28 below 0.05 (3 and 15 expected), against 1 and 10 for a Dij-vs-Dij null on
+the same oracle; yet the signed masked-dose difference was 0.0 +- 0.1, +0.1 +- 0.15 and
++0.3 +- 0.16 % and no profile bin showed a consistent offset (max per-bin |t| 2.6 / 1.9 /
+2.1, null 2.6 / 2.6 / 2.3). The test now pre-solves on the host (`presolve_head`, the
+device route's oracle, bit-reproducible: the same p-values on three runs per device)
+with 20x the run's histories in records: 5 of 300 below 0.01 and 14 below 0.05, signed
+differences +0.06 +- 0.11, -0.06 +- 0.12 and -0.02 +- 0.16 %. The pre-merge branch
+(bce9016) gives bit-identical numbers in every one of these sweeps: the merged engine
+changed nothing here. The batched oracle's p-values are skewed toward 1 in their bulk
+(KS p = 0.003 on the Dij-vs-Dij null), so a KS test against uniform is not the yardstick
+for it; the low-tail counts are.
+
 **Measured.** RTX 4070 laptop at 2535 MHz, no throttle reason, the GPU shared with other
 jobs, interleaved best of 7, the DAO workload (`tests/perf/test_segmented_fan_throughput.py`):
 ten pre-solve + runs 1085 ms; the same sharing one host fan sample (the DAO example's

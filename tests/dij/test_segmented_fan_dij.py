@@ -26,6 +26,7 @@ from pyradmc.data.analytic import AnalyticCrossSections
 from pyradmc.data.materials import WATER
 from pyradmc.geometry.collimation import MLC, BeamFrame, BeamLimitingStack, JawPair
 from pyradmc.geometry.grid import VoxelGrid
+from pyradmc.geometry.head import presolve_head
 from pyradmc.geometry.segments import SegmentedFanSource
 from pyradmc.geometry.source import SpectralBeamSource
 from pyradmc.geometry.spectrum import Spectrum
@@ -192,12 +193,43 @@ def test_inkernel_columns_match_the_reference(device: str, reference_dij) -> Non
     _assert_columns_consistent(reference_dij, got, range(got.n_beamlets))
 
 
+# Records per segment in the comparison's phase space, as a multiple of the run's
+# histories. Sampling a phase space with replacement, a run's batch sigma never sees
+# the finite phase space's own sampling error (its latent variance, see
+# geometry.phasespace): at 1x it inflated chi-squared enough for 10 of 300 seed-pair
+# p-values to fall below 0.01 (3 expected), with no per-bin offset over 100 seeds.
+# At 20x the hidden share is at most 1/20 of the pre-solve side's variance.
+PRESOLVE_RECORDS = 20
+
+
+@pytest.fixture(scope="module")
+def host_phase_spaces():
+    """The route being replaced, pre-solved once per segment on the host.
+
+    The *host* pre-solve, not the device one: the device pre-solve appends its exit
+    phase space with atomics, so on cuda the same seed gives a differently ordered
+    population every run and the transport that resamples it a different dose — a
+    comparison that cannot be pinned to a fixed seed (decisions.md). The host
+    pre-solve is the device one's oracle and is bit-reproducible.
+    """
+    return [
+        presolve_head(
+            _fan(),
+            cross_sections=AnalyticCrossSections(),
+            n_histories=PRESOLVE_RECORDS * N_PRESOLVE,
+            seed=SEED + 10 + s,
+            exit_z=60.0,
+            stack=stack,
+            mode="attenuation",
+        )
+        for s, stack in enumerate(_stacks())
+    ]
+
+
 @pytest.mark.parametrize("device", DEVICES)
-def test_inkernel_columns_match_presolve_plus_run(device: str) -> None:
+def test_inkernel_columns_match_presolve_plus_run(device: str, host_phase_spaces) -> None:
     """Each column equals the per-segment route it replaces: pre-solve, then run."""
     _require(device)
-    from pyradmc.backends.warp.presolve import presolve_head_device
-
     grid = _grid()
     engine = _warp(grid, device)
     source = _source()
@@ -207,18 +239,7 @@ def test_inkernel_columns_match_presolve_plus_run(device: str) -> None:
         source, n_histories_per_beamlet=n, n_batches=8, seed=SEED, truncation=0.0, **common
     )
     assert dij.correlated  # the shipped sampling configuration
-    for s, stack in enumerate(_stacks()):
-        phase_space = presolve_head_device(
-            _fan(),
-            cross_sections=AnalyticCrossSections(),
-            n_histories=n,
-            seed=SEED + 10 + s,
-            exit_z=60.0,
-            stack=stack,
-            mode="attenuation",
-            device=device,
-            return_device_source=True,
-        )
+    for s, phase_space in enumerate(host_phase_spaces):
         single = engine.run(phase_space, n_histories=n, n_batches=8, seed=SEED + 20 + s, **common)
         _assert_consistent(
             single.dose,
