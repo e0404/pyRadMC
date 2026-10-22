@@ -347,13 +347,18 @@ class _Workspace:
     (:meth:`WarpEngine._acquire_workspaces`), so a loop of calls stops paying a
     fresh allocation of every queue column per call.
 
-    Grown on demand, never shrunk: a smaller request reuses the arrays and sets
-    each queue's ``capacity`` to the *request*, so the kernels' write guard and the
-    engine's overflow check bind exactly where a freshly allocated queue of that
-    size would. Contents need no clearing between calls: every generator and every
-    push writes all fields of a slot before a count publishes it, the transport
-    reads only below the count, every RNG slot is written by its generator before
-    it is read, and each counter is zeroed by the call that uses it.
+    ``run`` grows it on demand and never shrinks it: a smaller request reuses the
+    arrays and sets each queue's ``capacity`` to the *request*, so the kernels'
+    write guard and the engine's overflow check bind exactly where a freshly
+    allocated queue of that size would. A Dij shard fits it *exactly* instead
+    (``exact=True``): its dense group maps are budgeted against free memory, and a
+    larger queue left over from a big ``run`` would otherwise ride on top of them,
+    lifting the Dij's peak above a fresh engine's (measured: 1.33 -> 2.05 GB).
+
+    Contents need no clearing between calls: every generator and every push
+    writes all fields of a slot before a count publishes it, the transport reads
+    only below the count, every RNG slot is written by its generator before it is
+    read, and each counter is zeroed by the call that uses it.
     """
 
     def __init__(self, device: str) -> None:
@@ -376,10 +381,10 @@ class _Workspace:
         """
         return self.slots_allocated * _QUEUE_BYTES_PER_SLOT
 
-    def fit(self, capacity: int) -> None:
+    def fit(self, capacity: int, exact: bool = False) -> None:
         """Make room for ``capacity`` slots per queue and bind the queues to it."""
-        if capacity > self.slots_allocated:
-            # Release before growing, so the peak is the new size, not old + new.
+        if capacity > self.slots_allocated or (exact and capacity != self.slots_allocated):
+            # Release before reallocating, so the peak is the new size, not old + new.
             self.queues = []
             self.slots = None
             self.slots_allocated = 0
@@ -732,24 +737,29 @@ class WarpEngine:
             state.spectra[id(spectrum)] = (spectrum, tables)
             return tables
 
-    def _acquire_workspaces(self, device: str, n: int, capacity: int) -> list[_Workspace]:
+    def _acquire_workspaces(
+        self, device: str, n: int, capacity: int, exact: bool = False
+    ) -> list[_Workspace]:
         """Take ``n`` transport workspaces fitted to ``capacity`` slots per queue.
 
-        Idle workspaces are reused (grown if too small) and any idle surplus is
+        Idle workspaces are reused (grown if too small; refitted to exactly
+        ``capacity`` when ``exact``, see :class:`_Workspace`) and any idle surplus is
         released, so the memory parked between calls is what the last call used
-        and what :meth:`_reclaimable_workspace_bytes` may count as free. The caller
+        and an ``exact`` acquirer may count all of it as free. The caller
         hands them back with :meth:`_release_workspaces` on success only: after an
         exception a lane stream may still be writing into them, so they are left
         to the garbage collector instead of being reused.
         """
         state = self._state(device)
         with state.lock:
+            # Dropping the idle list releases the surplus here, before anything below
+            # allocates.
             taken, state.idle = state.idle[:n], []
         for ws in taken:
-            ws.fit(capacity)
+            ws.fit(capacity, exact)
         while len(taken) < n:
             ws = _Workspace(device)
-            ws.fit(capacity)
+            ws.fit(capacity, exact)
             taken.append(ws)
         return taken
 
@@ -762,21 +772,6 @@ class WarpEngine:
         state = self._state(device)
         with state.lock:
             return sum(ws.nbytes for ws in state.idle)
-
-    def _reclaimable_workspace_bytes(self, device: str, n: int, capacity: int) -> int:
-        """Count idle bytes a call taking ``n`` workspaces of ``capacity`` frees or uses.
-
-        The auto group size budgets the reported-free memory after charging this
-        call's queues; idle pooled bytes are not reported free but are either
-        released on acquire (the surplus) or reused for those very queues. Only a
-        reused workspace's excess over ``capacity`` stays occupied, so it is the one
-        part not counted — which keeps the budget what a fresh engine would see.
-        """
-        state = self._state(device)
-        with state.lock:
-            idle = list(state.idle)
-        need = capacity * _QUEUE_BYTES_PER_SLOT
-        return sum(ws.nbytes for ws in idle[n:]) + sum(min(ws.nbytes, need) for ws in idle[:n])
 
     def run(
         self,
@@ -1432,11 +1427,10 @@ class WarpEngine:
                 chunk_d = min(self._chunk_histories(d), n_beamlets * per_batch)
                 free = _device_free_bytes(d)
                 if free > 0:
-                    # The engine's idle pooled queues are freed or reused by this
-                    # call, so they budget as free: the size a fresh engine gets.
-                    free += self._reclaimable_workspace_bytes(
-                        d, lanes_d, chunk_d * self.queue_factor
-                    )
+                    # The shard refits the engine's idle pooled queues exactly
+                    # (releasing the rest) before allocating, so they budget as
+                    # free: the group size a fresh engine gets.
+                    free += self._idle_workspace_bytes(d)
                 return _auto_group_size(
                     free,
                     scoring.n_voxels,
@@ -1648,7 +1642,7 @@ class WarpEngine:
         # workspace per lane, shared with run(). The dense group maps stay per call:
         # their size is budgeted from free memory at the call, and parking up to half
         # the card between calls would starve whatever runs next.
-        workspaces = self._acquire_workspaces(device, lanes, max_capacity)
+        workspaces = self._acquire_workspaces(device, lanes, max_capacity, exact=True)
         lane_resources = [
             ws.lane(wp.zeros(max_group * n_voxels, dtype=wp.int64, device=device), lanes > 1)
             for ws in workspaces

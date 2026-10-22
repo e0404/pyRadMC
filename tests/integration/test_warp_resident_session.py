@@ -218,8 +218,21 @@ def test_second_run_allocates_no_queues(device: str, monkeypatch) -> None:
     assert len(allocations) == 4  # one lane: two ping-pong pairs
     engine.run(PARALLEL, n_histories=600, n_batches=2, seed=SEED + 1)
     engine.run(PARALLEL, n_histories=60, n_batches=2, seed=SEED + 1)  # fits: reused
-    engine.run_dij(LATTICE, n_histories_per_beamlet=100, n_batches=2, seed=SEED)
     assert len(allocations) == 4
+
+
+def test_dij_refits_queues_to_its_own_size(device: str) -> None:
+    """A Dij does not ride on a bigger run's queues: its peak stays a fresh engine's.
+
+    The dense group maps are budgeted against free memory, so a shard refits the
+    pooled queues to exactly what it needs (here 2 beamlets x 100 histories per
+    batch x queue_factor), releasing a larger run's allocation first.
+    """
+    engine = _engine(device, chunk_size=4096)
+    engine.run(PARALLEL, n_histories=4096, n_batches=1, seed=SEED)
+    assert engine._idle_workspace_bytes(device) == engine_module._queue_bytes(4096, 16, 1)
+    engine.run_dij(LATTICE, n_histories_per_beamlet=200, n_batches=2, seed=SEED)
+    assert engine._idle_workspace_bytes(device) == engine_module._queue_bytes(2 * 100, 16, 1)
 
 
 def test_reused_queues_keep_the_requested_capacity(device: str) -> None:
