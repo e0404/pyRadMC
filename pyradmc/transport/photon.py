@@ -34,7 +34,7 @@ Photons at or below ``pcut`` deposit their energy locally and terminate.
 
 - *Russian roulette, always on.* A Compton-scattered photon dropping
   below ``PHOTON_ROULETTE_MEV`` plays Russian roulette
-  (:mod:`pyradmc.physics.roulette`) while its weight is under
+  (:mod:`pyradmc.physics.roulette`) while its weight's magnitude is under
   ``PHOTON_ROULETTE_WEIGHT_CAP``. The game is exactly fair, and its
   weight-energy change is booked through the escaped-energy ledger, so the
   per-run energy balance stays exact. Instrument: zero the threshold constant.
@@ -226,7 +226,7 @@ def photon_steps(
                     deposit(x, y, z, amount, deposit_weight(e_scatter, material) * amount)
                     continue
                 copy_w = split_w
-                if e_scatter < PHOTON_ROULETTE_MEV and copy_w < PHOTON_ROULETTE_WEIGHT_CAP:
+                if e_scatter < PHOTON_ROULETTE_MEV and abs(copy_w) < PHOTON_ROULETTE_WEIGHT_CAP:
                     # Roulette the softened copy; the ledger entry keeps the
                     # run's energy balance exact (module docstring).
                     new_w = roulette_weight(copy_w, PHOTON_ROULETTE_SURVIVAL, rng_state)
