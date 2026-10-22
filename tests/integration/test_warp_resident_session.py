@@ -4,9 +4,9 @@ A plan-optimization loop calls ``run`` many times on one engine with small histo
 counts, where re-uploading the cross-section tables, the voxel maps, and
 reallocating the particle queues on every call was most of the wall time. The
 engine now keeps that state on each device across ``run`` and ``run_dij``: tables
-per ``(ecut, pcut, e_max)`` key, the transport grid, the last scoring geometry, and
-one pooled transport workspace (queues, RNG slots, counters) per batch lane, grown
-on demand.
+per ``(ecut, pcut, e_max, with_gs)`` key (least recently used evicted), the
+transport grid, the last scoring geometry, and one pooled transport workspace
+(queues, RNG slots, counters) per batch lane, refitted exactly to each call.
 
 Residency is a scheduling change and must be bitwise inert on one device (AGENTS
 2.3): every call on a warmed engine is compared exactly against the same call on a
@@ -20,14 +20,18 @@ import pytest
 
 from pyradmc.data.analytic import AnalyticCrossSections
 from pyradmc.geometry.collimation import TransmissionMaskSource
+from pyradmc.geometry.field import MagneticField
 from pyradmc.geometry.grid import VoxelGrid
 from pyradmc.geometry.source import (
     BeamletGridSource,
     ParallelBeamSource,
+    Primary,
+    Source,
     SpectralBeamletSource,
     SpectralBeamSource,
 )
 from pyradmc.geometry.spectrum import ali_rogers_mv
+from pyradmc.rng.host import uniform
 from pyradmc.scoring.grid import ScoringGrid
 from tests.conftest import SEED
 
@@ -48,6 +52,28 @@ def device(request) -> str:
     return str(request.param)
 
 
+class WobbleSource(Source):
+    """A user source with no in-kernel sampler: transported by host pre-sampling."""
+
+    @property
+    def max_energy(self) -> float:
+        return 6.0
+
+    def emit(self, rng_state: object) -> Primary:
+        x = 2.0 + 2.0 * uniform(rng_state)
+        y = 2.0 + 1.0 * uniform(rng_state)
+        return Primary(6.0, x, y, -1.0, 0.0, 0.0, 1.0)
+
+
+class FailingSource(WobbleSource):
+    """Pre-samples its first chunk, then raises: a call aborted mid-transport."""
+
+    def sample_batch(self, seed: int, history_offset: int, n: int) -> dict[str, np.ndarray]:
+        if history_offset > 0:
+            raise RuntimeError("source failed mid-run")
+        return dict(super().sample_batch(seed, history_offset, n))
+
+
 GRID = VoxelGrid.uniform_water(shape=(12, 10, 8), spacing=(0.5, 0.5, 0.5))
 XS = AnalyticCrossSections(geometry_densities=GRID.max_density_by_material())
 SPECTRUM = ali_rogers_mv("varian-6mv")
@@ -60,6 +86,9 @@ MASKED = TransmissionMaskSource(
 )
 LATTICE = BeamletGridSource(
     energy=6.0, z=-1.0, x_range=(2.0, 4.0), y_range=(2.0, 3.0), n_x=2, n_y=1
+)
+LATTICE8 = BeamletGridSource(
+    energy=6.0, z=-1.0, x_range=(1.0, 5.0), y_range=(2.0, 3.0), n_x=4, n_y=2
 )
 FAN = SpectralBeamletSource(
     SPECTRUM, (3.0, 2.5, -100.0), [(2.5, 2.5, 0.0), (3.5, 2.5, 0.0)], 1.0, 1.0
@@ -89,63 +118,46 @@ def _assert_dij_equal(a, b) -> None:
     assert books_a == books_b
 
 
+def _assert_equal(method: str, a, b) -> None:
+    if method == "run":
+        _assert_run_equal(a, b)
+    else:
+        _assert_dij_equal(a, b)
+
+
+def _run(source, n, batches, **kw) -> tuple[str, dict]:
+    return "run", dict(source=source, n_histories=n, n_batches=batches, seed=SEED, **kw)
+
+
+def _dij(source, n, batches, **kw) -> tuple[str, dict]:
+    return "run_dij", dict(
+        source=source, n_histories_per_beamlet=n, n_batches=batches, seed=SEED, **kw
+    )
+
+
 def _calls(device: str) -> list[tuple[str, dict]]:
     """An interleaving that changes every cache key between neighbouring calls."""
-    calls: list[tuple[str, dict]] = [
-        ("run", dict(source=PARALLEL, n_histories=1_200, n_batches=4, seed=SEED)),
-        ("run", dict(source=MASKED, n_histories=800, n_batches=2, seed=SEED)),
-        ("run_dij", dict(source=LATTICE, n_histories_per_beamlet=200, n_batches=2, seed=SEED)),
-        (
-            "run",
-            dict(
-                source=PARALLEL,
-                n_histories=600,
-                n_batches=3,
-                seed=SEED + 1,
-                ecut=0.5,
-                msc_model="gaussian",
-            ),
-        ),
-        (
-            "run",
-            dict(source=SPECTRAL, n_histories=900, n_batches=3, seed=SEED, scoring_grid=COARSE),
-        ),
-        (
-            "run_dij",
-            dict(
-                source=FAN,
-                n_histories_per_beamlet=100,
-                n_batches=2,
-                seed=SEED,
-                beamlet_group_size=1,
-            ),
-        ),
-        ("run", dict(source=PARALLEL, n_histories=64, n_batches=1, seed=SEED)),  # shrinks
-        ("run", dict(source=PARALLEL, n_histories=1_200, n_batches=4, seed=SEED)),  # regrows
+    calls = [
+        _run(PARALLEL, 1_200, 4),
+        _run(MASKED, 800, 2),
+        _dij(LATTICE, 200, 2),
+        _run(PARALLEL, 600, 3, ecut=0.5, msc_model="gaussian"),
+        _run(SPECTRAL, 900, 3, scoring_grid=COARSE),
+        _dij(FAN, 100, 2, beamlet_group_size=1),
+        _run(PARALLEL, 64, 1),  # shrinks the pool
+        _run(PARALLEL, 1_200, 4),  # regrows it
+        _run(SPECTRAL, 600, 2, scoring_mode="dose_to_water"),
+        _run(PARALLEL, 600, 2, transport_electrons=False),  # KERMA instrument
+        _run(WobbleSource(), 400, 2),  # host pre-sampled route
+        _dij(LATTICE, 200, 2, devices=[device]),
+        _dij(LATTICE8, 100, 2, scoring_grid=COARSE, scoring_mode="dose_to_water"),
+        _run(PARALLEL, 1_200, 4),
     ]
     if device.startswith("cuda"):
         calls += [
-            (
-                "run",
-                dict(
-                    source=SPECTRAL,
-                    n_histories=900,
-                    n_batches=3,
-                    seed=SEED,
-                    concurrent_batches=3,
-                ),
-            ),
-            (
-                "run_dij",
-                dict(
-                    source=LATTICE,
-                    n_histories_per_beamlet=200,
-                    n_batches=4,
-                    seed=SEED,
-                    concurrent_batches=2,
-                ),
-            ),
-            ("run", dict(source=PARALLEL, n_histories=1_200, n_batches=4, seed=SEED)),
+            _run(SPECTRAL, 900, 3, concurrent_batches=3),
+            _dij(LATTICE, 200, 4, concurrent_batches=2),
+            _run(PARALLEL, 1_200, 4),
         ]
     return calls
 
@@ -156,10 +168,16 @@ def test_warm_engine_is_bit_identical_to_fresh_engines(device: str) -> None:
     for method, kwargs in _calls(device):
         got = getattr(warm, method)(**kwargs)
         want = getattr(_engine(device), method)(**kwargs)
-        if method == "run":
-            _assert_run_equal(got, want)
-        else:
-            _assert_dij_equal(got, want)
+        _assert_equal(method, got, want)
+
+
+def test_warm_field_engine_is_bit_identical_to_fresh(device: str) -> None:
+    field = MagneticField.uniform((0.0, 1.5, 0.0))
+    warm = _engine(device, magnetic_field=field)
+    for method, kwargs in [_run(PARALLEL, 600, 2), _dij(LATTICE, 100, 2), _run(MASKED, 600, 2)]:
+        got = getattr(warm, method)(**kwargs)
+        want = getattr(_engine(device, magnetic_field=field), method)(**kwargs)
+        _assert_equal(method, got, want)
 
 
 def test_repeated_seeded_job_is_bit_identical(device: str) -> None:
@@ -197,6 +215,20 @@ def test_device_tables_upload_once_per_key(device: str) -> None:
     assert other_pcut.gs_values.ptr == first.gs_values.ptr
 
 
+def test_device_table_cache_is_bounded(device: str) -> None:
+    """An ECUT sweep must not park one ~12 MB GS grid per cut on the device."""
+    engine = _engine(device)
+    first = engine._upload_tables(6.0, pcut=0.05, ecut=0.2, device=device, with_gs=True)
+    bound = engine_module._TABLES_RESIDENT
+    for k in range(bound):
+        engine._upload_tables(6.0, pcut=0.05, ecut=0.3 + 0.05 * k, device=device, with_gs=True)
+    state = engine._state(device)
+    assert len(state.tables) == bound
+    assert len(state.table_arrays) <= 2 * bound
+    # The oldest key was evicted; asking again re-uploads it (a new struct).
+    assert engine._upload_tables(6.0, pcut=0.05, ecut=0.2, device=device, with_gs=True) is not first
+
+
 def test_grid_uploads_once_per_device(device: str) -> None:
     engine = _engine(device)
     gi, density, material = engine._upload_grid(device)
@@ -204,7 +236,17 @@ def test_grid_uploads_once_per_device(device: str) -> None:
     assert again[0] is gi and again[1] is density and again[2] is material
 
 
-def test_second_run_allocates_no_queues(device: str, monkeypatch) -> None:
+def test_run_dij_shares_the_default_scoring_upload_with_run(device: str) -> None:
+    """Alternating run and run_dij on the default scoring grid uploads it once."""
+    engine = _engine(device)
+    engine.run(PARALLEL, n_histories=200, n_batches=2, seed=SEED)
+    mass = engine._state(device).scoring[2]
+    engine.run_dij(LATTICE, n_histories_per_beamlet=100, n_batches=2, seed=SEED)
+    engine.run(PARALLEL, n_histories=200, n_batches=2, seed=SEED)
+    assert engine._state(device).scoring[2] is mass
+
+
+def test_equal_calls_allocate_no_queues_and_a_change_refits(device: str, monkeypatch) -> None:
     allocations = []
     real = engine_module._upload_queue
 
@@ -217,52 +259,86 @@ def test_second_run_allocates_no_queues(device: str, monkeypatch) -> None:
     engine.run(PARALLEL, n_histories=600, n_batches=2, seed=SEED)
     assert len(allocations) == 4  # one lane: two ping-pong pairs
     engine.run(PARALLEL, n_histories=600, n_batches=2, seed=SEED + 1)
-    engine.run(PARALLEL, n_histories=60, n_batches=2, seed=SEED + 1)  # fits: reused
-    assert len(allocations) == 4
+    assert len(allocations) == 4  # a steady workload stays resident
+    engine.run(PARALLEL, n_histories=60, n_batches=2, seed=SEED + 1)
+    assert allocations[4:] == [60 * engine.queue_factor] * 4  # shrinks to the call
+    engine.run(PARALLEL, n_histories=60, n_batches=2, seed=SEED + 2)
+    assert len(allocations) == 8
 
 
-def test_dij_refits_queues_to_its_own_size(device: str) -> None:
-    """A Dij does not ride on a bigger run's queues: its peak stays a fresh engine's.
-
-    The dense group maps are budgeted against free memory, so a shard refits the
-    pooled queues to exactly what it needs (here 2 beamlets x 100 histories per
-    batch x queue_factor), releasing a larger run's allocation first.
-    """
+def test_pool_holds_what_the_last_call_needed(device: str) -> None:
+    """Never the largest call so far: a tiny call after a big one shrinks the pool."""
     engine = _engine(device, chunk_size=4096)
     engine.run(PARALLEL, n_histories=4096, n_batches=1, seed=SEED)
     assert engine._idle_workspace_bytes(device) == engine_module._queue_bytes(4096, 16, 1)
+    engine.run(PARALLEL, n_histories=64, n_batches=1, seed=SEED)
+    assert engine._idle_workspace_bytes(device) == engine_module._queue_bytes(64, 16, 1)
     engine.run_dij(LATTICE, n_histories_per_beamlet=200, n_batches=2, seed=SEED)
     assert engine._idle_workspace_bytes(device) == engine_module._queue_bytes(2 * 100, 16, 1)
 
 
-def test_reused_queues_keep_the_requested_capacity(device: str) -> None:
-    """A smaller request on a grown workspace still guards at its own capacity.
-
-    The kernels refuse writes at ``q.capacity`` and the engine raises on a count
-    past it; that bound must be the one this call asked for, not the length the
-    buffer happens to have from an earlier, larger call, so overflow behaves
-    exactly as on a fresh engine.
-    """
+def test_refit_binds_the_queues_to_the_request(device: str) -> None:
+    """The kernels guard writes at ``q.capacity``; it must be this call's request."""
     engine = _engine(device)
     big = engine._acquire_workspaces(device, 1, 1_000)
     engine._release_workspaces(device, big)
     small = engine._acquire_workspaces(device, 1, 100)
     assert small[0] is big[0]
-    assert all(q.capacity == 100 for q in small[0].queues)
-    assert all(q.kind.shape[0] >= 100 for q in small[0].queues)
+    assert all(q.capacity == 100 and q.kind.shape[0] == 100 for q in small[0].queues)
+    assert small[0].slots.shape[0] == 100
     engine._release_workspaces(device, small)
 
 
 def test_idle_workspace_bytes_match_the_sizing_model(device: str) -> None:
     """The pooled queues are what ``_QUEUE_BYTES_PER_SLOT`` charges per slot.
 
-    Run-to-run auto sizing counts idle pooled bytes as free (an acquirer reuses or
+    The Dij auto sizing counts idle pooled bytes as free (an acquirer reuses or
     releases them before allocating), so the two must use one accounting.
     """
     engine = _engine(device, chunk_size=256)
     engine.run(PARALLEL, n_histories=512, n_batches=2, seed=SEED)
     expected = engine_module._queue_bytes(256, engine.queue_factor, 1)
     assert engine._idle_workspace_bytes(device) == expected
+
+
+def test_dij_auto_group_size_after_a_run_equals_a_fresh_engine(device: str, monkeypatch) -> None:
+    """The pool's idle bytes are budgeted as free, so a warm Dij sizes like a fresh one.
+
+    The device is simulated: a fixed total, minus what the engine's pool parks
+    between calls (as the driver would report it). The total is chosen so the dense
+    budget binds at three of the eight beamlets.
+    """
+    chunk, qf, n_voxels = 64, 16, GRID.density.size
+    queue_bytes = engine_module._queue_bytes(chunk, qf, 1)
+    total = queue_bytes + 2 * (3 * 24 * n_voxels) + 10_000
+    current: list[WarpEngine] = []
+    monkeypatch.setattr(
+        engine_module,
+        "_device_free_bytes",
+        lambda d: total - current[0]._idle_workspace_bytes(d),
+    )
+    sizes: list[int] = []
+    real_shard = WarpEngine._run_dij_shard
+
+    def spy(self, dev, next_group, **kwargs):
+        sizes.append(kwargs["beamlet_group_size"])
+        return real_shard(self, dev, next_group, **kwargs)
+
+    monkeypatch.setattr(WarpEngine, "_run_dij_shard", spy)
+    dij = dict(source=LATTICE8, n_histories_per_beamlet=100, n_batches=2, seed=SEED)
+
+    fresh = _engine(device, chunk_size=chunk)
+    current[:] = [fresh]
+    want = fresh.run_dij(**dij)
+
+    warm = _engine(device, chunk_size=chunk)
+    current[:] = [warm]
+    warm.run(PARALLEL, n_histories=4 * chunk, n_batches=1, seed=SEED)
+    assert warm._idle_workspace_bytes(device) > 0
+    got = warm.run_dij(**dij)
+
+    assert sizes == [3, 3]
+    _assert_dij_equal(got, want)
 
 
 def test_release_device_memory_drops_state_and_stays_identical(device: str) -> None:
@@ -274,20 +350,73 @@ def test_release_device_memory_drops_state_and_stays_identical(device: str) -> N
     _assert_run_equal(first, again)
 
 
-def test_majorant_violation_still_raises(device: str) -> None:
-    """The check now runs once per call (run) or shard (Dij); it must still fire.
+def test_majorant_violation_raises_in_the_first_pass(device: str) -> None:
+    """The violation count rides the per-batch / per-group book readback.
 
     The tables declare water at half the density the grid holds, so the majorant
-    is too small and the kernels count violations. An aborted call must also leave
-    the engine usable: its workspaces are dropped, not returned to the pool.
+    is too small and the kernels count violations. The raise must come in the pass
+    that made the violation — before its progress tick — not at the end of the call.
     """
     from pyradmc.data.materials import WATER
 
     thin = AnalyticCrossSections(geometry_densities=((WATER, 0.5),))
     engine = WarpEngine(grid=GRID, cross_sections=thin, device=device)
+    ticks: list[object] = []
     for _ in range(2):
         with pytest.raises(RuntimeError, match="majorant violated"):
-            engine.run(PARALLEL, n_histories=600, n_batches=3, seed=SEED)
+            engine.run(PARALLEL, n_histories=600, n_batches=3, seed=SEED, progress=ticks.append)
         with pytest.raises(RuntimeError, match="majorant violated"):
-            engine.run_dij(LATTICE, n_histories_per_beamlet=200, n_batches=2, seed=SEED)
-    assert engine._idle_workspace_bytes(device) == 0
+            engine.run_dij(
+                LATTICE,
+                n_histories_per_beamlet=200,
+                n_batches=2,
+                seed=SEED,
+                beamlet_group_size=1,
+                progress=ticks.append,
+            )
+    assert ticks == []
+    assert engine._idle_workspace_bytes(device) == 0  # aborted calls park nothing
+
+
+def test_aborted_call_leaves_the_engine_bit_identical(device: str) -> None:
+    """After a call dies mid-transport, the next calls equal a fresh engine's."""
+    engine = _engine(device, chunk_size=128)
+    with pytest.raises(RuntimeError, match="source failed mid-run"):
+        engine.run(FailingSource(), n_histories=512, n_batches=2, seed=SEED)
+    for method, kwargs in [_run(MASKED, 512, 2), _dij(LATTICE, 100, 2), _run(PARALLEL, 512, 2)]:
+        got = getattr(engine, method)(**kwargs)
+        want = getattr(_engine(device, chunk_size=128), method)(**kwargs)
+        _assert_equal(method, got, want)
+
+
+def test_queue_overflow_after_a_bigger_call_raises_like_a_fresh_engine(device: str) -> None:
+    """Overflow binds at this call's capacity whatever the pool held before.
+
+    ``queue_factor=1`` leaves no room for secondaries: eight 15 MeV electrons
+    overflow their queue on the first round. On a pool previously fitted to a much
+    larger call the error must be the same, count and capacity included, and the
+    engine must stay usable.
+    """
+    electrons = dict(
+        source=ParallelBeamSource(energy=15.0, z=-1.0, x_range=(2.0, 4.0), y_range=(2.0, 3.0)),
+        n_histories=8,
+        n_batches=1,
+        seed=SEED,
+        primary_kind="electron",
+    )
+    with pytest.raises(RuntimeError, match="overflow") as fresh_error:
+        _engine(device, queue_factor=1).run(**electrons)
+
+    engine = _engine(device, queue_factor=1)
+    engine.run(PARALLEL, n_histories=2_048, n_batches=1, seed=SEED, transport_electrons=False)
+    with pytest.raises(RuntimeError, match="overflow") as warm_error:
+        engine.run(**electrons)
+    assert str(warm_error.value) == str(fresh_error.value)
+
+    after = engine.run(
+        PARALLEL, n_histories=1_024, n_batches=2, seed=SEED, transport_electrons=False
+    )
+    want = _engine(device, queue_factor=1).run(
+        PARALLEL, n_histories=1_024, n_batches=2, seed=SEED, transport_electrons=False
+    )
+    _assert_run_equal(after, want)

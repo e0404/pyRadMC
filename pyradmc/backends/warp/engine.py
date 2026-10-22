@@ -349,13 +349,15 @@ class _Workspace:
     (:meth:`WarpEngine._acquire_workspaces`), so a loop of calls stops paying a
     fresh allocation of every queue column per call.
 
-    ``run`` grows it on demand and never shrinks it: a smaller request reuses the
-    arrays and sets each queue's ``capacity`` to the *request*, so the kernels'
-    write guard and the engine's overflow check bind exactly where a freshly
-    allocated queue of that size would. A Dij shard fits it *exactly* instead
-    (``exact=True``): its dense group maps are budgeted against free memory, and a
-    larger queue left over from a big ``run`` would otherwise ride on top of them,
-    lifting the Dij's peak above a fresh engine's (measured: 1.33 -> 2.05 GB).
+    Every call refits it *exactly* to its own requirement, growing or shrinking:
+    the pool holds what the last call needed, never the largest call so far. A
+    steady workload (an optimizer's loop of equal calls) therefore reuses it
+    untouched, while an alternating big/small workload reallocates on each change,
+    as every call did before the pool existed. Holding the largest-ever size
+    instead parked up to 1.7 GB behind tiny calls, and let a Dij's dense group maps
+    ride on top of a big run's queues (peak 1.33 -> 2.05 GB, measured). An exact
+    fit also makes each queue's ``capacity`` — the kernels' write guard and the
+    engine's overflow bound — the one a fresh engine would allocate.
 
     Contents need no clearing between calls: every generator and every push
     writes all fields of a slot before a count publishes it, the transport reads
@@ -371,7 +373,6 @@ class _Workspace:
         self.stream = None
         self.staging = None
         self.fold = None
-        self._violations = None
         self._book = None
         self._book_views: dict = {}
 
@@ -383,9 +384,9 @@ class _Workspace:
         """
         return self.slots_allocated * _QUEUE_BYTES_PER_SLOT
 
-    def fit(self, capacity: int, exact: bool = False) -> None:
-        """Make room for ``capacity`` slots per queue and bind the queues to it."""
-        if capacity > self.slots_allocated or (exact and capacity != self.slots_allocated):
+    def fit(self, capacity: int) -> None:
+        """Hold exactly ``capacity`` slots per queue, reallocating only on a change."""
+        if capacity != self.slots_allocated:
             # Release before reallocating, so the peak is the new size, not old + new.
             self.queues = []
             self.slots = None
@@ -402,12 +403,6 @@ class _Workspace:
             self.fold = wp.Stream(self.device)
         return self.fold
 
-    def violations(self) -> wp.array:
-        """Return the resident majorant-violation counter; the caller zeroes it."""
-        if self._violations is None:
-            self._violations = wp.zeros(1, dtype=wp.int32, device=self.device)
-        return self._violations
-
     def book(self, name: str) -> wp.array:
         """Return the one-element int64 energy counter ``name`` (a view of the book).
 
@@ -418,11 +413,22 @@ class _Workspace:
         every counter was its own allocation.
         """
         if self._book is None:
-            self._book = wp.zeros(len(_BOOK) * _BOOK_STRIDE, dtype=wp.int64, device=self.device)
-            self._book_views = {
-                key: self._book[i * _BOOK_STRIDE : i * _BOOK_STRIDE + 1]
-                for i, key in enumerate(_BOOK)
+            book = wp.zeros(len(_BOOK) * _BOOK_STRIDE, dtype=wp.int64, device=self.device)
+            views = {
+                key: book[i * _BOOK_STRIDE : i * _BOOK_STRIDE + 1] for i, key in enumerate(_BOOK)
             }
+            # The kernels count majorant violations in an int32; that counter is the
+            # low half of a zeroed int64 slot (little-endian on every Warp target),
+            # so the readback every pass already makes checks it for free. It only
+            # grows and is never cleared per pass; any nonzero value is a violation.
+            # The view does not own the memory: ``_book`` keeps it alive.
+            views["violations"] = wp.array(
+                ptr=book.ptr + _BOOK.index("violations") * _BOOK_STRIDE * 8,
+                dtype=wp.int32,
+                shape=(1,),
+                device=self.device,
+            )
+            self._book, self._book_views = book, views
         return self._book_views[name]
 
     def clear_pass_books(self) -> None:
@@ -431,7 +437,7 @@ class _Workspace:
         self._book[: _BOOK_PER_PASS * _BOOK_STRIDE].zero_()
 
     def clear_books(self) -> None:
-        """Zero every counter in the book."""
+        """Zero every counter in the book, the violation count included."""
         self.book(_BOOK[0])
         self._book.zero_()
 
@@ -459,11 +465,13 @@ class _Workspace:
         )
 
 
-_BOOK = ("escaped", "unscored", "deposited", "total_q", "dep_total", "emitted")
-"""The int64 energy counters a workspace keeps in one array. The first
+_BOOK = ("escaped", "unscored", "deposited", "total_q", "dep_total", "emitted", "violations")
+"""The counters a workspace keeps in one int64 array. The first
 :data:`_BOOK_PER_PASS` are cleared and read once per pass — a batch of ``run``, a
 group of ``run_dij`` — so no int64 sum spans more than the pass it always did; the
-rest accumulate over the whole call."""
+rest accumulate over the whole call. ``violations`` is the kernels' int32
+majorant-violation count, aliased onto its slot (see :meth:`_Workspace.book`), so
+the per-pass readback raises on a violation in the pass that made it."""
 
 _BOOK_PER_PASS = 4
 
@@ -475,12 +483,12 @@ _BOOK_STRIDE = 16
 class _DeviceState:
     """What one engine keeps resident on one device between calls.
 
-    All of it is a pure function of the engine's frozen inputs (grid, field,
-    cross-section source) plus the per-entry key, which is why it can outlive a
-    call: tables per ``(ecut, pcut, e_max, with_gs)``, the transport grid, the
-    last scoring geometry (held by identity, with a strong reference so the
-    identity cannot be recycled), spectrum inversion tables by spectrum identity
-    (their arrays are read-only), and the idle transport workspaces.
+    The tables (per ``(ecut, pcut, e_max, with_gs)``, least recently used evicted
+    past :data:`_TABLES_RESIDENT`) and the transport grid are functions of the
+    engine's frozen fields plus the key. The scoring geometry and the spectra are
+    per-call arguments instead, matched by identity with a strong reference held
+    (so the identity cannot be recycled) — safe because their arrays are
+    read-only. The idle transport workspaces are what the last call used.
     """
 
     lock: threading.Lock = field(default_factory=threading.Lock)
@@ -494,6 +502,37 @@ class _DeviceState:
 
 _SPECTRA_RESIDENT = 8
 """Spectrum tables kept per device; a few hundred bytes each, bounded anyway."""
+
+_TABLES_RESIDENT = 4
+"""Table structs kept per device (and twice as many base or GS array sets), least
+recently used evicted. Each GS grid is about 12 MB of float32 on the device, so an
+unbounded cache would park one per ECUT of a sweep; the host cache keeps the
+flattened tables, so an evicted key costs only its re-upload."""
+
+
+def _lru_get(cache: dict, key):
+    """Look ``key`` up in an insertion-ordered dict, marking it most recently used."""
+    value = cache.pop(key, None)
+    if value is not None:
+        cache[key] = value
+    return value
+
+
+def _lru_put(cache: dict, key, value, bound: int) -> None:
+    """Insert ``key`` as most recently used, evicting the oldest beyond ``bound``."""
+    cache[key] = value
+    while len(cache) > bound:
+        cache.pop(next(iter(cache)))
+
+
+def _check_majorant(books: dict[str, int]) -> None:
+    """Raise if the kernels counted a Woodcock majorant violation (book readback)."""
+    if books["violations"] != 0:
+        raise RuntimeError(
+            "Woodcock majorant violated in the kernel despite table headroom. "
+            "The geometry contains material or density the majorant "
+            "declaration did not cover."
+        )
 
 
 def _launch(kernel, dim, inputs, device: str, stream) -> None:
@@ -549,18 +588,25 @@ def _set_count(q: Queue, value: int, device: str, stream=None) -> None:
 class WarpEngine:
     """Dual-target production engine over a voxel grid.
 
-    The engine keeps its device state resident between calls: the cross-section
-    tables (per ``(ecut, pcut, e_max)``), the voxel maps, the last scoring
-    geometry, and one transport workspace (queues, RNG slots, counters) per batch
-    lane, grown on demand and reused by ``run`` and ``run_dij`` alike. A loop of
-    small runs — a plan optimization — therefore pays the uploads once. This is
-    bitwise inert (test-pinned against fresh engines) because everything kept is a
-    function of the engine's frozen inputs; treat ``grid``, ``cross_sections`` and
-    ``magnetic_field`` as immutable (a mutated array is not re-uploaded — build a
-    new engine). The device memory stays held while the engine lives; call
-    :meth:`release_device_memory` to hand it back sooner. The per-call dense dose
-    maps are *not* kept: their size is the scoring grid's (or, for a Dij, budgeted
-    from free memory), so they are allocated per call as before.
+    The engine keeps its device state resident between calls, per device: the
+    cross-section tables (per ``(ecut, pcut, e_max, with_gs)``, the four most
+    recently used), the voxel maps and field, the last scoring geometry and recent
+    spectra (by identity), and one transport workspace (queues, RNG slots,
+    counters) per batch lane, refitted exactly to each call by ``run`` and
+    ``run_dij`` alike. A loop of equal calls — a plan optimization — therefore pays
+    the uploads and allocations once. This is bitwise inert (test-pinned against
+    fresh engines). The engine-level keys are frozen fields, so treat ``grid``,
+    ``cross_sections`` and ``magnetic_field`` as immutable (a mutated array is not
+    re-uploaded — build a new engine); the per-call scoring grid and spectrum are
+    matched by identity, and their arrays are read-only for that reason.
+
+    **Device memory stays held between calls** while the engine lives: the tables
+    and voxel maps, plus the queues the *last* call needed — about 0.9 GB after a
+    full-width ``run`` on a 36-SM card at the auto chunk size, times its
+    ``concurrent_batches`` lanes; a smaller call shrinks it again. Call
+    :meth:`release_device_memory` to hand it all back. The dense dose maps are not
+    kept: their size is the scoring grid's (or, for a Dij, budgeted from free
+    memory), so they are allocated per call as before.
 
     Parameters
     ----------
@@ -676,8 +722,10 @@ class WarpEngine:
     def release_device_memory(self) -> None:
         """Drop every device array this engine keeps between calls, on every device.
 
-        Results are unaffected — the next call re-uploads and reallocates what it
-        needs, bit-identically. Host-side caches (the flattened cross-section
+        Use it to hand the card to something else between phases of work: an engine
+        otherwise holds its tables, voxel maps and the last call's queues for as
+        long as it lives. Results are unaffected — the next call re-uploads and
+        reallocates what it needs, bit-identically. Host-side caches (the flattened cross-section
         tables, the Goudsmit-Saunderson grid) are kept: they cost seconds to
         rebuild and no device memory. Not for use while a call on this engine is
         running on another thread.
@@ -739,15 +787,14 @@ class WarpEngine:
             state.spectra[id(spectrum)] = (spectrum, tables)
             return tables
 
-    def _acquire_workspaces(
-        self, device: str, n: int, capacity: int, exact: bool = False
-    ) -> list[_Workspace]:
-        """Take ``n`` transport workspaces fitted to ``capacity`` slots per queue.
+    def _acquire_workspaces(self, device: str, n: int, capacity: int) -> list[_Workspace]:
+        """Take ``n`` transport workspaces fitted to exactly ``capacity`` slots per queue.
 
-        Idle workspaces are reused (grown if too small; refitted to exactly
-        ``capacity`` when ``exact``, see :class:`_Workspace`) and any idle surplus is
-        released, so the memory parked between calls is what the last call used
-        and an ``exact`` acquirer may count all of it as free. The caller
+        Idle workspaces are reused and refitted (see :class:`_Workspace`), any idle
+        surplus beyond ``n`` is released before anything is allocated, and fresh ones
+        make up a shortfall. The pool therefore never holds more than the last
+        successful call used, and an acquirer may count every idle byte as free
+        (each is either released or reused for its own queues). The caller
         hands them back with :meth:`_release_workspaces` on success only: after an
         exception a lane stream may still be writing into them, so they are left
         to the garbage collector instead of being reused.
@@ -758,10 +805,10 @@ class WarpEngine:
             # allocates.
             taken, state.idle = state.idle[:n], []
         for ws in taken:
-            ws.fit(capacity, exact)
+            ws.fit(capacity)
         while len(taken) < n:
             ws = _Workspace(device)
-            ws.fit(capacity, exact)
+            ws.fit(capacity)
             taken.append(ws)
         return taken
 
@@ -900,8 +947,7 @@ class WarpEngine:
         escaped = counters.book("escaped")
         unscored = counters.book("unscored")
         deposited = counters.book("deposited")
-        violations = counters.violations()
-        violations.zero_()
+        violations = counters.book("violations")  # zeroed with the book
 
         # Advanced route: a source exposing a warp_sampler is generated in-kernel by a
         # wrapper kernel (built once per sampler), which books emitted weight-energy
@@ -999,6 +1045,7 @@ class WarpEngine:
             )
             wp.synchronize_device(device)
             books = counters.read_books()
+            _check_majorant(books)
             escaped_quanta = books["escaped"]
             unscored_quanta = books["unscored"]
             if dose_to_water != 0:
@@ -1205,6 +1252,7 @@ class WarpEngine:
             # tick still marks a finished batch. The int64 sums stay per batch, as
             # before (a whole-run int64 sum could overflow at ~9e9 MeV).
             books = counters.read_books()
+            _check_majorant(books)
             escaped_quanta += books["escaped"]
             unscored_quanta += books["unscored"]
             if dose_to_water != 0:
@@ -1227,15 +1275,6 @@ class WarpEngine:
             inputs=[s1, s2, n_batches, mean_dev, sigma_dev],
             device=device,
         )
-        # The majorant check runs once per call: the counter only ever grows, so a
-        # violation in any batch is still seen, and the per-batch readback it cost
-        # bought nothing but an earlier raise of a can't-happen condition.
-        if int(violations.numpy()[0]) != 0:
-            raise RuntimeError(
-                "Woodcock majorant violated in the kernel despite table headroom. "
-                "The geometry contains material or density the majorant "
-                "declaration did not cover."
-            )
         books = counters.read_books()
         if in_kernel:
             # Mono beams: every primary is one unit-weight photon at the beam energy
@@ -1409,7 +1448,7 @@ class WarpEngine:
         # sentinel, matching pyradmc.transport.electron.substep_pieces.
         deposit_resolution = 0.0 if deposit_resolution_cm is None else deposit_resolution_cm
 
-        scoring = scoring_grid if scoring_grid is not None else ScoringGrid.for_grid(self.grid)
+        scoring = self._scoring_geometry(scoring_grid)
         n_beamlets = source.n_beamlets
         per_batch = n_histories_per_beamlet // n_batches
 
@@ -1429,9 +1468,9 @@ class WarpEngine:
                 chunk_d = min(self._chunk_histories(d), n_beamlets * per_batch)
                 free = _device_free_bytes(d)
                 if free > 0:
-                    # The shard refits the engine's idle pooled queues exactly
-                    # (releasing the rest) before allocating, so they budget as
-                    # free: the group size a fresh engine gets.
+                    # The shard refits the engine's idle pooled queues to its own
+                    # size (releasing the rest) before allocating, so they budget
+                    # as free: the group size a fresh engine gets.
                     free += self._idle_workspace_bytes(d)
                 return _auto_group_size(
                     free,
@@ -1644,7 +1683,7 @@ class WarpEngine:
         # workspace per lane, shared with run(). The dense group maps stay per call:
         # their size is budgeted from free memory at the call, and parking up to half
         # the card between calls would starve whatever runs next.
-        workspaces = self._acquire_workspaces(device, lanes, max_capacity, exact=True)
+        workspaces = self._acquire_workspaces(device, lanes, max_capacity)
         lane_resources = [
             ws.lane(wp.zeros(max_group * n_voxels, dtype=wp.int64, device=device), lanes > 1)
             for ws in workspaces
@@ -1655,8 +1694,7 @@ class WarpEngine:
         escaped = counters.book("escaped")
         unscored = counters.book("unscored")
         deposited = counters.book("deposited")
-        violations = counters.violations()
-        violations.zero_()
+        violations = counters.book("violations")  # zeroed with the book
         emitted_counter = None
         if beamlet_generator is not None or use_spectral:
             emitted_counter = counters.book("emitted")
@@ -1793,6 +1831,7 @@ class WarpEngine:
             # One readback for the group's books (per group, so no int64 sum spans
             # more than it did); it synchronizes the default stream.
             books = counters.read_books()
+            _check_majorant(books)
             if dose_to_water != 0:
                 deposited_quanta += books["deposited"]
             else:
@@ -1878,15 +1917,6 @@ class WarpEngine:
             # still lands on an existing hard sync and adds none.
             emitter.tick(group * n_histories_per_beamlet)
 
-        # The majorant check runs once per shard: the counter only grows, so a
-        # violation in any group is still seen; a per-group readback bought only an
-        # earlier raise of a can't-happen condition.
-        if int(violations.numpy()[0]) != 0:
-            raise RuntimeError(
-                "Woodcock majorant violated in the kernel despite table headroom. "
-                "The geometry contains material or density the majorant "
-                "declaration did not cover."
-            )
         shard.deposited_quanta = deposited_quanta
         shard.escaped_quanta = escaped_quanta
         shard.unscored_quanta = unscored_quanta
@@ -3729,7 +3759,7 @@ class WarpEngine:
         state = self._state(device)
         full_key = (ecut, pcut, e_max, with_gs)
         with state.lock:
-            tab = state.tables.get(full_key)
+            tab = _lru_get(state.tables, full_key)
         if tab is not None:
             return tab
         key = (ecut, pcut, e_max)
@@ -3742,10 +3772,10 @@ class WarpEngine:
                 self._table_cache[key] = host
         gs_host = self._gs_grid_host(host, ecut, e_max) if with_gs else None
         with state.lock:
-            tab = state.tables.get(full_key)
+            tab = _lru_get(state.tables, full_key)
             if tab is None:
                 tab = self._build_tables(state, host, gs_host, ecut, pcut, e_max, device)
-                state.tables[full_key] = tab
+                _lru_put(state.tables, full_key, tab, _TABLES_RESIDENT)
             return tab
 
     def _build_tables(
@@ -3753,7 +3783,7 @@ class WarpEngine:
     ) -> Tables:
         """Assemble a ``Tables`` struct from device arrays shared across structs."""
         base_key = ("base", ecut, pcut, e_max)
-        base = state.table_arrays.get(base_key)
+        base = _lru_get(state.table_arrays, base_key)
         if base is None:
             base = {
                 name: wp.array(getattr(host, name).astype(np.float32), dtype=float, device=device)
@@ -3775,7 +3805,7 @@ class WarpEngine:
                     "coherent_cumulative",
                 )
             }
-            state.table_arrays[base_key] = base
+            _lru_put(state.table_arrays, base_key, base, 2 * _TABLES_RESIDENT)
         tab = Tables()
         for name, arr in base.items():
             setattr(tab, name, arr)
@@ -3789,10 +3819,10 @@ class WarpEngine:
         tab.n_coherent = host.n_coherent
         if gs_host is not None:
             gs_key = ("gs", ecut, e_max)
-            gs_values = state.table_arrays.get(gs_key)
+            gs_values = _lru_get(state.table_arrays, gs_key)
             if gs_values is None:
                 gs_values = wp.array(gs_host.values.astype(np.float32), dtype=float, device=device)
-                state.table_arrays[gs_key] = gs_values
+                _lru_put(state.table_arrays, gs_key, gs_values, 2 * _TABLES_RESIDENT)
             tab.gs_values = gs_values
             tab.gs_ix0 = gs_host.ix0
             tab.gs_iy0 = gs_host.iy0
