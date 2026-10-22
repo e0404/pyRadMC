@@ -259,3 +259,22 @@ def test_release_device_memory_drops_state_and_stays_identical(device: str) -> N
     assert engine._idle_workspace_bytes(device) == 0
     again = engine.run(MASKED, n_histories=800, n_batches=2, seed=SEED)
     _assert_run_equal(first, again)
+
+
+def test_majorant_violation_still_raises(device: str) -> None:
+    """The check now runs once per call (run) or shard (Dij); it must still fire.
+
+    The tables declare water at half the density the grid holds, so the majorant
+    is too small and the kernels count violations. An aborted call must also leave
+    the engine usable: its workspaces are dropped, not returned to the pool.
+    """
+    from pyradmc.data.materials import WATER
+
+    thin = AnalyticCrossSections(geometry_densities=((WATER, 0.5),))
+    engine = WarpEngine(grid=GRID, cross_sections=thin, device=device)
+    for _ in range(2):
+        with pytest.raises(RuntimeError, match="majorant violated"):
+            engine.run(PARALLEL, n_histories=600, n_batches=3, seed=SEED)
+        with pytest.raises(RuntimeError, match="majorant violated"):
+            engine.run_dij(LATTICE, n_histories_per_beamlet=200, n_batches=2, seed=SEED)
+    assert engine._idle_workspace_bytes(device) == 0

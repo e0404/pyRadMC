@@ -364,7 +364,9 @@ class _Workspace:
         self.stream = None
         self.staging = None
         self.fold = None
-        self._counters: dict = {}
+        self._violations = None
+        self._book = None
+        self._book_views: dict = {}
 
     @property
     def nbytes(self) -> int:
@@ -393,13 +395,44 @@ class _Workspace:
             self.fold = wp.Stream(self.device)
         return self.fold
 
-    def counter(self, name: str, dtype) -> wp.array:
-        """Return a resident one-element counter; the caller zeroes it before use."""
-        arr = self._counters.get(name)
-        if arr is None:
-            arr = wp.zeros(1, dtype=dtype, device=self.device)
-            self._counters[name] = arr
-        return arr
+    def violations(self) -> wp.array:
+        """Return the resident majorant-violation counter; the caller zeroes it."""
+        if self._violations is None:
+            self._violations = wp.zeros(1, dtype=wp.int32, device=self.device)
+        return self._violations
+
+    def book(self, name: str) -> wp.array:
+        """Return the one-element int64 energy counter ``name`` (a view of the book).
+
+        The counters share one array so a call clears them in one memset and reads
+        them in one readback instead of one synchronizing ``numpy()`` each. Each
+        sits on its own 128-byte line, so the kernels' atomics on different
+        counters never share a cache line — the layout the kernels had when
+        every counter was its own allocation.
+        """
+        if self._book is None:
+            self._book = wp.zeros(len(_BOOK) * _BOOK_STRIDE, dtype=wp.int64, device=self.device)
+            self._book_views = {
+                key: self._book[i * _BOOK_STRIDE : i * _BOOK_STRIDE + 1]
+                for i, key in enumerate(_BOOK)
+            }
+        return self._book_views[name]
+
+    def clear_pass_books(self) -> None:
+        """Zero the per-pass counters (the first :data:`_BOOK_PER_PASS` of the book)."""
+        self.book(_BOOK[0])
+        self._book[: _BOOK_PER_PASS * _BOOK_STRIDE].zero_()
+
+    def clear_books(self) -> None:
+        """Zero every counter in the book."""
+        self.book(_BOOK[0])
+        self._book.zero_()
+
+    def read_books(self) -> dict[str, int]:
+        """Read every counter back in one transfer (synchronizes the default stream)."""
+        self.book(_BOOK[0])
+        host = self._book.numpy()
+        return {key: int(host[i * _BOOK_STRIDE]) for i, key in enumerate(_BOOK)}
 
     def lane(self, edep, concurrent: bool) -> _LaneResources:
         """View the workspace as a lane, on its own stream only when lanes overlap."""
@@ -417,6 +450,18 @@ class _Workspace:
             slots=self.slots,
             edep=edep,
         )
+
+
+_BOOK = ("escaped", "unscored", "deposited", "total_q", "dep_total", "emitted")
+"""The int64 energy counters a workspace keeps in one array. The first
+:data:`_BOOK_PER_PASS` are cleared and read once per pass — a batch of ``run``, a
+group of ``run_dij`` — so no int64 sum spans more than the pass it always did; the
+rest accumulate over the whole call."""
+
+_BOOK_PER_PASS = 4
+
+_BOOK_STRIDE = 16
+"""int64 elements between counters: 128 bytes, one cache line each."""
 
 
 @dataclass
@@ -854,10 +899,11 @@ class WarpEngine:
         edep = lane_resources[0].edep
         counters = workspaces[0]
         fold_stream = counters.fold_stream() if lanes > 1 else None
-        escaped = counters.counter("escaped", wp.int64)
-        unscored = counters.counter("unscored", wp.int64)
-        deposited = counters.counter("deposited", wp.int64)
-        violations = counters.counter("violations", wp.int32)
+        counters.clear_books()
+        escaped = counters.book("escaped")
+        unscored = counters.book("unscored")
+        deposited = counters.book("deposited")
+        violations = counters.violations()
         violations.zero_()
 
         # Advanced route: a source exposing a warp_sampler is generated in-kernel by a
@@ -869,11 +915,11 @@ class WarpEngine:
         wraps = not in_kernel and not is_device_ps and not is_spectral and not is_spectral_mask
         if wraps and source.warp_sampler is not None:
             generator = kernels.make_generator_kernel(source.warp_sampler)
-            emitted = counters.counter("emitted", wp.int64)
+            emitted = counters.book("emitted")
         if is_device_ps:
             # The seeding kernel books emitted weight-energy into this counter,
             # like the wrapped-generator route, read once after the batches.
-            emitted = counters.counter("emitted", wp.int64)
+            emitted = counters.book("emitted")
         spectral_tables = None
         mask_table = None
         if is_spectral or is_spectral_mask:
@@ -884,13 +930,11 @@ class WarpEngine:
             # route.
             spectral_source = source.inner if is_spectral_mask else source
             spectral_tables = self._spectral_tables(spectral_source.spectrum, device)
-            emitted = counters.counter("emitted", wp.int64)
+            emitted = counters.book("emitted")
             if is_spectral_mask:
                 mask_table = wp.array(
                     source.mask.reshape(-1).astype(np.float32), dtype=float, device=device
                 )
-        if emitted is not None:
-            emitted.zero_()
 
         n_voxels = scoring.n_voxels
         # Dose finalize on the device: per-voxel batch sums of dose and dose^2, folded
@@ -899,8 +943,7 @@ class WarpEngine:
         # back, not the dense per-batch fixed-point buffer.
         s1 = wp.zeros(n_voxels, dtype=wp.float64, device=device)
         s2 = wp.zeros(n_voxels, dtype=wp.float64, device=device)
-        dep_total = counters.counter("dep_total", wp.int64)  # dose-to-medium quanta
-        dep_total.zero_()
+        dep_total = counters.book("dep_total")  # dose-to-medium quanta
         per_batch = n_histories // n_batches
         energy_escaped = 0.0
         energy_unscored = 0.0
@@ -913,12 +956,9 @@ class WarpEngine:
 
         if lanes > 1:
             # Shared counters use integer atomics and therefore need only one clear
-            # for the whole concurrent run. Each lane owns the state whose writes
-            # are not commutative (queues, RNG slots, and its batch dose map).
-            escaped.zero_()
-            unscored.zero_()
-            deposited.zero_()
-            violations.zero_()
+            # for the whole concurrent run (done above). Each lane owns the state
+            # whose writes are not commutative (queues, RNG slots, and its batch dose
+            # map).
             energy_emitted += self._run_forward_batch_lanes(
                 lane_resources,
                 fold_stream,
@@ -961,23 +1001,16 @@ class WarpEngine:
                 emitter=emitter,
             )
             wp.synchronize_device(device)
-            if int(violations.numpy()[0]) != 0:
-                raise RuntimeError(
-                    "Woodcock majorant violated in the kernel despite table headroom. "
-                    "The geometry contains material or density the majorant "
-                    "declaration did not cover."
-                )
-            escaped_quanta = int(escaped.numpy()[0])
-            unscored_quanta = int(unscored.numpy()[0])
+            books = counters.read_books()
+            escaped_quanta = books["escaped"]
+            unscored_quanta = books["unscored"]
             if dose_to_water != 0:
-                deposited_quanta = int(deposited.numpy()[0])
+                deposited_quanta = books["deposited"]
 
         history = 0
         for _ in range(n_batches if lanes == 1 else 0):
             edep.zero_()
-            escaped.zero_()
-            unscored.zero_()
-            deposited.zero_()
+            counters.clear_pass_books()
             remaining = per_batch
             while remaining > 0:
                 n_chunk = min(chunk, remaining)
@@ -1153,13 +1186,6 @@ class WarpEngine:
                     )
                 history += n_chunk
                 remaining -= n_chunk
-            wp.synchronize_device(device)
-            if int(violations.numpy()[0]) != 0:
-                raise RuntimeError(
-                    "Woodcock majorant violated in the kernel despite table headroom. "
-                    "The geometry contains material or density the majorant "
-                    "declaration did not cover."
-                )
             # Fold this batch into the running dose sums on the device; the dense
             # fixed-point map never leaves the GPU. dep_total sums the physical
             # quanta (dose-to-medium book); dose-to-water reads its own counter.
@@ -1177,10 +1203,15 @@ class WarpEngine:
                 ],
                 device=device,
             )
-            escaped_quanta += int(escaped.numpy()[0])
-            unscored_quanta += int(unscored.numpy()[0])
+            # One readback per batch for all three per-batch books; it synchronizes
+            # the default stream, which carries every launch of this path, so the
+            # tick still marks a finished batch. The int64 sums stay per batch, as
+            # before (a whole-run int64 sum could overflow at ~9e9 MeV).
+            books = counters.read_books()
+            escaped_quanta += books["escaped"]
+            unscored_quanta += books["unscored"]
             if dose_to_water != 0:
-                deposited_quanta += int(deposited.numpy()[0])
+                deposited_quanta += books["deposited"]
             emitter.tick(per_batch)
 
         # Convert the exact integer books once, after aggregation. Besides avoiding
@@ -1191,13 +1222,6 @@ class WarpEngine:
         if dose_to_water != 0:
             energy_deposited = float(deposited_quanta) * ENERGY_QUANTUM_MEV
 
-        if in_kernel:
-            # Mono beams: every primary is one unit-weight photon at the beam energy
-            # (max_energy == energy), so the device need not report emitted energy.
-            energy_emitted = n_histories * source.max_energy
-        elif emitted is not None:
-            energy_emitted = float(emitted.numpy()[0]) * ENERGY_QUANTUM_MEV
-
         mean_dev = wp.zeros(n_voxels, dtype=wp.float64, device=device)
         sigma_dev = wp.zeros(n_voxels, dtype=wp.float64, device=device)
         wp.launch(
@@ -1206,9 +1230,25 @@ class WarpEngine:
             inputs=[s1, s2, n_batches, mean_dev, sigma_dev],
             device=device,
         )
-        wp.synchronize_device(device)
+        # The majorant check runs once per call: the counter only ever grows, so a
+        # violation in any batch is still seen, and the per-batch readback it cost
+        # bought nothing but an earlier raise of a can't-happen condition.
+        if int(violations.numpy()[0]) != 0:
+            raise RuntimeError(
+                "Woodcock majorant violated in the kernel despite table headroom. "
+                "The geometry contains material or density the majorant "
+                "declaration did not cover."
+            )
+        books = counters.read_books()
+        if in_kernel:
+            # Mono beams: every primary is one unit-weight photon at the beam energy
+            # (max_energy == energy), so the device need not report emitted energy.
+            energy_emitted = n_histories * source.max_energy
+        elif emitted is not None:
+            energy_emitted = float(books["emitted"]) * ENERGY_QUANTUM_MEV
+
         if dose_to_water == 0:
-            energy_deposited = float(dep_total.numpy()[0]) * ENERGY_QUANTUM_MEV
+            energy_deposited = float(books["dep_total"]) * ENERGY_QUANTUM_MEV
         dose = mean_dev.numpy().reshape(scoring.shape)
         dose_sigma = sigma_dev.numpy().reshape(scoring.shape)
         self._release_workspaces(device, workspaces)
@@ -1615,18 +1655,18 @@ class WarpEngine:
         ]
         counters = workspaces[0]
         fold_stream = counters.fold_stream() if lanes > 1 else None
-        escaped = counters.counter("escaped", wp.int64)
-        unscored = counters.counter("unscored", wp.int64)
-        deposited = counters.counter("deposited", wp.int64)
-        violations = counters.counter("violations", wp.int32)
+        counters.clear_books()
+        escaped = counters.book("escaped")
+        unscored = counters.book("unscored")
+        deposited = counters.book("deposited")
+        violations = counters.violations()
         violations.zero_()
         emitted_counter = None
         if beamlet_generator is not None or use_spectral:
-            emitted_counter = counters.counter("emitted", wp.int64)
-            emitted_counter.zero_()
+            emitted_counter = counters.book("emitted")
         s1 = wp.zeros(max_group * n_voxels, dtype=wp.float64, device=device)
         s2 = wp.zeros(max_group * n_voxels, dtype=wp.float64, device=device)
-        total_q = counters.counter("total_q", wp.int64)
+        total_q = counters.book("total_q")
         # Truncation runs one thread per (column, chunk) rather than one per column;
         # the layout is scheduling only and the output is independent of it. Sized
         # from the widest group and this device's SM count, so the launch fills the
@@ -1703,10 +1743,7 @@ class WarpEngine:
             # being the last one. Each lane keeps its own map, so clear them all.
             for res in lane_resources:
                 wp.launch(kernels.fill_int64, dim=span, inputs=[res.edep, 0], device=device)
-            total_q.zero_()
-            escaped.zero_()
-            unscored.zero_()
-            deposited.zero_()
+            counters.clear_pass_books()  # escaped, unscored, deposited, total_q
 
             if lanes == 1:
                 # One drain per batch, folded into s1/s2 before the next batch
@@ -1739,13 +1776,11 @@ class WarpEngine:
                     fold_args,
                 )
 
-            wp.synchronize_device(device)
-            if int(violations.numpy()[0]) != 0:
-                raise RuntimeError(
-                    "Woodcock majorant violated in the kernel despite table headroom. "
-                    "The geometry contains material or density the majorant "
-                    "declaration did not cover."
-                )
+            if lanes > 1:
+                # Order the lanes' streams before the default-stream reduction. The
+                # sequential path needs nothing here: every launch it made is on the
+                # default stream, and the readbacks below synchronize that stream.
+                wp.synchronize_device(device)
             # Turn the group's accumulated sums into per-column dose mean and sigma,
             # in place: each thread reads s1[tid]/s2[tid] and writes only its own
             # element, so aliasing the outputs onto the inputs is safe and saves two
@@ -1759,13 +1794,15 @@ class WarpEngine:
                 device=device,
             )
             mean_dev, sigma_dev = s1, s2
-            wp.synchronize_device(device)
+            # One readback for the group's books (per group, so no int64 sum spans
+            # more than it did); it synchronizes the default stream.
+            books = counters.read_books()
             if dose_to_water != 0:
-                deposited_quanta += int(deposited.numpy()[0])
+                deposited_quanta += books["deposited"]
             else:
-                deposited_quanta += int(total_q.numpy()[0])
-            escaped_quanta += int(escaped.numpy()[0])
-            unscored_quanta += int(unscored.numpy()[0])
+                deposited_quanta += books["total_q"]
+            escaped_quanta += books["escaped"]
+            unscored_quanta += books["unscored"]
 
             # Truncate + compact each column on the device; only the surviving sparse
             # CSC entries read back, never the dense per-column dose maps. col_max is
@@ -1797,7 +1834,6 @@ class WarpEngine:
                 ],
                 device=device,
             )
-            wp.synchronize_device(device)
             per_chunk = chunk_counts_dev.numpy()[: group * n_chunks].reshape(group, n_chunks)
             counts = per_chunk.sum(axis=1).astype(np.int32)
             column_base = np.zeros(group, dtype=np.int64)
@@ -1827,7 +1863,6 @@ class WarpEngine:
                 ],
                 device=device,
             )
-            wp.synchronize_device(device)
             # Copy, do not alias: on a cpu device ``numpy()`` is a *view* of the warp
             # array, and these blocks outlive both the reused ``counts_dev`` and this
             # group's compaction buffers. (The blocks are the sparse result itself, so
@@ -1847,11 +1882,20 @@ class WarpEngine:
             # still lands on an existing hard sync and adds none.
             emitter.tick(group * n_histories_per_beamlet)
 
+        # The majorant check runs once per shard: the counter only grows, so a
+        # violation in any group is still seen; a per-group readback bought only an
+        # earlier raise of a can't-happen condition.
+        if int(violations.numpy()[0]) != 0:
+            raise RuntimeError(
+                "Woodcock majorant violated in the kernel despite table headroom. "
+                "The geometry contains material or density the majorant "
+                "declaration did not cover."
+            )
         shard.deposited_quanta = deposited_quanta
         shard.escaped_quanta = escaped_quanta
         shard.unscored_quanta = unscored_quanta
         if emitted_counter is not None:
-            shard.emitted_quanta = int(emitted_counter.numpy()[0])
+            shard.emitted_quanta = counters.read_books()["emitted"]
         self._release_workspaces(device, workspaces)
         return shard
 
