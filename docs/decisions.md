@@ -438,12 +438,20 @@ pre-solves plus 10 `run()` calls: 20 launches with their own buffers, drains and
 GPU utilization 0-35 %. `SegmentedFanSource` (`geometry/segments.py`) makes segment `s`
 beamlet `s`: a history samples the `SpectralBeamSource` fan and carries
 `exp(-sum_j mu_j(E) L_{s,j})`, the stack transmission at segment `s`'s settings. That is
-exactly the pre-solve's `mode="attenuation"` (and `CollimatedSource`): no head scatter, no
-leaf-scattered photons, no contaminant electrons — no approximation beyond those already
-stated for that mode. `run_dij` returns one column per segment; `plan(weights)` is a
-`Source` whose histories pick segment `s` with probability `w_s / W` and carry
-`W * exp(-tau_s)`, so one `run()` estimates `sum_s w_s column_s` with no Dij, no dense
-per-segment maps and no truncation.
+the pre-solve's `mode="attenuation"` **with `air=None`**, and `CollimatedSource`: no head
+scatter, no leaf-scattered photons, no contaminant electrons, and **no air attenuation**
+(the pre-solve's optional `AirColumn` has no counterpart — a stated approximation of
+this source). One bookkeeping difference: the pre-solve drops primaries below `PCUT`
+or of zero weight when it slides them to its exit plane, while here every fan photon
+reaches transport, which ends a sub-cutoff photon at once; the routes agree for spectra
+above `PCUT` (every shipped MV spectrum; the Ali-Rogers floor is 0.15 MeV). `run_dij`
+returns one column per segment. `plan(weights)` is a `Source` whose histories pick
+segment `s` with probability `w_s / W` and carry `exp(-tau_s)`, so one `run()` returns
+`sum_s (w_s / W) column_s` per history and the caller scales by `total_weight` `W` —
+no Dij, no dense per-segment maps, no truncation. The weight is normalized on purpose:
+the emitted and deposited books are int64 fixed point (1e-9 MeV quantum, ceiling about
+9.2e9 MeV), and a primary weighted by `W` of hundreds of MU wraps them silently after
+about 1e7 histories.
 
 **Layout: one stack, per-segment columns.** Segments share the fan, the frame and the
 stack structure; they differ in jaw edges and leaf tips only. The device keeps the
@@ -453,22 +461,57 @@ existing `jaw_path_length`/`mlc_path_length` twin at that segment's settings and
 attenuation is the pre-solve's `MuArrays` table built from the same host `_MuTables`. The
 constructor takes the settings as arrays over a template stack, so an optimizer builds no
 `MLC` per segment (`with_settings`, 0.1 ms for 10 x 20 pairs, also reuses the attenuation
-table; ten validated `MLC` stacks cost 1.0 ms); the host route builds stacks lazily.
-Routing is exact-type: `SegmentedFanSource` with an exact `SpectralBeamSource` fan (and
-`SegmentedPlanSource` over both) generate in-kernel; any subclass is host pre-sampled.
+table and keeps this source's settings for anything not given; ten validated `MLC`
+stacks cost 1.0 ms); the arrays are stored read-only so the lazily built host stacks
+cannot drift from a device upload. Routing is exact-type: `SegmentedFanSource` with an
+exact `SpectralBeamSource` fan (and `SegmentedPlanSource` over both) generate in-kernel;
+any subclass is host pre-sampled.
 
-**Equivalence (fast tier, seed 20260711, batched chi-squared).** Column for column against
-the reference engine (2.4k histories per column, KERMA), against attenuation pre-solve +
-`run()` per segment (40k, cpu and cuda), plan run against the weighted column sum of an
-independent Dij, and in a one-off 6 MV electrons-on check (10 segments x 400k, cuda): all
-consistent. Every comparison — including known-equivalent controls (a route against
-itself with another seed, and the existing `CollimatedBeamletSource`) — sits *below* the
-batched null mean: chi-squared/null about 0.5 at 2.4k histories per column, 0.9 at 40k-400k.
-The batched oracle's null assumes normal batch means; skewed per-voxel deposits make it
-conservative at low statistics. It still rejects (a mutation dropping `W` from the plan
-weight fails), but its nominal power is optimistic there. Warp cpu and cuda draw the same
-counter-based streams, so their columns differ only by float rounding (~1e-5 relative):
-the two device parametrizations are not independent statistical trials.
+**One fan sampler for every generator.** The spectral fan's CDF inversion and ray were
+written out in each of three kernels, and this source would have added two more copies
+plus a discrete segment selection — sampling code in `backends/`. They now live once in
+`pyradmc/geometry/fan.py` as single-source scalar functions (`fan_primary`,
+`cdf_lower_bound`, `select_by_cdf`, compiled through `_KERNEL_MODULES`, runnable on the
+host and test-pinned there against the fan's own `emit`). The existing generators'
+queue output (energy, position, direction, weight, tag, RNG slot, emitted book) was
+saved before the refactor and is bit-identical after it on cpu and cuda; the segments
+module compiles with the transport kernels' options (`fast_math`), so a segmented
+history's energy and direction are bit-identical to `generate_spectral_beamlets`' for
+the same `(seed, key)` on one device (test-pinned).
+
+**Statistical evidence, and why the first version of it was empty.** The equivalence
+tests as first written compared 1 cm voxels at 2.4k histories per column in KERMA mode.
+There, most masked voxels hold about one deposit per batch, so each voxel's z^2 is
+bounded near or below 1 while the batched null mean is 1.2-1.4: the statistic sits below
+its null *regardless of bias*, and the tests had no power. An independent review showed
+it: a column permutation, a missing MLC, a missing jaw, a mean-energy attenuation and
+mirrored tips all passed at p = 1.0 (chi-squared/null about 0.5 for every one, the same
+as the unbiased control). The tests now score on coarse profile bins through the engines
+themselves (1 cm along the leaf travel, 4 cm across, two depth halves: true batch sigma,
+tens of events per bin per batch) and mask on the *pooled* dose, not on one side's
+upward fluctuations. Calibrated: 60 unbiased seed pairs give KS p 0.68 / 0.29 / 0.50 per
+column. Power, reviewer's host-route mutants at 12k histories per column, independent:
+column permutation, missing jaw, missing MLC, mirrored tips and bin-low-edge energies
+caught; the mean-energy mutant at p = 0.011 (caught at 40k, correlated, together with all
+the others). Swapping the two devices' attenuation rows is invisible by construction (both
+are the same water). In-kernel mutants — stream key from the group-local index, tag
+always 0, weight from the wrong segment, every segment reading segment 0's tips or jaws,
+plan weight doubled, plan always segment 0 — are each caught by at least two tests, the
+deterministic generator pins among them (queue read back: bit-equality with the spectral
+generator, tag `t // per_batch` at `group_start > 0`, weight equal to the host
+transmission within the float32 chord tolerance of `test_warp_compiled_stack`, plan
+segment from the replayed first uniform) and a correlation pin (identical segments give
+bit-identical columns when correlated and different ones when not).
+
+**A fixed-seed re-roll, not a tolerance change.** With the strengthened oracle the
+reference comparison at `SEED` lands at p = 0.006 on segment 1. It is a fluctuation:
+10 further seed pairs give uniform p-values (KS p 0.18); the Warp in-kernel and host
+routes agree at 400k histories per column; and over 12 seed pairs on segment 1's stack
+the existing `CollimatedBeamletSource` shows the same ref-vs-Warp low-p rate as this
+source (8 % below 0.05 each, one reference seed driving every comparison it enters
+low). The test runs at `SEED + 1`. Warp cpu and cuda draw the same counter-based
+streams, so their columns differ only by float rounding (about 1e-5 relative): the two
+device parametrizations of a test are one statistical trial, not two.
 
 **Measured.** RTX 4070 laptop at 2535 MHz, no throttle reason, the GPU shared with other
 jobs, interleaved best of 7, the DAO workload (`tests/perf/test_segmented_fan_throughput.py`):

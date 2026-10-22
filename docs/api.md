@@ -134,6 +134,7 @@ reaches for. They are supported, but imported from their modules:
 |---|---|
 | `pyradmc.geometry.collimation` | Jaw pairs, rounded-tip MLC, collimated and transmission-mask source wrappers |
 | `pyradmc.geometry.head` | Treatment-head pre-solve producing an exit-plane phase space |
+| `pyradmc.geometry.fan` | Single-source scalar samplers of the divergent spectral fan and of a discrete CDF draw, shared by the in-kernel generators |
 | `pyradmc.geometry.segments` | The segments of one collimated fan as Dij beamlets, and their MU-weighted plan view |
 | `pyradmc.adapters.ct` | Hounsfield calibration and CT image reading |
 | `pyradmc.data.tabulated` | Table precompiler and the EPICS build tool |

@@ -17,6 +17,21 @@ without a field, so results are not byte-identical to the previous release.
 
 ### Added
 
+- **All segments of one collimated fan in one engine launch.**
+  `pyradmc.geometry.segments.SegmentedFanSource` makes each collimator setting of a
+  `SpectralBeamSource` fan a beamlet: `run_dij` returns one dose column per segment
+  (the Dij of a segmented plan), and its `plan(weights)` view (`SegmentedPlanSource`)
+  returns the MU-mixed plan dose from one `run` — `sum_s (w_s / W) column_s` per
+  history, to be scaled by `total_weight` `W`. Physics is the head pre-solve's
+  `mode="attenuation"` without an air column (narrow-beam transmission; no head
+  scatter, contaminant electrons or air attenuation). Settings are per-segment jaw-edge
+  and leaf-tip arrays over one template stack (`with_settings` for an optimizer's
+  per-iteration update, no `MLC` objects built). The Warp engine generates the exact
+  types in-kernel; subclasses keep host pre-sampling. Measured on a laptop RTX 4070,
+  10 segments x 400k histories: 6.0x (Dij) and 7.0x (plan) faster than ten
+  attenuation pre-solves plus runs. Demonstrated by `examples/segmented_fan_demo.py`.
+  New Warp module `pyradmc.backends.warp.segments`.
+
 - Charged-particle transport in a **static magnetic field** (MR-linac dose).
   `pyradmc.MagneticField` — uniform, one vector per transport voxel, or a trilinear
   vector map on its own rectilinear grid, in tesla and the engine frame — is handed to
@@ -97,6 +112,12 @@ without a field, so results are not byte-identical to the previous release.
   the reference engine, which inverts one grid exactly, is unchanged by this item.
 
 ### Changed
+
+- The in-kernel spectral generators (open field, transmission-masked, beamlet fan)
+  now draw through one single-source sampler, `pyradmc.geometry.fan.fan_primary`
+  (with `cdf_lower_bound` and the discrete selector `select_by_cdf`), instead of a
+  copy each. No dose moves: their queue output was verified bit-identical before and
+  after on cpu and cuda.
 
 - `examples/magnetic_field_demo.py` docstring: the electron return effect is *not*
   "much weaker" at 0.35 T for a broad beam over a thick gap — it is as large as at
