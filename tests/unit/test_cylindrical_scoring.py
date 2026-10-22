@@ -417,3 +417,16 @@ def test_suggested_resolution_divides_every_depth_bin() -> None:
         assert (w / r) == pytest.approx(round(w / r), rel=1e-9), f"{w} not divisible by {r}"
     # Fine enough to put at least two deposits in the narrowest bin.
     assert r <= 0.5 * cyl.depth_thickness.min() * (1.0 + 1e-9)
+
+
+def test_shell_mass_is_read_only_and_owned() -> None:
+    """As for ScoringGrid: an engine keeps the uploaded masses resident by identity."""
+    cyl = _cylinder()
+    with pytest.raises(ValueError, match="read-only"):
+        cyl.voxel_mass *= 2.0
+    mass = np.array(cyl.voxel_mass)
+    owned = CylindricalScoringGrid(
+        axis=cyl.axis, depth_edges=cyl.depth_edges, radial_edges=cyl.radial_edges, voxel_mass=mass
+    )
+    mass *= 2.0
+    np.testing.assert_array_equal(owned.voxel_mass, cyl.voxel_mass)

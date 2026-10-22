@@ -108,6 +108,13 @@ class ScoringGrid:
             )
         if np.any(self.voxel_mass < 0.0):
             raise ValueError("negative scoring voxel mass")
+        # Owned and read-only, like Spectrum and MagneticField: a device engine keeps
+        # the uploaded masses resident by identity, so an in-place edit would score
+        # silently against the stale upload. The copy keeps the caller's array
+        # theirs; the dtype is kept, so scoring arithmetic is unchanged.
+        mass = np.array(self.voxel_mass, copy=True)
+        mass.setflags(write=False)
+        object.__setattr__(self, "voxel_mass", mass)
 
     @classmethod
     def for_grid(cls, grid: VoxelGrid) -> ScoringGrid:

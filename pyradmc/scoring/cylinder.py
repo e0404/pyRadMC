@@ -228,6 +228,11 @@ class CylindricalScoringGrid:
             )
         if np.any(self.voxel_mass < 0.0):
             raise ValueError("negative shell mass")
+        # Owned and read-only, as in ScoringGrid: an engine keeps the uploaded masses
+        # resident by identity, so an in-place edit must be impossible.
+        mass = np.array(self.voxel_mass, copy=True)
+        mass.setflags(write=False)
+        object.__setattr__(self, "voxel_mass", mass)
         object.__setattr__(self, "depth_edges", depth)
         object.__setattr__(self, "radial_edges", edges)
         object.__setattr__(self, "_edges_squared", edges**2)

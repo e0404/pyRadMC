@@ -430,6 +430,147 @@ the loss.
 a 1 % trip rate across the suite, and repair those by fixing the oracle, never by
 loosening the tolerance.
 
+
+## Head pre-solve setup cost, 2026-10-22
+
+`presolve_head_device` was paying a fixed host cost on every call that has nothing to do
+with the head physics: a scalar-query loop over the energy grid for every device
+material (`_MuTables`, 512 nodes x total and Compton x each material, through
+`TabulatedCrossSections.mu_over_rho`), a fresh flatten and 19 small `wp.array` uploads
+of the stack, a re-upload of the log-mu tables, and an `astype(np.float32)` copy of
+eight primary columns that `sample_batch` already emits as float32. An aperture
+optimizer repeats the call hundreds of times with the same materials.
+
+**Decision.** Memoise at the interface boundary, not by vectorising the lookup. The
+curves are pure functions of `(source, material, grid)`, so `geometry/mucache.py` keeps
+them per source object (weak reference, entry dies with the source, keyed by identity),
+returning the very arrays the removed loops built, element for element. Density is not in
+the key, so a retuned leaf density reuses the curve and only re-scales and re-logs.
+`geometry.head.mu_tables` also memoises the assembled `_MuTables` (bounded at 32 per
+source), and the Warp pre-solve keeps the device upload of the tables on that object and
+of the stack per stack *object* (identity rather than value keys because `-0.0 == 0.0`; the
+object is frozen and `MLC` now coerces its leaf arrays to tuples of floats and the stack its
+devices to a tuple, so neither can be mutated in place under the cache; a test pins both
+the key and the lock-free weakref eviction, which deadlocked under cyclic GC when it took
+the cache lock). The same curve memo serves `_StackTransmission`. Primary columns
+go up through `np.ascontiguousarray(..., float32)`, a no-op when they already are.
+Vectorised array-valued lookup was rejected: `np.log` and `math.log` may differ in the
+last bit, so it could not promise the bit-identity the memo gives for free, and the cold
+build is paid once per source.
+
+**Measured** (2026-10-22, RTX 4070 laptop shared with three other agents, so GPU rows
+are contended; best-of-N, old and new alternated in separate processes, 3 rounds, all
+within 5 % between rounds). 2-tungsten-device stack with a 60-pair MLC and an air-free
+attenuation pre-solve:
+
+| quantity | before | after |
+|---|---|---|
+| `_MuTables` build, tabulated, 3 rows x 512 | 4.6 ms | 0.058 ms warm (cold unchanged) |
+| whole pre-solve at 2000 histories (setup-dominated) | 5.1 ms | 1.05 ms |
+| pre-solve at 400k histories | 101 ms | 98 ms (primary sampling is 84 ms of it) |
+| `BeamFrame` construction | 40 us | 27 us |
+| `MLC` (60 pairs) / `BeamLimitingStack` | 10 us / 1 us | unchanged |
+
+A collimator object costs 10 us (`MLC`, 60 pairs) and 1 us (`BeamLimitingStack`) here, already
+far under the 0.2 ms target, so their validators were left as they were (a vectorised
+rewrite measured no gain and was not exactly equivalent on contrived inputs). Only
+`BeamFrame` changed: `np.allclose` written out as the same inequality, identical
+decisions. `np.linalg.norm` in `_as_unit` was left alone because replacing it can move the
+last bit of every axis.
+
+**Bit identity** was checked on saved outputs of the unchanged code: the three log-mu
+tables (analytic water; EPICS tungsten + air) and the seeded pre-solve exit phase space
+in attenuation and first-Compton mode on cpu and cuda separately (records sorted, since
+the atomic append order is not deterministic) are `np.array_equal` before and after.
+Pinned in `tests/unit/test_presolve_setup.py` (against the scalar loops reproduced as
+oracles) and `tests/physics/test_warp_presolve_setup.py` (warm call equals cold call).
+Not changed: `StackArrays`/`upload_stack` layout, the engine, any kernel, any default.
+The memo assumes a `CrossSectionSource` is immutable after construction, as every
+shipped source is (stated on the interface; `mucache.clear()` is the escape hatch).
+Bit-identity holds for Python-float densities. A numpy `float32` density used to build
+float32 tables under NEP 50 scalar rules; densities are now coerced with `float()` where the
+pre-solve builds its table key, so such inputs get float64 tables (a deliberate behaviour
+change, pinned in `tests/physics/test_warp_presolve_setup.py`).
+
+## Resident Warp device state, 2026-10-22
+
+**The Warp engine keeps its device state between calls; a plan-optimization loop was
+paying setup, not transport.** Profiling ten consecutive `run` calls (48x40x24 water,
+400k histories each through a mostly closed 6 MV transmission mask, RTX 4070 Laptop)
+showed per call about 5 ms re-uploading the cross-section tables — mostly `astype` and
+copy of the 12 MB float32 Goudsmit-Saunderson grid, although the host build was already
+cached — about 2 ms allocating and zeroing four queues of twelve columns plus RNG slots
+and counters, and a `synchronize_device` plus three or four synchronizing readbacks per
+batch. Transport kernels were a small fraction of the wall.
+
+Now kept per engine and device: the tables per `(ecut, pcut, e_max, with_gs)` (the GS
+grid shared across `pcut`; the four most recently used keys, so an ECUT sweep does not
+park a 12 MB grid per cut), the transport grid and field, the last scoring geometry and
+up to eight spectra, and a pool of transport workspaces — queues, slots, the counters in
+one array, lane streams — shared by `run` and `run_dij`. Two kinds of key:
+
+- **Engine fields** (grid, field, cross-section source) are frozen dataclass fields, so
+  a different one is a different engine; in-place mutation of their arrays is
+  unsupported, as it already was for the host table cache.
+- **Per-call arguments** (the scoring grid, the spectrum) are matched by identity with
+  a strong reference held. That is only sound because their arrays are read-only:
+  `Spectrum` already was, and `ScoringGrid` / `CylindricalScoringGrid` now copy
+  `voxel_mass` and mark it read-only (a review probe showed `sg.voxel_mass *= 2` between
+  two calls silently doubling the dose of the second).
+
+**Memory policy: the pool holds what the last call needed, never the largest so far.**
+Every call refits its workspaces exactly, growing or shrinking. A steady workload — an
+optimizer's loop of equal calls — reuses them untouched; an alternating big/small
+workload reallocates on each change, as every call did before. A first version kept the
+largest-ever size: it parked 864 MiB behind tiny calls after one 300k run (1760 MiB
+after a two-lane run) and let a Dij's dense group maps ride on a big run's queues (peak
+1325 -> 2054 MB, 64x64x48 water, 256 beamlets). With the exact refit, peak memory equals
+the pre-change engine in every sequence measured (run, dij, run+dij, dij+run, run+run).
+What stays held between calls is the tables and voxel maps plus the last call's queues
+(about 0.9 GB after a full-width `run` on this card, per lane);
+`WarpEngine.release_device_memory()` hands it back. The Dij auto group size counts idle
+pooled bytes as free (each is released or reused by the shard), so it is the size a
+fresh engine gets — pinned with a simulated device in the test file below.
+
+**Dense dose maps stay per call** — not to spare memory in general (the pool holds the
+last call's queues, which are of the same order), but because parking them buys little
+and costs a lot: a `run`'s five voxel-sized maps took about 0.1 ms to allocate and zero
+on the 48x40x24 grid (profiled, ~25 us each) against ~2 ms for the queues, while holding
+them would add 48 bytes per scoring voxel between calls (2.5 GB on a 512x512x200 CT). A
+Dij's group maps are sized per call from free memory and stay per call for that reason.
+
+**Books read in one transfer, majorant checked in the same readback.** The int64
+counters share one array (one 128-byte line each) and are still cleared and read per
+batch (`run`) or per group (Dij), so no int64 sum spans more than before. The kernels'
+int32 majorant-violation counter is aliased onto the low half of a zeroed int64 slot of
+that array (little-endian on every Warp target; `kernels.py` untouched), so the per-pass
+readback raises in the pass that made the violation at no extra transfer. The explicit
+`synchronize_device` in front of default-stream readbacks is gone (kept after
+concurrent lanes).
+
+Pinned in `tests/integration/test_warp_resident_session.py`: every call on a warmed
+engine equals the same call on a fresh one (run routes incl. pre-sampled, dose-to-water,
+KERMA, scoring grid, Dij incl. `devices=[...]`, lanes on cuda, a field engine); calls
+after an aborted one (a source failing mid-run, a queue overflow) equal a fresh engine's,
+and an overflow on a pool fitted to a larger call raises the same error as on a fresh
+engine; the pool's size after each call; the bounded table cache; the early majorant
+raise. Pre-change golden arrays matched exactly on cpu and cuda:0 after every commit.
+
+Measured, interleaved A/B against the pre-change code in separate processes on a GPU
+shared with other jobs (clock checked under load at 2.27 GHz, no power cap); ranges are
+the best-of values over three alternations (cuda) or two (cpu), best of 3 loops, 30 tiny
+runs, 15 tiny Dij each:
+
+| | cuda before | cuda after | cpu before | cpu after |
+|---|---|---|---|---|
+| ten collimated runs (400k histories each on cuda, 40k on cpu) | 111-120 ms | 20-22 ms | 395-423 ms | 72 ms |
+| tiny `run` (64 histories) | 7.4-8.7 ms | 0.88-0.92 ms | 7.4-7.7 ms | 0.94-0.98 ms |
+| tiny `run_dij` (16 beamlets x 16) | 8.4-8.7 ms | 1.62-1.69 ms | 23-24 ms | 15.5-16.6 ms |
+
+Recorded in `tests/perf/test_warp_setup_overhead.py`. What remains of a tiny call is
+mostly the drain loop's per-round count readbacks and launch overhead, which this change
+left alone.
+
 ## Warp drain schedule, 2026-10-22
 
 **The queue drain launches blind rounds and reads the counts back once per block.**

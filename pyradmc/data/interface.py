@@ -84,6 +84,12 @@ class CrossSectionSource(ABC):
     handles to the kernels. The abstract methods below are the *host-side* query
     API used for construction, validation, and the reference backend. Kernel-side
     access goes through the flattened tables that ``build_tables`` returns.
+
+    **Immutability contract.** A source must not change its answers after
+    construction: the engine and the head pre-solve memoise results of the query
+    API per source object (:mod:`pyradmc.geometry.mucache`). If a source is
+    modified in place anyway, call :func:`pyradmc.geometry.mucache.clear` before
+    the next run.
     """
 
     @property

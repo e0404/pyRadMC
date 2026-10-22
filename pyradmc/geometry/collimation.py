@@ -52,6 +52,7 @@ from numpy.typing import NDArray
 
 from pyradmc.data.handles import Table1D
 from pyradmc.data.interface import CrossSectionSource
+from pyradmc.geometry import mucache
 from pyradmc.geometry.source import BeamletSource, Primary, Source
 from pyradmc.rng import RNGState
 
@@ -73,6 +74,8 @@ __all__ = [
 _F64 = NDArray[np.float64]
 
 _ORTHONORMAL_TOLERANCE = 1.0e-9
+_EYE3 = np.eye(3)
+_EYE3.setflags(write=False)
 
 
 def _as_unit(vector: tuple[float, float, float], name: str) -> tuple[float, float, float]:
@@ -107,7 +110,9 @@ class BeamFrame:
         object.__setattr__(self, "v_axis", v)
         object.__setattr__(self, "w_axis", w)
         axes = np.array([u, v, w])
-        if not np.allclose(axes @ axes.T, np.eye(3), atol=_ORTHONORMAL_TOLERANCE):
+        # np.allclose(gram, eye, atol=tol) written out: |a - b| <= atol + rtol * |b| with
+        # numpy's default rtol, minus the isclose wrapper overhead (same decision).
+        if not np.all(np.abs(axes @ axes.T - _EYE3) <= _ORTHONORMAL_TOLERANCE + 1.0e-5 * _EYE3):
             raise ValueError("beam frame axes must be orthonormal")
         if float(np.dot(np.cross(axes[0], axes[1]), axes[2])) < 1.0 - 1.0e-9:
             raise ValueError("beam frame axes must be right-handed (u x v = w)")
@@ -633,6 +638,11 @@ class MLC:
     strips tile ``v`` exactly — interleaf leakage is absent by construction). The
     bank ends at the outer strip edges; the orthogonal jaws provide the lateral
     bound beyond them.
+
+    Immutable, leaf arrays included: ``leaf_edges_v``, ``tips_neg`` and ``tips_pos``
+    are coerced to tuples of floats on construction, so a stack's flattened (and
+    device-cached) geometry cannot change under a live object; build a new MLC to
+    move a leaf.
     """
 
     z_top: float
@@ -647,6 +657,11 @@ class MLC:
 
     def __post_init__(self) -> None:
         """Validate slab extents, tip-arc coverage, leaf tiling, and material data."""
+        # Coerce the per-leaf fields to tuples of Python floats: an MLC is immutable
+        # *including* its leaf arrays (a caller's numpy array can no longer be mutated
+        # underneath it), which the identity-keyed device upload cache relies on.
+        for name in ("leaf_edges_v", "tips_neg", "tips_pos"):
+            object.__setattr__(self, name, tuple(float(v) for v in getattr(self, name)))
         if self.z_top <= 0.0:
             raise ValueError(f"z_top must be downstream of the focal spot, got {self.z_top}")
         if self.z_bottom <= self.z_top:
@@ -746,6 +761,7 @@ class BeamLimitingStack:
 
     def __post_init__(self) -> None:
         """Validate that the devices are stacked: ascending and disjoint along w."""
+        object.__setattr__(self, "devices", tuple(self.devices))
         if not self.devices:
             raise ValueError("a stack needs at least one device")
         tops = [device.z_top for device in self.devices]
@@ -960,11 +976,11 @@ class _StackTransmission(_RayWeightModel):
         if not 0.0 < e_min < e_max:
             raise ValueError(f"need 0 < e_min < e_max, got {e_min}, {e_max}")
         self._stack = stack
-        energies = np.geomspace(e_min, e_max, n_table)
+        energies = mucache.energy_grid(e_min, e_max, n_table)
         self._log_energies = np.log(energies)
         self._log_mu = np.stack(
             [
-                np.log([cross_sections.mu_over_rho_total(float(e), material) for e in energies])
+                np.log(mucache.mu_curve(cross_sections, material, e_min, e_max, n_table, None)[1])
                 for material in stack.materials
             ]
         )

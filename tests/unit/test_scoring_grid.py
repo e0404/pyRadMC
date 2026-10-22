@@ -142,3 +142,23 @@ def test_rebin_dose_voxel_outside_ct_has_zero_mass() -> None:
     # Second dose voxel spans x in [2, 4]: entirely outside the CT's [0, 2].
     assert float(sg.voxel_mass[1, 0, 0]) == 0.0
     assert float(sg.voxel_mass[0, 0, 0]) > 0.0
+
+
+def test_voxel_mass_is_read_only_and_owned() -> None:
+    """The mass map cannot change after construction, nor through the caller's array.
+
+    A device engine keeps a scoring geometry's uploaded masses resident by identity,
+    so a mass edited in place would silently score against the stale upload.
+    """
+    from pyradmc.scoring.grid import ScoringGrid
+
+    grid = _heterogeneous_grid()
+    sg = ScoringGrid.for_grid(grid)
+    with pytest.raises(ValueError, match="read-only"):
+        sg.voxel_mass *= 2.0
+    mass = np.ones((2, 2, 2))
+    owned = ScoringGrid(
+        shape=(2, 2, 2), spacing=(1.0, 1.0, 1.0), origin=(0.0, 0.0, 0.0), voxel_mass=mass
+    )
+    mass *= 2.0  # the caller's array stays theirs to mutate ...
+    np.testing.assert_array_equal(owned.voxel_mass, np.ones((2, 2, 2)))  # ... without effect
