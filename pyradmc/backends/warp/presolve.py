@@ -20,6 +20,8 @@ importable only when the ``warp`` optional dependency is installed.
 from __future__ import annotations
 
 import math
+import threading
+import weakref
 
 import numpy as np
 import warp as wp
@@ -27,7 +29,7 @@ import warp as wp
 from pyradmc import ECUT_MEV, PCUT_MEV
 from pyradmc.backends.warp.physics import warp_physics
 from pyradmc.geometry.collimation import BeamLimitingStack, CompiledStack
-from pyradmc.geometry.head import AirColumn, _MuTables, resolve_presolve
+from pyradmc.geometry.head import AirColumn, _MuTables, mu_tables, resolve_presolve
 from pyradmc.geometry.phasespace import IAEA_ELECTRON, IAEA_PHOTON, InMemoryPhaseSpaceSource
 from pyradmc.geometry.source import Source
 from pyradmc.rng.warp_shim import WarpRNGState, init_slot, uniform
@@ -557,6 +559,48 @@ def _alloc_exit_buffer(capacity: int, device: str) -> ExitBuffer:
     return buf
 
 
+def _as_float32(values: np.ndarray) -> np.ndarray:
+    """``values`` as float32, without a copy when it already is (sources emit float32)."""
+    return np.ascontiguousarray(values, dtype=np.float32)
+
+
+# Device stack uploads, memoised per (stack object, device). A BeamLimitingStack is
+# frozen, so the arrays flattened from it never go stale; the kernel only reads
+# them. Keyed by object identity (never value: -0.0 == 0.0 would alias differing
+# bit patterns), entries die with the stack, and an optimizer that builds a fresh
+# stack per iteration simply misses, paying what it paid before.
+_stack_cache: dict[tuple[int, str], tuple[weakref.ref, StackArrays]] = {}
+_stack_cache_lock = threading.Lock()
+
+
+def _device_stack(stack: BeamLimitingStack, device: str) -> StackArrays:
+    """Flatten and upload ``stack`` to ``device``, once per stack object."""
+    key = (id(stack), device)
+    with _stack_cache_lock:
+        hit = _stack_cache.get(key)
+        if hit is not None and hit[0]() is stack:
+            return hit[1]
+    arrays = upload_stack(stack.flatten(), device)
+
+    def _evict(_ref: weakref.ref, key: tuple[int, str] = key) -> None:
+        with _stack_cache_lock:
+            entry = _stack_cache.get(key)
+            if entry is not None and entry[0] is _ref:
+                del _stack_cache[key]
+
+    with _stack_cache_lock:
+        _stack_cache[key] = (weakref.ref(stack, _evict), arrays)
+    return arrays
+
+
+def _device_mu(tables: _MuTables, device: str) -> MuArrays:
+    """Upload the log-mu tables once per (table object, device); tables are read-only."""
+    cached = tables.device_cache.get(device)
+    if cached is None:
+        cached = tables.device_cache[device] = _upload_mu(tables, device)
+    return cached
+
+
 def _upload_mu(tables: _MuTables, device: str) -> MuArrays:
     """Upload the host log-mu tables (density-scaled) to ``device``."""
     log_energies = tables._log_energies  # uniform log grid (geomspace on the host)
@@ -620,13 +664,13 @@ def presolve_head_device(
     air_row = len(pairs)
     if air is not None:
         pairs = (*pairs, (air.material, air.density))
-    mu_tables = _MuTables(cross_sections, pairs, e_min, source.max_energy, n_table)
+    tables = mu_tables(cross_sections, pairs, e_min, source.max_energy, n_table)
 
-    stack_dev = upload_stack(stack.flatten(), device)
-    mu_dev = _upload_mu(mu_tables, device)
+    stack_dev = _device_stack(stack, device)
+    mu_dev = _device_mu(tables, device)
 
     def farr(name: str) -> wp.array:
-        return wp.array(columns[name].astype(np.float32), dtype=float, device=device)
+        return wp.array(_as_float32(columns[name]), dtype=float, device=device)
 
     first_compton = 1 if resolved == "first_compton" else 0
     has_air = 1 if air is not None else 0

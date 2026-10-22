@@ -429,3 +429,57 @@ the loss.
 **Flipping a validated default re-rolls every fixed-seed statistical test.** Expect around
 a 1 % trip rate across the suite, and repair those by fixing the oracle, never by
 loosening the tolerance.
+
+
+## Head pre-solve setup cost, 2026-10-22
+
+`presolve_head_device` was paying a fixed host cost on every call that has nothing to do
+with the head physics: a scalar-query loop over the energy grid for every device
+material (`_MuTables`, 512 nodes x total and Compton x each material, through
+`TabulatedCrossSections.mu_over_rho`), a fresh flatten and 19 small `wp.array` uploads
+of the stack, a re-upload of the log-mu tables, and an `astype(np.float32)` copy of
+eight primary columns that `sample_batch` already emits as float32. An aperture
+optimizer repeats the call hundreds of times with the same materials.
+
+**Decision.** Memoise at the interface boundary, not by vectorising the lookup. The
+curves are pure functions of `(source, material, grid)`, so `geometry/mucache.py` keeps
+them per source object (weak reference, entry dies with the source, keyed by identity),
+returning the very arrays the removed loops built, element for element. Density is not in
+the key, so a retuned leaf density reuses the curve and only re-scales and re-logs.
+`geometry.head.mu_tables` also memoises the assembled `_MuTables` (bounded at 32 per
+source), and the Warp pre-solve keeps the device upload of the tables on that object and
+of the stack per stack *object* (frozen, so never stale; identity rather than value keys
+because `-0.0 == 0.0`). The same curve memo serves `_StackTransmission`. Primary columns
+go up through `np.ascontiguousarray(..., float32)`, a no-op when they already are.
+Vectorised array-valued lookup was rejected: `np.log` and `math.log` may differ in the
+last bit, so it could not promise the bit-identity the memo gives for free, and the cold
+build is paid once per source.
+
+**Measured** (2026-10-22, RTX 4070 laptop shared with three other agents, so GPU rows
+are contended; best-of-N, old and new alternated in separate processes, 3 rounds, all
+within 5 % between rounds). 2-tungsten-device stack with a 60-pair MLC and an air-free
+attenuation pre-solve:
+
+| quantity | before | after |
+|---|---|---|
+| `_MuTables` build, tabulated, 3 rows x 512 | 4.6 ms | 0.058 ms warm (cold unchanged) |
+| whole pre-solve at 2000 histories (setup-dominated) | 5.1 ms | 1.05 ms |
+| pre-solve at 400k histories | 101 ms | 98 ms (primary sampling is 84 ms of it) |
+| `BeamFrame` construction | 40 us | 27 us |
+| `MLC` (60 pairs) / `BeamLimitingStack` | 10 us / 1 us | unchanged |
+
+The brief's "about 1 ms" per `MLC`/`BeamLimitingStack` did not reproduce here: 10 us and
+1 us before the change. The validators were still tightened where it was free
+(`np.allclose` in `BeamFrame` written out as the same inequality, the tip-crossing scan
+vectorised, same first-failing-pair message); `np.linalg.norm` in `_as_unit` was left
+alone because replacing it can move the last bit of every axis.
+
+**Bit identity** was checked on saved outputs of the unchanged code: the three log-mu
+tables (analytic water; EPICS tungsten + air) and the seeded pre-solve exit phase space
+in attenuation and first-Compton mode on cpu and cuda separately (records sorted, since
+the atomic append order is not deterministic) are `np.array_equal` before and after.
+Pinned in `tests/unit/test_presolve_setup.py` (against the scalar loops reproduced as
+oracles) and `tests/physics/test_warp_presolve_setup.py` (warm call equals cold call).
+Not changed: `StackArrays`/`upload_stack` layout, the engine, any kernel, any default.
+The memo assumes a `CrossSectionSource` is immutable after construction, as every
+shipped source is.
