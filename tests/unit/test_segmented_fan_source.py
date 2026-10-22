@@ -448,3 +448,20 @@ def test_cdf_samplers_match_searchsorted() -> None:
     # Zero-share indices (0, 2, 5) are never drawn.
     drawn = {select_by_cdf(cdf, cdf.size, u) for u in probes if u < 1.0}  # u in [0, 1)
     assert drawn == {1, 3, 4}
+
+
+def test_plan_batch_is_built_from_the_segment_batches() -> None:
+    """``SegmentedPlanSource.sample_batch`` goes through ``sample_beamlet_batch``."""
+
+    class Halved(SegmentedFanSource):
+        def sample_beamlet_batch(self, seed, history_offset, n, beamlet):
+            columns = super().sample_beamlet_batch(seed, history_offset, n, beamlet)
+            columns["weight"] = (0.5 * columns["weight"]).astype(np.float32)
+            return columns
+
+    weights = [1.0, 2.0, 1.0][: len(SETTINGS)]
+    base = _source().plan(weights).sample_batch(SEED, 0, 256)
+    halved = Halved.from_stacks(_fan(), _stacks(), AnalyticCrossSections()).plan(weights)
+    got = halved.sample_batch(SEED, 0, 256)
+    np.testing.assert_array_equal(got["energy"], base["energy"])
+    np.testing.assert_array_equal(got["weight"], (0.5 * base["weight"]).astype(np.float32))

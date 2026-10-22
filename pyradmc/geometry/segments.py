@@ -608,20 +608,25 @@ class SegmentedPlanSource(Source):
         return self._select(np.random.Generator(bitgen).random(n))
 
     def sample_batch(self, seed: int, history_offset: int, n: int) -> dict[str, npt.NDArray[Any]]:
-        """Vectorized host batch: the fan's batch, each row weighted by its segment."""
-        columns = self._segments.fan.sample_batch(seed, history_offset, n)
+        """Vectorized host batch: each history's row of its segment's beamlet batch.
+
+        Built from :meth:`SegmentedFanSource.sample_beamlet_batch`, segment by
+        segment, so a subclass's sampling override reaches the Warp host route
+        exactly as it reaches the reference engine through :meth:`emit`. The
+        segments' batches are segment-blind (row ``i`` of every segment is the same
+        fan ray), so taking each history's row from its own segment's batch is the
+        vectorized form of :meth:`emit`. Costs one full batch per distinct segment;
+        the exact types are generated in-kernel and never pay it.
+        """
         segment = self.segment_of(seed, history_offset, n)
-        energies = columns["energy"].astype(np.float64)
-        origins = np.stack([columns["x"], columns["y"], columns["z"]], axis=1).astype(np.float64)
-        directions = np.stack([columns["ux"], columns["uy"], columns["uz"]], axis=1).astype(
-            np.float64
-        )
-        factors = np.zeros(n, dtype=np.float64)
-        for s in np.unique(segment):
+        present = np.unique(segment) if n > 0 else np.zeros(1, dtype=np.int64)
+        out: dict[str, npt.NDArray[Any]] | None = None
+        for s in present:
+            batch = self._segments.sample_beamlet_batch(seed, history_offset, n, int(s))
+            if out is None:
+                out = {key: np.array(column, copy=True) for key, column in batch.items()}
             rows = segment == s
-            factors[rows] = self._segments.transmission(
-                int(s), energies[rows], origins[rows], directions[rows]
-            )
-        out = dict(columns)
-        out["weight"] = (columns["weight"].astype(np.float64) * factors).astype(np.float32)
+            for key, column in batch.items():
+                out[key][rows] = column[rows]
+        assert out is not None
         return out

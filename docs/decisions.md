@@ -617,6 +617,8 @@ launches, and cpu has no graphs. Revisit only if a workload's per-drain GPU time
 below its host enqueue time. The drain's status array and pinned readback element live
 in the pooled lane workspace, made on first use and kept across refits.
 
+**Review fix (integration):** the sequential `run()` routes now pass the lane's pooled workspace to every chunk transport; before, `_drain_queues` built a throwaway `_Workspace` (fresh status storage) per chunk on that path. A test counts workspace constructions during a warmed sequential run and requires zero.
+
 ## Segmented fans in one launch, 2026-10-22
 
 **A plan's segments are the beamlets of one source.** An aperture-optimization loop
@@ -734,3 +736,5 @@ fixed cost and the nine extra drains, not the generator.
 contract); allocation in proportion to MU exists only in the plan view, and is
 multinomial, because `emit` never sees the history index. Stratified allocation needs
 either a per-column history count in `run_dij` on both engines or an index-aware emit.
+
+**Review fix (integration):** the plan view's host batch (`SegmentedPlanSource.sample_batch`) is built from the segment source's `sample_beamlet_batch`, one batch per distinct segment, not from the bare fan. A segment subclass that reweights its primaries now reaches the Warp host route exactly as it reaches the reference engine through `emit` (reproduced before the fix: the reference halved, Warp did not). Voxel doses are not exactly proportional under reweighting because the photon roulette weight cap changes a few decisions; the test pins the emitted energy exactly and the total dose loosely.

@@ -1225,6 +1225,7 @@ class WarpEngine:
                         transport_electrons,
                         dose_to_water,
                         device,
+                        workspace=counters,
                     )
                 elif is_device_ps:
                     self._transport_chunk_device_buffer(
@@ -1253,6 +1254,7 @@ class WarpEngine:
                         dose_to_water,
                         emitted,
                         device,
+                        workspace=counters,
                     )
                 elif segment_plan is not None:
                     self._transport_chunk_segment_plan(
@@ -1282,6 +1284,7 @@ class WarpEngine:
                         dose_to_water,
                         emitted,
                         device,
+                        workspace=counters,
                     )
                 elif is_spectral_mask:
                     self._transport_chunk_spectral_mask(
@@ -1312,6 +1315,7 @@ class WarpEngine:
                         dose_to_water,
                         emitted,
                         device,
+                        workspace=counters,
                     )
                 elif is_spectral:
                     self._transport_chunk_spectral(
@@ -1341,6 +1345,7 @@ class WarpEngine:
                         dose_to_water,
                         emitted,
                         device,
+                        workspace=counters,
                     )
                 elif generator is not None:
                     self._transport_chunk_wrapped(
@@ -1369,6 +1374,7 @@ class WarpEngine:
                         dose_to_water,
                         emitted,
                         device,
+                        workspace=counters,
                     )
                 else:
                     energy_emitted += self._transport_chunk_presampled(
@@ -1396,6 +1402,7 @@ class WarpEngine:
                         transport_electrons,
                         dose_to_water,
                         device,
+                        workspace=counters,
                     )
                 history += n_chunk
                 remaining -= n_chunk

@@ -163,3 +163,49 @@ def test_plan_concurrent_batches_are_bit_inert() -> None:
 
 def test_spectrum_is_shared() -> None:
     assert _source().plan(WEIGHTS).max_energy == SPECTRUM.max_energy
+
+
+class _PlainSegments(SegmentedFanSource):
+    """A subclass with no change: the same physics, forced onto the host route."""
+
+
+class _HalfWeightSegments(SegmentedFanSource):
+    """A segment source that halves every primary weight, on both sampling hooks."""
+
+    def emit(self, beamlet: int, rng_state):
+        primary = super().emit(beamlet, rng_state)
+        return primary._replace(weight=0.5 * primary.weight)
+
+    def sample_beamlet_batch(self, seed: int, history_offset: int, n: int, beamlet: int):
+        columns = super().sample_beamlet_batch(seed, history_offset, n, beamlet)
+        columns["weight"] = (0.5 * columns["weight"]).astype(np.float32)
+        return columns
+
+
+def test_a_plan_over_a_segment_subclass_honours_its_sampling() -> None:
+    """The plan's host batch must come from the segment source's own batch method.
+
+    A subclass that reweights its primaries changes the reference engine's dose
+    through ``emit``; the Warp host fallback must change identically through
+    ``sample_beamlet_batch``, not sample the bare fan behind the subclass's back.
+    Both sides take the host route (a plain subclass against the halving one), so
+    they share the batch stream and the halving is exact.
+    """
+    xs = AnalyticCrossSections()
+    plain = _PlainSegments.from_stacks(_fan(), _stacks(), xs).plan(WEIGHTS)
+    halved = _HalfWeightSegments.from_stacks(_fan(), _stacks(), xs).plan(WEIGHTS)
+    kwargs = dict(n_histories=600, n_batches=2, seed=SEED, transport_electrons=False)
+    engine = _warp(_grid(), "cpu")
+    want = engine.run(plain, **kwargs)
+    got = engine.run(halved, **kwargs)
+    assert got.energy_emitted == pytest.approx(0.5 * want.energy_emitted, rel=1e-6)
+    # Not voxel-exact: halving pushes some low-energy photons under the roulette
+    # weight cap, which changes a few (unbiased) roulette decisions.
+    assert got.dose.sum() == pytest.approx(0.5 * want.dose.sum(), rel=1e-2)
+    # The reference engine sees the same halving through ``emit``.
+    grid = _grid()
+    ref = ReferenceEngine(grid=grid, cross_sections=_xs(grid), rng=HostRNG())
+    ref_kwargs = dict(n_histories=200, n_batches=2, seed=SEED, transport_electrons=False)
+    ref_want = ref.run(plain, **ref_kwargs)
+    ref_got = ref.run(halved, **ref_kwargs)
+    assert ref_got.energy_emitted == pytest.approx(0.5 * ref_want.energy_emitted, rel=1e-6)

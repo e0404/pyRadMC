@@ -224,3 +224,35 @@ class TestNothingIsDropped:
 def test_negative_drain_rounds_is_rejected() -> None:
     with pytest.raises(ValueError, match="drain_rounds"):
         _engine("cpu", -1)
+
+
+@pytest.mark.parametrize("presampled", [False, True])
+def test_sequential_runs_drain_with_the_pooled_workspace(device, monkeypatch, presampled) -> None:
+    """No throwaway workspace: every sequential chunk drains with the lane's pooled one.
+
+    A drain called without a workspace builds a temporary one per chunk (fresh
+    status storage each time); the sequential ``run`` routes must hand over the
+    pooled workspace exactly as the lane and Dij routes do.
+    """
+    from pyradmc.backends.warp import engine as engine_module
+
+    engine = _engine(device, None)
+    source = HostSampledSource() if presampled else None
+    kw = dict(n_histories=1_024, n_batches=4, seed=SEED, transport_electrons=False)
+    if presampled:
+        engine.run(source, **kw)
+    else:
+        _run(engine)
+    built = []
+    original = engine_module._Workspace.__init__
+
+    def counting(self, *args, **kwargs):
+        built.append(self)
+        original(self, *args, **kwargs)
+
+    monkeypatch.setattr(engine_module._Workspace, "__init__", counting)
+    if presampled:
+        engine.run(source, **kw)
+    else:
+        _run(engine)
+    assert built == [], f"{len(built)} throwaway workspaces built during a sequential run"
