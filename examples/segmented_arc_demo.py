@@ -248,7 +248,7 @@ def main() -> None:
     ax.set_title(f"same histories, {backend}")
 
     fig.suptitle("A 6 MV arc: every control point in one launch")
-    fig.tight_layout()
+    fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.92))  # keep the suptitle clear of the panels
     stem = Path(__file__).with_suffix("")
     fig.savefig(f"{stem}.png", dpi=120)
     print(f"saved {stem.name}.png")
