@@ -43,7 +43,16 @@ DEVICES = [
     pytest.param("cuda:0", marks=pytest.mark.gpu),
 ]
 
-ANGLES = (0.0, 90.0, 200.0, 315.0)
+# (gantry, collimator, couch) per segment, degrees. Segment 0 (the reference index a
+# mis-indexed read would fall back to) is plain; segment 1 a 90-degree gantry; segment 2
+# collimator-rotated (u, v turned about w); segment 3 collimator-rotated and
+# non-coplanar (its focal spot leaves the gantry plane: focal-y, frame origin-y and
+# every axis component differ from segment 0's), with its own field: off the
+# isocentre and narrower. So every component of every per-segment read (frame
+# origin, rotation, focal point, field centre, aperture axes, widths) differs from
+# segment 0's somewhere, and a read of segment 0's value for any one of them is seen.
+ORIENTATIONS = ((0.0, 0.0, 0.0), (90.0, 0.0, 0.0), (200.0, 45.0, 0.0), (315.0, 90.0, 30.0))
+FIELDS = {3: dict(width_u=7.0, width_v=6.0, offset=(0.8, -0.6))}
 PER_BATCH = 1_500
 N_PER = 6_000
 GROUP_START = 1
@@ -57,10 +66,15 @@ def _require(device: str) -> None:
 
 
 def _stack(
-    angle: float, jaw, tips_neg, tips_pos, density: float = 8.0, mlc_density: float = 10.0
+    orientation: tuple[float, float, float],
+    jaw,
+    tips_neg,
+    tips_pos,
+    density: float = 8.0,
+    mlc_density: float = 10.0,
 ) -> BeamLimitingStack:
     return BeamLimitingStack(
-        frame=arc_frame(angle),
+        frame=arc_frame(*orientation),
         devices=(
             JawPair("u", 28.0, 35.0, jaw[0], jaw[1], material=WATER, density=density),
             JawPair("v", 36.0, 43.0, -2.5, 2.5, material=WATER, density=density, focused=True),
@@ -83,17 +97,24 @@ SETTINGS = (
     ((-2.0, 2.0), (-1.0, 0.5, -1.0), (1.0, 0.5, 1.0)),
     ((-0.5, 1.5), (-2.0, -2.0, -2.0), (2.0, 2.0, 2.0)),
     ((-3.0, 0.5), (0.0, -0.5, -1.5), (0.3, 0.5, 1.5)),
-    ((0.0, 0.0), (-3.0, 0.0, 0.0), (3.0, 0.0, 0.2)),
+    ((-1.5, 2.5), (-3.0, 0.0, 0.0), (3.0, 0.0, 0.2)),
 )
 
 
 def _stacks() -> list[BeamLimitingStack]:
-    return [_stack(a, *s) for a, s in zip(ANGLES, SETTINGS, strict=True)]
+    return [_stack(o, *s) for o, s in zip(ORIENTATIONS, SETTINGS, strict=True)]
+
+
+def _fan(orientation: tuple[float, float, float], field: dict | None = None):
+    gantry, collimator, couch = orientation
+    return arc_fan(gantry, collimator=collimator, couch=couch, **(field or {}))
 
 
 def _arc() -> SegmentedFanSource:
     return SegmentedFanSource.from_stacks(
-        [arc_fan(a) for a in ANGLES], _stacks(), AnalyticCrossSections()
+        [_fan(o, FIELDS.get(s)) for s, o in enumerate(ORIENTATIONS)],
+        _stacks(),
+        AnalyticCrossSections(),
     )
 
 
@@ -186,8 +207,7 @@ def test_device_transmission_matches_host_per_arc_segment(device: str) -> None:
         )
         got = out.numpy()[:, s].astype(np.float64)
         host = source.transmission(s, energies, origins, directions)
-        if s != 3:  # segment 3's jaw is closed: nothing open to compare against
-            assert host.max() > 0.9
+        assert host.max() > 0.9
         assert host.min() < 0.05
         np.testing.assert_allclose(got, host, rtol=2.0e-3, atol=1.0e-6)
 
@@ -241,7 +261,8 @@ def test_a_90_degree_segment_attenuates_through_its_own_rotated_leaves(device: s
     _require(device)
     angles = (0.0, 90.0)
     stacks = [
-        _stack(a, (-4.0, 4.0), (0.0, 0.0, 0.0), (3.0, 3.0, 3.0), mlc_density=40.0) for a in angles
+        _stack((a, 0.0, 0.0), (-4.0, 4.0), (0.0, 0.0, 0.0), (3.0, 3.0, 3.0), mlc_density=40.0)
+        for a in angles
     ]
     source = SegmentedFanSource.from_stacks(
         [arc_fan(a) for a in angles], stacks, AnalyticCrossSections()

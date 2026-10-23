@@ -47,27 +47,70 @@ SETTINGS = (
 )
 
 
-def beam_axes(angle_deg: float) -> tuple[tuple[float, ...], tuple[float, ...], tuple[float, ...]]:
-    """``(u, v, w)`` of a gantry angle: rotation about +y, ``w`` focal spot -> isocentre."""
+Axes = tuple[tuple[float, ...], tuple[float, ...], tuple[float, ...]]
+
+
+def _rotate(vector: tuple[float, ...], axis: tuple[float, ...], deg: float) -> tuple[float, ...]:
+    """Rodrigues rotation of ``vector`` about the unit ``axis`` by ``deg`` degrees."""
+    a = math.radians(deg)
+    k = np.asarray(axis, dtype=np.float64)
+    v = np.asarray(vector, dtype=np.float64)
+    out = v * math.cos(a) + np.cross(k, v) * math.sin(a) + k * float(k @ v) * (1 - math.cos(a))
+    return tuple(float(c) for c in out)
+
+
+def beam_axes(angle_deg: float, collimator: float = 0.0, couch: float = 0.0) -> Axes:
+    """``(u, v, w)`` of a beam: ``w`` focal spot -> isocentre, ``u x v = w``.
+
+    Gantry ``angle_deg`` about +y (``v`` = +y), then the collimator about ``w`` (turns
+    ``u`` and ``v`` in the aperture plane), then a couch-like rotation of the whole
+    triad about +z (tilts ``w`` out of the x-z plane: a non-coplanar beam whose focal
+    spot leaves the gantry plane).
+    """
     a = math.radians(angle_deg)
-    return (math.cos(a), 0.0, -math.sin(a)), (0.0, 1.0, 0.0), (math.sin(a), 0.0, math.cos(a))
+    u: tuple[float, ...] = (math.cos(a), 0.0, -math.sin(a))
+    v: tuple[float, ...] = (0.0, 1.0, 0.0)
+    w: tuple[float, ...] = (math.sin(a), 0.0, math.cos(a))
+    if collimator:
+        u, v = _rotate(u, w, collimator), _rotate(v, w, collimator)
+    if couch:
+        z = (0.0, 0.0, 1.0)
+        u, v, w = _rotate(u, z, couch), _rotate(v, z, couch), _rotate(w, z, couch)
+    return u, v, w
 
 
-def focal(angle_deg: float) -> tuple[float, float, float]:
-    w = beam_axes(angle_deg)[2]
+def focal(angle_deg: float, collimator: float = 0.0, couch: float = 0.0) -> tuple[float, ...]:
+    w = beam_axes(angle_deg, collimator, couch)[2]
     return (ISO[0] - SAD * w[0], ISO[1] - SAD * w[1], ISO[2] - SAD * w[2])
 
 
-def arc_fan(angle_deg: float, spectrum: Spectrum = SPECTRUM) -> SpectralBeamSource:
-    u, v, _ = beam_axes(angle_deg)
+def arc_fan(
+    angle_deg: float,
+    spectrum: Spectrum = SPECTRUM,
+    *,
+    collimator: float = 0.0,
+    couch: float = 0.0,
+    width_u: float = 8.0,
+    width_v: float = 8.0,
+    offset: tuple[float, float] = (0.0, 0.0),
+) -> SpectralBeamSource:
+    """The fan of one beam; ``offset`` moves the field centre along its ``u``/``v``."""
+    u, v, _ = beam_axes(angle_deg, collimator, couch)
+    centre = tuple(c + offset[0] * a + offset[1] * b for c, a, b in zip(ISO, u, v, strict=True))
     return SpectralBeamSource(
-        spectrum, focal(angle_deg), ISO, width_u=8.0, width_v=8.0, u_axis=u, v_axis=v
+        spectrum,
+        focal(angle_deg, collimator, couch),
+        centre,
+        width_u=width_u,
+        width_v=width_v,
+        u_axis=u,
+        v_axis=v,
     )
 
 
-def arc_frame(angle_deg: float) -> BeamFrame:
-    u, v, w = beam_axes(angle_deg)
-    return BeamFrame(origin=focal(angle_deg), u_axis=u, v_axis=v, w_axis=w)
+def arc_frame(angle_deg: float, collimator: float = 0.0, couch: float = 0.0) -> BeamFrame:
+    u, v, w = beam_axes(angle_deg, collimator, couch)
+    return BeamFrame(origin=focal(angle_deg, collimator, couch), u_axis=u, v_axis=v, w_axis=w)
 
 
 def arc_stack(angle_deg: float, jaw_neg, jaw_pos, tips_neg, tips_pos) -> BeamLimitingStack:

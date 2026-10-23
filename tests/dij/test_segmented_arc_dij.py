@@ -1,8 +1,12 @@
 """An arc's control points as the segments of one source: one launch for every angle.
 
-``SegmentedFanSource`` with one fan and one frame per segment (gantry angles 0, 90 and
-225 degrees about +y) against the launches it replaces — one single-fan source per
-angle — and against the reference engine:
+``SegmentedFanSource`` with one fan and one frame per segment — a plain beam at gantry
+0, a 90-degree gantry with the collimator at 30 degrees (``u``/``v`` turned about
+``w``), and a non-coplanar 225-degree beam (couch-like 25-degree turn about +z, so its
+focal spot, frame origin and every axis leave the gantry plane) — against the
+launches it replaces, one single-fan source per angle, and against the reference
+engine. The leaf tips are asymmetric in ``v`` in every segment, so a frame read with
+the wrong ``v`` row is not hidden by the phantom's mirror symmetry:
 
 - a correlated arc column is *bit-identical* to the single-fan Dij column of that
   angle's fan and stack on the same device (same stream keys, fixed-point books);
@@ -12,12 +16,12 @@ angle — and against the reference engine:
   equal total histories (``total_weight`` restored on both sides);
 - the scheduling contract (group size bit-inert) and exact-type routing hold.
 
-Statistical power, not convenience: scored on 2 x 4 x 2 cm bins (gantry rotation in
-the x-z plane), so in-field bins collect tens of KERMA events per batch, masked on the
-pooled dose, equal histories per side (the batched chi-squared is miscalibrated at
-unequal counts and powerless on one-deposit-per-batch voxels; docs/decisions.md).
-Its power against a wrong segment frame, swapped fans and a missing rotation is
-recorded in docs/decisions.md ("Arcs in one launch").
+Statistical power, not convenience: scored on 2 x 4 x 2 cm bins, so in-field bins
+collect tens of KERMA events per batch, masked on the pooled dose, equal histories
+per side (the batched chi-squared is miscalibrated at unequal counts and powerless on
+one-deposit-per-batch voxels; docs/decisions.md). Its power against a wrong segment
+frame, swapped fans, a missing rotation and mis-indexed single components of the
+frame and fan reads is recorded in docs/decisions.md ("Arcs in one launch").
 """
 
 from __future__ import annotations
@@ -48,12 +52,17 @@ DEVICES = [
 ]
 
 SPECTRUM = Spectrum((0.5, 1.0, 2.0, 4.0, 6.0), (1.0, 3.0, 4.0, 2.0))
-ANGLES = (0.0, 90.0, 225.0)
-# Mid-plane settings (jaw at w = 33, MLC at w = 43): open, off-axis, narrow.
+# (gantry, collimator, couch) per control point, degrees.
+ORIENTATIONS = ((0.0, 0.0, 0.0), (90.0, 30.0, 0.0), (225.0, 0.0, 25.0))
+ANGLES = tuple(o[0] for o in ORIENTATIONS)
+# (width_u, width_v, centre offset along u, along v) where a fan differs from 10 x 8.
+FIELDS = {ORIENTATIONS[2]: (9.0, 7.0, 0.5, -0.4)}
+# Mid-plane settings (jaw at w = 33, MLC at w = 43): open, off-axis, narrow; the three
+# leaf pairs differ in every segment (v-asymmetric apertures).
 SETTINGS = (
-    (-2.0, 2.0, (-1.5, -1.5, -1.5), (1.5, 1.5, 1.5)),
-    (-0.5, 2.5, (-0.5, 0.0, -0.5), (2.0, 2.0, 2.0)),
-    (-2.5, 0.5, (-0.3, -0.6, -0.3), (0.3, 0.6, 0.3)),
+    (-2.0, 2.0, (-1.5, -1.0, -0.5), (1.5, 1.0, 0.5)),
+    (-0.5, 2.5, (-0.5, 0.0, -1.5), (2.0, 2.0, 0.5)),
+    (-2.5, 0.5, (-0.3, -0.6, -1.0), (0.3, 0.6, 0.0)),
 )
 N_REFERENCE = 12_000  # histories per column, reference comparison
 N_SOURCES = 40_000  # histories per column, per-angle comparison
@@ -62,15 +71,22 @@ N_PLAN = 60_000  # histories per side of the plan comparison (10k/20k/30k per an
 N_BATCHES = 8
 
 
-def arc_fan(angle: float) -> SpectralBeamSource:
-    u, v, _ = beam_axes(angle)
-    return SpectralBeamSource(SPECTRUM, focal(angle), ISO, 10.0, 8.0, u_axis=u, v_axis=v)
+def arc_fan(orientation: tuple[float, float, float]) -> SpectralBeamSource:
+    """Each control point's fan; the non-coplanar one has its own, off-axis field."""
+    u, v, _ = beam_axes(*orientation)
+    width_u, width_v, du, dv = FIELDS.get(orientation, (10.0, 8.0, 0.0, 0.0))
+    centre = tuple(c + du * a + dv * b for c, a, b in zip(ISO, u, v, strict=True))
+    return SpectralBeamSource(
+        SPECTRUM, focal(*orientation), centre, width_u, width_v, u_axis=u, v_axis=v
+    )
 
 
-def arc_stack(angle: float, jaw_neg, jaw_pos, tips_neg, tips_pos) -> BeamLimitingStack:
+def arc_stack(
+    orientation: tuple[float, float, float], jaw_neg, jaw_pos, tips_neg, tips_pos
+) -> BeamLimitingStack:
     # Thick, dense water stands in for tungsten: ~2-4 mean free paths when closed.
     return BeamLimitingStack(
-        frame=arc_frame(angle),
+        frame=arc_frame(*orientation),
         devices=(
             JawPair("u", 30.0, 36.0, jaw_neg, jaw_pos, material=WATER, density=4.0),
             MLC(
@@ -89,17 +105,17 @@ def arc_stack(angle: float, jaw_neg, jaw_pos, tips_neg, tips_pos) -> BeamLimitin
 
 
 def _stacks() -> list[BeamLimitingStack]:
-    return [arc_stack(a, *s) for a, s in zip(ANGLES, SETTINGS, strict=True)]
+    return [arc_stack(o, *s) for o, s in zip(ORIENTATIONS, SETTINGS, strict=True)]
 
 
 def _arc(cls=SegmentedFanSource) -> SegmentedFanSource:
-    return cls.from_stacks([arc_fan(a) for a in ANGLES], _stacks(), AnalyticCrossSections())
+    return cls.from_stacks([arc_fan(o) for o in ORIENTATIONS], _stacks(), AnalyticCrossSections())
 
 
 def _single(s: int) -> SegmentedFanSource:
     """The per-angle source the arc replaces: angle ``s``'s fan through its stack."""
     return SegmentedFanSource.from_stacks(
-        arc_fan(ANGLES[s]), [_stacks()[s]], AnalyticCrossSections()
+        arc_fan(ORIENTATIONS[s]), [_stacks()[s]], AnalyticCrossSections()
     )
 
 
@@ -288,9 +304,9 @@ class _HalfWeightFan(SpectralBeamSource):
 
 def test_one_subclassed_fan_sends_the_arc_to_the_host_route() -> None:
     """An override in *any* segment's fan must be honoured, so the whole arc is host-sampled."""
-    u, v, _ = beam_axes(ANGLES[1])
-    fans = [arc_fan(a) for a in ANGLES]
-    fans[1] = _HalfWeightFan(SPECTRUM, focal(ANGLES[1]), ISO, 10.0, 8.0, u_axis=u, v_axis=v)
+    u, v, _ = beam_axes(*ORIENTATIONS[1])
+    fans = [arc_fan(o) for o in ORIENTATIONS]
+    fans[1] = _HalfWeightFan(SPECTRUM, focal(*ORIENTATIONS[1]), ISO, 10.0, 8.0, u_axis=u, v_axis=v)
     source = SegmentedFanSource.from_stacks(fans, _stacks(), AnalyticCrossSections())
     n = 600
     host = sum(
