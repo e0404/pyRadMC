@@ -789,33 +789,56 @@ column of that angle's single-fan source (same keys, fixed-point books, the grou
 invariance). The AGENTS.md section 8 caveat on quadrature sigmas of correlated columns
 applies to arc columns as it does to beamlets.
 
-**Statistical evidence, with power.** `tests/dij/test_segmented_arc_dij.py`: angles 0,
-90, 225 degrees, 2 x 4 x 2 cm bins (tens of KERMA events per batch), pooled-dose mask,
-equal histories per side. Arc columns vs per-angle sources (40k per column), vs the
-reference engine (12k, independent mode), the plan view vs the MU-weighted sum of
-per-angle plan runs (60k per side, the per-angle runs allotted `N w_s / W`), and vs the
-reference. Unbiased p-values at the pinned seeds 0.48-0.89 (per-angle), 0.046-0.97
-(reference), 0.48 / 0.54 (plan). Chi-squared/null ratios of 0.68-0.84 on some columns
-are below 1 — the batched oracle is conservative there — so power was measured, not
-assumed: device-upload mutants applied to multi-segment sources only (scratch probe,
-cuda), each catch reported where the mutant touches the column:
+**Statistical evidence, with power.** `tests/dij/test_segmented_arc_dij.py`: a plain
+beam at gantry 0, a 90-degree gantry with the collimator at 30 degrees, and a
+non-coplanar 225-degree beam (a couch-like 25-degree turn about +z) with its own
+off-axis, narrower field; v-asymmetric leaf tips in every segment; 2 x 4 x 2 cm bins
+(tens of KERMA events per batch), pooled-dose mask, equal histories per side. Arc
+columns vs per-angle sources (40k per column), vs the reference engine (12k,
+independent mode), the plan view vs the MU-weighted sum of per-angle plan runs (60k
+per side, the per-angle runs allotted `N w_s / W`), and vs the reference. Unbiased
+p-values at the pinned seeds 0.75-0.94 (per-angle), 0.16-0.98 (reference), 0.71 / 0.40
+(plan). Chi-squared/null ratios of 0.66-0.92 on some columns are below 1 — the batched
+oracle is conservative there — so power was measured, not assumed: device-upload
+mutants applied to multi-segment sources only (scratch probe, cuda), each catch
+reported where the mutant touches the column:
 
 | mutant | per-angle columns | reference columns | plan vs per-angle | plan vs reference |
 |---|---|---|---|---|
 | every segment in segment 0's frame | p = 0 | p = 0 | p = 0 | p = 0 |
-| fans of two segments swapped | p = 0 | p = 0 | p = 0 | 2e-293 |
+| fans of two segments swapped | p = 0 | p = 0 | p = 0 | 9e-288 |
 | rotation missing (identity, origins kept) | p = 0 | p = 0 | p = 0 | p = 0 |
-| segment 2's frame tilted 3 / 1 / 0.5 / 0.25 deg | 0 / 0 / 2e-170 / 2e-14 | 0 / 5e-197 / 2e-31 / 5e-6 | 0 / 2e-210 / 9e-25 / 8.5e-4 | 8e-22 / 3e-14 / 3e-4 / 0.063 |
-| segment 0 tilted 1 / 0.5 deg | 0 / 4e-59 | 5e-43 / 0.046 | 1e-4 / 0.16 | 0.41 / 0.55 |
-| segment 1 tilted 0.5 deg | 9e-88 | 2e-7 | 2e-5 | 0.19 |
+| segment 2's frame tilted 0.25 deg about +y | 1.3e-4 | 2.3e-3 | 3.8e-4 | 0.12 |
+| segment 1's frame tilted 0.25 deg about +y | 0.010 | 0.83 | 0.60 | 0.32 |
 
-The deterministic pins catch every one of these exactly: the bit-identity pin above, and
-in `tests/physics/test_warp_segment_arc.py` the arc generator against the per-angle
-generator row for row, the device transmission per segment against the host, and a
-90-degree segment with one leaf bank closed (a kernel reading another segment's frame
-sees the slab edge-on and passes every ray). Kernel-source mutants (frame index 0, fan
-index 0, rotation index 0) fail 8-10 of those tests each; host mutants (template frame
-in `segment_stack`, segment 0's fan in `emit`) fail 3-4 unit tests each.
+(On the first, coplanar version of the arc — gantry 0/90/225 about +y, every field on
+the isocentre — the same probe gave: segment 2 tilted 3 / 1 / 0.5 / 0.25 deg caught at
+p = 0 / 0 / 2e-170 / 2e-14 per-angle and 0 / 5e-197 / 2e-31 / 5e-6 reference; segment 0
+at 1 / 0.5 deg 0 / 4e-59 per-angle, 5e-43 / 0.046 reference. Sub-degree frame errors
+are seen by the per-angle and reference column tests, not reliably by the plan tests.)
+
+**Whole-array mutants are not the whole story: the first version of these tests missed
+partial ones.** The mutants above replace a segment's entire frame or fan. An
+independent review found that a kernel reading only *some components* from segment
+0 — the frame origin's y, the rotation's v row and the fan's v axis
+(`segs.origin[1]`, `segs.rotation[3..5]`, `segs.fan[9..11]`) — passed every one of the
+43 arc and segment tests while giving device weights off by up to 0.997 on an arc
+with collimator angles 0/45/90: every arc in them rotated about +y, so `v` = +y, the
+origin's and focal spot's y and every field's centre and size were the same in every
+segment. The physics arc now has a collimator-rotated segment and a rotated,
+non-coplanar, off-axis, narrower one; the Dij arc the geometry above. Swept
+2026-10-23: the review's mutant, its three reads separately, and each of the 26
+per-segment components (origin 3, rotation 9, fan 14) replaced individually by
+segment 0's — every one fails the deterministic pins (6-10 of 10 in
+`tests/physics/test_warp_segment_arc.py`) and the Dij tests (2-9 of 12). With the
+orientations but every fan still on the isocentre at one size, the five field-centre
+and width mutants passed both files; the per-fan field closed that. The deterministic
+pins are the bit-identity pin above and, in `tests/physics/test_warp_segment_arc.py`,
+the arc generator against the per-angle generator row for row, the device
+transmission per segment against the host, and a 90-degree segment with one leaf bank
+closed (a kernel reading another segment's frame sees the slab edge-on and passes
+every ray). Host mutants (template frame in `segment_stack`, segment 0's fan in
+`emit`) fail 3-4 unit tests each.
 
 **Measured** (`tests/perf/test_segmented_arc_throughput.py`; RTX 4070 laptop at 2535 MHz
 under load, no throttle reason, GPU otherwise idle during these runs but shared with the

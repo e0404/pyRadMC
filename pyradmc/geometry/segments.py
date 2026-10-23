@@ -499,10 +499,11 @@ class SegmentedFanSource(BeamletSource):
         return self.n_segments
 
     def emit(self, beamlet: int, rng_state: RNGState) -> Primary:
-        """Emit the fan's primary weighted by segment ``beamlet``'s transmission.
+        """Emit segment ``beamlet``'s fan primary, weighted by its stack transmission.
 
         Consumes exactly the fan's four uniforms; the segment never touches the
-        stream, so correlated sampling replays one ray in every column.
+        stream, so correlated sampling replays the same uniforms in every column,
+        each through that segment's own fan (with one shared fan: the same ray).
         """
         self._check(beamlet)
         primary = self._fans[beamlet].emit(rng_state)
@@ -517,11 +518,12 @@ class SegmentedFanSource(BeamletSource):
     def sample_beamlet_batch(
         self, seed: int, history_offset: int, n: int, beamlet: int
     ) -> dict[str, npt.NDArray[Any]]:
-        """Vectorized host batch: the fan's batch, weights times the transmission.
+        """Vectorized host batch: segment ``beamlet``'s fan batch, weights times its transmission.
 
-        Chunk-invariant and segment-blind, exactly as the fan's own batch is (a
-        *different* stream from :meth:`emit`'s per-history spawn, the spectral
-        sources' precedent: the backends agree statistically, never bit-wise).
+        Chunk-invariant and segment-blind, exactly as a fan's own batch is: every
+        segment draws the same uniforms through its own fan (a *different* stream
+        from :meth:`emit`'s per-history spawn, the spectral sources' precedent: the
+        backends agree statistically, never bit-wise).
         """
         self._check(beamlet)
         columns = self._fans[beamlet].sample_batch(seed, history_offset, n)
@@ -684,8 +686,9 @@ class SegmentedPlanSource(Source):
     cumulative share exceeds the uniform is taken, the shares being cumulative sums
     divided by their own final value). Build it with
     :meth:`SegmentedFanSource.plan`. The Warp engine generates this exact type
-    in-kernel when its segments and fan are exact types too; anything else is host
-    pre-sampled. No value semantics: it hashes by identity.
+    in-kernel when its segments are the exact type and every segment's fan is an
+    exact ``SpectralBeamSource``; anything else is host pre-sampled. No value
+    semantics: it hashes by identity.
     """
 
     def __init__(self, segments: SegmentedFanSource, weights: npt.ArrayLike) -> None:
@@ -761,10 +764,11 @@ class SegmentedPlanSource(Source):
         Built from :meth:`SegmentedFanSource.sample_beamlet_batch`, segment by
         segment, so a subclass's sampling override reaches the Warp host route
         exactly as it reaches the reference engine through :meth:`emit`. The
-        segments' batches are segment-blind (row ``i`` of every segment is the same
-        fan ray), so taking each history's row from its own segment's batch is the
-        vectorized form of :meth:`emit`. Costs one full batch per distinct segment;
-        the exact types are generated in-kernel and never pay it.
+        segments' batches are segment-blind (row ``i`` of every segment comes from
+        the same uniforms, through that segment's own fan), so taking each history's
+        row from its own segment's batch is the vectorized form of :meth:`emit`.
+        Costs one full batch per distinct segment; the exact types are generated
+        in-kernel and never pay it.
         """
         segment = self.segment_of(seed, history_offset, n)
         present = np.unique(segment) if n > 0 else np.zeros(1, dtype=np.int64)
