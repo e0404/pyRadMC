@@ -30,21 +30,33 @@ spectrum above ``PCUT``, as every shipped MV spectrum is (Ali-Rogers floor 0.15 
 Column ``s`` of the Dij is the dose per fan history through segment ``s``; a plan's
 dose is ``sum_s MU_s * column_s``.
 
-Every segment shares the fan, the beam frame, and the stack's *structure* —
-device kinds, slabs, materials, densities, leaf strips, tip radius, focusing —
-and differs only in jaw edges and leaf tips. That is the device layout too: one
-uploaded stack plus per-segment columns of edges and tips. Building one
+Every segment shares the stack's *structure* — device kinds, slabs, materials,
+densities, leaf strips, tip radius, focusing — and the spectrum, and differs in jaw
+edges and leaf tips. By default the segments also share one fan and one beam frame
+(a step-and-shoot field, or one control point's apertures). Given **one fan and one
+frame per segment** instead, segment ``s`` is its own fan ``fans[s]`` through the
+stack in frame ``frames[s]``: the control points of a VMAT arc, each at its own
+gantry angle, transported in one launch. Each segment keeps the single-fan
+contract in its own frame (origin on its fan's focal point, field downstream along
+its ``w``, and — on the per-segment path — fan aperture axes equal to the frame's
+``u``/``v``), and all fans must draw from one spectrum (one machine, one energy).
+That is the device layout too: one uploaded stack structure plus per-segment
+columns of edges, tips, frame origin and rotation, and fan geometry. Building one
 :class:`~pyradmc.geometry.collimation.MLC` per segment per optimization iteration
 costs its validation; the array constructor takes the tips directly
-(:meth:`SegmentedFanSource.with_settings` reuses the attenuation tables as well),
-and the host route builds the stacks lazily, only when it needs them.
+(:meth:`SegmentedFanSource.with_settings` reuses the attenuation tables, fans and
+frames as well), and the host route builds the stacks lazily, only when it needs
+them.
 
 The fan draws are segment-blind (four uniforms, the spectral fan's own contract),
-so under correlated Dij sampling every column replays the same ray and only the
-weight differs. The Warp engine generates this exact type in-kernel, with the
+so under correlated Dij sampling every column replays the same uniforms and only
+the weight differs — with one fan, the same ray; with a fan per segment, the same
+energy and the same in-aperture offset fed to *each segment's own fan*, i.e. the
+same beam's-eye-view ray in every segment's frame when the apertures are
+congruent. The Warp engine generates this exact type in-kernel, with the
 transmission evaluated on the device by the same collimation twins the device
-pre-solve uses; a subclass, or a subclass of the fan, keeps the host
-pre-sampling route.
+pre-solve uses; a subclass, or a subclass of any fan, keeps the host pre-sampling
+route.
 """
 
 from __future__ import annotations
@@ -52,16 +64,17 @@ from __future__ import annotations
 import dataclasses
 import math
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import numpy.typing as npt
 
 from pyradmc.data.interface import CrossSectionSource
-from pyradmc.geometry.collimation import MLC, BeamLimitingStack, JawPair
+from pyradmc.geometry.collimation import MLC, BeamFrame, BeamLimitingStack, JawPair
 from pyradmc.geometry.fan import select_by_cdf
 from pyradmc.geometry.head import _MuTables
 from pyradmc.geometry.source import BeamletSource, Primary, Source, SpectralBeamSource
+from pyradmc.geometry.spectrum import Spectrum
 from pyradmc.rng import RNGState, uniform
 
 __all__ = ["SegmentedFanSource", "SegmentedPlanSource"]
@@ -72,6 +85,26 @@ _F64 = npt.NDArray[np.float64]
 # devices are positioned relative to the focal spot, so a frame anchored elsewhere
 # (the isocentre, say) is a setup error, not a geometry; anything above rounding is.
 _FOCAL_TOLERANCE_CM = 1.0e-6
+
+# How far a per-segment fan's aperture axes may differ from its frame's u/v axes
+# (per component, after both are normalized): rounding of two normalizations, no more.
+_AXIS_TOLERANCE = 1.0e-9
+
+FanArgument = SpectralBeamSource | Sequence[SpectralBeamSource]
+
+
+def _per_segment_fans(fan: FanArgument) -> tuple[SpectralBeamSource, ...] | None:
+    """Return the fans of a per-segment sequence, or ``None`` for a single fan.
+
+    Only an explicit ``collections.abc.Sequence`` (a list or tuple of fans) is
+    per-segment: any other object is the one fan, exactly as before per-segment fans
+    existed — including a duck-typed fan that is not a ``SpectralBeamSource``
+    (which the Warp engine host-routes).
+    """
+    if isinstance(fan, Sequence):
+        return tuple(fan)
+    return None
+
 
 # Salt of the plan view's vectorized segment-selection stream, so it is independent
 # of the fan's own PCG64(seed) batch stream (which it must not shift: the fan
@@ -102,6 +135,41 @@ def _structure_mismatch(template: JawPair | MLC, device: JawPair | MLC) -> str |
     return None
 
 
+def _same_spectrum(a: Spectrum, b: Spectrum) -> bool:
+    """One spectrum: the same object, or the same bin edges and sampling CDF."""
+    return a is b or (np.array_equal(a.edges, b.edges) and np.array_equal(a.cdf, b.cdf))
+
+
+def _check_fan_in_frame(
+    fan: SpectralBeamSource, frame: BeamFrame, prefix: str, *, check_axes: bool
+) -> None:
+    """Refuse a fan that does not sit in ``frame``: origin, direction, aperture axes."""
+    offset = math.dist(frame.origin, fan.focal_point)
+    if offset > _FOCAL_TOLERANCE_CM:
+        raise ValueError(
+            f"{prefix}the stack frame's origin {frame.origin} must be the fan's focal point "
+            f"{fan.focal_point} (off by {offset:.3g} cm)"
+        )
+    axial = sum(
+        (c - f) * w for c, f, w in zip(fan.center, fan.focal_point, frame.w_axis, strict=True)
+    )
+    if axial <= 0.0:
+        raise ValueError(
+            f"{prefix}the fan's field must lie downstream of the focal point (local w > 0)"
+        )
+    if not check_axes:
+        return
+    for name, fan_axis, frame_axis in (
+        ("u_axis", fan.u_axis, frame.u_axis),
+        ("v_axis", fan.v_axis, frame.v_axis),
+    ):
+        if max(abs(a - b) for a, b in zip(fan_axis, frame_axis, strict=True)) > _AXIS_TOLERANCE:
+            raise ValueError(
+                f"{prefix}the fan's aperture {name} {fan_axis} must be the frame's "
+                f"{name} {frame_axis}"
+            )
+
+
 def _settings_array(
     values: npt.ArrayLike | None, name: str, width: int
 ) -> npt.NDArray[np.float64] | None:
@@ -125,7 +193,10 @@ class SegmentedFanSource(BeamletSource):
     ----------
     fan
         The open fan: spectrum, focal point, field rectangle. The stack frame's
-        origin must be its focal point, and the field must lie downstream.
+        origin must be its focal point, and the field must lie downstream. Or a
+        sequence of fans, **one per segment** (a VMAT arc's control points), all
+        drawing from one spectrum; each must then satisfy that contract in its
+        segment's frame, with its aperture axes equal to the frame's ``u``/``v``.
     template
         A stack giving every segment's structure (devices, slabs, materials, leaf
         strips, tip radius, focusing) and the default settings of any device whose
@@ -148,8 +219,14 @@ class SegmentedFanSource(BeamletSource):
         Reuse another source's :attr:`attenuation_tables` (built for the same
         template devices) instead of building them; ``e_min``/``n_table`` are then
         ignored. :meth:`with_settings` passes its own.
+    frames
+        One :class:`~pyradmc.geometry.collimation.BeamFrame` per segment, replacing
+        the template's frame (which is then unused): segment ``s``'s stack is the
+        template structure in ``frames[s]``. ``None`` puts every segment in the
+        template's frame.
 
-    At least one per-segment array is required; they fix ``n_segments``.
+    At least one per-segment array — a settings array, or a sequence of fans or
+    frames — is required; together they fix ``n_segments`` and must agree on it.
     :meth:`from_stacks` builds the source from one stack per segment instead.
 
     The per-segment arrays are stored as read-only copies, so the lazily built host
@@ -160,7 +237,7 @@ class SegmentedFanSource(BeamletSource):
 
     def __init__(
         self,
-        fan: SpectralBeamSource,
+        fan: FanArgument,
         template: BeamLimitingStack,
         cross_sections: CrossSectionSource,
         *,
@@ -171,10 +248,16 @@ class SegmentedFanSource(BeamletSource):
         e_min: float = 0.010,
         n_table: int = 512,
         attenuation_tables: _MuTables | None = None,
+        frames: Sequence[BeamFrame] | None = None,
     ) -> None:
+        fans = _per_segment_fans(fan)
+        if fans is not None and not fans:
+            raise ValueError("a segmented fan needs at least one segment")
+        # Not narrowed by an isinstance check: a duck-typed single fan stays accepted.
+        first = cast(SpectralBeamSource, fan) if fans is None else fans[0]
         if attenuation_tables is None:
             pairs = tuple(zip(template.materials, template.densities, strict=True))
-            tables = _MuTables(cross_sections, pairs, e_min, fan.max_energy, n_table)
+            tables = _MuTables(cross_sections, pairs, e_min, first.max_energy, n_table)
         else:
             if attenuation_tables._log_total.shape[0] != len(template.devices):
                 raise ValueError(
@@ -183,12 +266,22 @@ class SegmentedFanSource(BeamletSource):
                 )
             tables = attenuation_tables
         self._cross_sections = cross_sections
-        self._setup(fan, template, tables, jaw_neg, jaw_pos, tips_neg, tips_pos)
+        self._setup(
+            first,
+            fans,
+            None if frames is None else tuple(frames),
+            template,
+            tables,
+            jaw_neg,
+            jaw_pos,
+            tips_neg,
+            tips_pos,
+        )
 
     @classmethod
     def from_stacks(
         cls,
-        fan: SpectralBeamSource,
+        fan: FanArgument,
         stacks: Sequence[BeamLimitingStack],
         cross_sections: CrossSectionSource,
         *,
@@ -197,15 +290,25 @@ class SegmentedFanSource(BeamletSource):
     ) -> SegmentedFanSource:
         """Build the source from one stack per segment (the first is the template).
 
-        Every stack must share the template's frame and structure; only jaw edges
-        and leaf tips may differ.
+        Every stack must share the template's structure; only jaw edges and leaf
+        tips may differ. With one fan, every stack must also share the template's
+        frame. With one fan per stack (an arc), segment ``s`` is ``fan[s]``
+        through ``stacks[s]`` in that stack's own frame.
         """
         stacks = tuple(stacks)
         if not stacks:
             raise ValueError("a segmented fan needs at least one segment")
+        fans = _per_segment_fans(fan)
+        per_segment = fans is not None
+        if fans is not None:
+            if len(fans) != len(stacks):
+                raise ValueError(
+                    f"need one fan per segment: {len(fans)} fans for {len(stacks)} stacks"
+                )
+            fan = fans
         template = stacks[0]
         for s, stack in enumerate(stacks[1:], start=1):
-            if stack.frame != template.frame:
+            if not per_segment and stack.frame != template.frame:
                 raise ValueError(f"segment {s}: beam frame differs from segment 0's frame")
             if len(stack.devices) != len(template.devices):
                 raise ValueError(
@@ -241,6 +344,7 @@ class SegmentedFanSource(BeamletSource):
             tips_pos=tip_column("tips_pos"),
             e_min=e_min,
             n_table=n_table,
+            frames=[stack.frame for stack in stacks] if per_segment else None,
         )
         source._stacks.update(enumerate(stacks))
         return source
@@ -253,13 +357,14 @@ class SegmentedFanSource(BeamletSource):
         tips_neg: npt.ArrayLike | None = None,
         tips_pos: npt.ArrayLike | None = None,
     ) -> SegmentedFanSource:
-        """Return the same fan and structure with new per-segment settings.
+        """Return the same fan(s), frame(s) and structure with new per-segment settings.
 
         The cheap per-iteration path of an aperture optimization: no device
         objects are built and the attenuation tables are shared, not rebuilt.
         A setting not given keeps *this* source's values when the given arrays
         have this source's segment count (or none is given), and falls back to
-        the template's otherwise.
+        the template's otherwise. A source with one fan or frame per segment
+        keeps them, so its segment count is fixed.
         """
         given = [a for a in (jaw_neg, jaw_pos, tips_neg, tips_pos) if a is not None]
         n_new = np.shape(given[0])[0] if given else self.n_segments
@@ -270,7 +375,7 @@ class SegmentedFanSource(BeamletSource):
             tips_neg = self._tips_neg if tips_neg is None else tips_neg
             tips_pos = self._tips_pos if tips_pos is None else tips_pos
         return type(self)(
-            self._fan,
+            self._fan if self._given_fans is None else self._given_fans,
             self._template,
             self._cross_sections,
             jaw_neg=jaw_neg,
@@ -278,11 +383,14 @@ class SegmentedFanSource(BeamletSource):
             tips_neg=tips_neg,
             tips_pos=tips_pos,
             attenuation_tables=self._tables,
+            frames=self._given_frames,
         )
 
     def _setup(
         self,
         fan: SpectralBeamSource,
+        fans: tuple[SpectralBeamSource, ...] | None,
+        frames: tuple[BeamFrame, ...] | None,
         template: BeamLimitingStack,
         tables: _MuTables,
         jaw_neg: npt.ArrayLike | None,
@@ -290,19 +398,31 @@ class SegmentedFanSource(BeamletSource):
         tips_neg: npt.ArrayLike | None,
         tips_pos: npt.ArrayLike | None,
     ) -> None:
-        """Validate and store the fan, structure, tables and per-segment settings."""
-        frame = template.frame
-        offset = math.dist(frame.origin, fan.focal_point)
-        if offset > _FOCAL_TOLERANCE_CM:
-            raise ValueError(
-                f"the stack frame's origin {frame.origin} must be the fan's focal point "
-                f"{fan.focal_point} (off by {offset:.3g} cm)"
-            )
-        axial = sum(
-            (c - f) * w for c, f, w in zip(fan.center, fan.focal_point, frame.w_axis, strict=True)
-        )
-        if axial <= 0.0:
-            raise ValueError("the fan's field must lie downstream of the focal point (local w > 0)")
+        """Validate and store the fan(s), frame(s), structure, tables and settings.
+
+        ``fan`` is the single fan, or segment 0's when ``fans`` gives one per
+        segment; ``frames`` is ``None`` for the template's frame in every segment.
+        """
+        if fans is None and frames is None:
+            # The single-fan path: today's checks, unchanged (no axis contract).
+            _check_fan_in_frame(fan, template.frame, "", check_axes=False)
+        else:
+            if fans is not None and frames is not None and len(frames) != len(fans):
+                raise ValueError(
+                    f"need one frame per fan: {len(frames)} frames for {len(fans)} fans"
+                )
+            if frames is not None and not frames:
+                raise ValueError("a segmented fan needs at least one segment")
+            n_geometry = len(fans) if fans is not None else len(frames or ())
+            for s in range(n_geometry):
+                fan_s = fan if fans is None else fans[s]
+                frame_s = template.frame if frames is None else frames[s]
+                if not _same_spectrum(fan_s.spectrum, fan.spectrum):
+                    raise ValueError(
+                        f"segment {s}: spectrum differs from segment 0's; the segments of "
+                        "one source share one spectrum (one machine and energy)"
+                    )
+                _check_fan_in_frame(fan_s, frame_s, f"segment {s}: ", check_axes=True)
 
         jaws = _jaws(template)
         mlcs = _mlcs(template)
@@ -316,6 +436,9 @@ class SegmentedFanSource(BeamletSource):
             "tips_pos": _settings_array(tips_pos, "tips_pos", n_tips),
         }
         counts = {array.shape[0] for array in given.values() if array is not None}
+        for geometry in (fans, frames):
+            if geometry is not None:
+                counts.add(len(geometry))
         if not counts:
             raise ValueError("give at least one per-segment setting array (n_segments rows)")
         if len(counts) != 1:
@@ -353,6 +476,10 @@ class SegmentedFanSource(BeamletSource):
         for array in (self._jaw_neg, self._jaw_pos, self._tips_neg, self._tips_pos):
             array.setflags(write=False)
         self._fan = fan
+        self._given_fans = fans
+        self._given_frames = frames
+        self._fans: tuple[SpectralBeamSource, ...] = fans or (fan,) * n_segments
+        self._frames: tuple[BeamFrame, ...] = frames or (template.frame,) * n_segments
         self._template = template
         self._tables = tables
         self._jaw_devices = tuple(jaws)
@@ -372,13 +499,14 @@ class SegmentedFanSource(BeamletSource):
         return self.n_segments
 
     def emit(self, beamlet: int, rng_state: RNGState) -> Primary:
-        """Emit the fan's primary weighted by segment ``beamlet``'s transmission.
+        """Emit segment ``beamlet``'s fan primary, weighted by its stack transmission.
 
         Consumes exactly the fan's four uniforms; the segment never touches the
-        stream, so correlated sampling replays one ray in every column.
+        stream, so correlated sampling replays the same uniforms in every column,
+        each through that segment's own fan (with one shared fan: the same ray).
         """
         self._check(beamlet)
-        primary = self._fan.emit(rng_state)
+        primary = self._fans[beamlet].emit(rng_state)
         factor = self.transmission(
             beamlet,
             np.array([primary.energy]),
@@ -390,14 +518,15 @@ class SegmentedFanSource(BeamletSource):
     def sample_beamlet_batch(
         self, seed: int, history_offset: int, n: int, beamlet: int
     ) -> dict[str, npt.NDArray[Any]]:
-        """Vectorized host batch: the fan's batch, weights times the transmission.
+        """Vectorized host batch: segment ``beamlet``'s fan batch, weights times its transmission.
 
-        Chunk-invariant and segment-blind, exactly as the fan's own batch is (a
-        *different* stream from :meth:`emit`'s per-history spawn, the spectral
-        sources' precedent: the backends agree statistically, never bit-wise).
+        Chunk-invariant and segment-blind, exactly as a fan's own batch is: every
+        segment draws the same uniforms through its own fan (a *different* stream
+        from :meth:`emit`'s per-history spawn, the spectral sources' precedent: the
+        backends agree statistically, never bit-wise).
         """
         self._check(beamlet)
-        columns = self._fan.sample_batch(seed, history_offset, n)
+        columns = self._fans[beamlet].sample_batch(seed, history_offset, n)
         origins = np.stack([columns["x"], columns["y"], columns["z"]], axis=1).astype(np.float64)
         directions = np.stack([columns["ux"], columns["uy"], columns["uz"]], axis=1).astype(
             np.float64
@@ -450,7 +579,7 @@ class SegmentedFanSource(BeamletSource):
                     tips_pos=tuple(float(t) for t in self._tips_pos[segment, start:stop]),
                 )
                 start = stop
-            stack = BeamLimitingStack(frame=self._template.frame, devices=tuple(devices))
+            stack = BeamLimitingStack(frame=self._frames[segment], devices=tuple(devices))
             self._stacks[segment] = stack
         return stack
 
@@ -477,8 +606,29 @@ class SegmentedFanSource(BeamletSource):
 
     @property
     def fan(self) -> SpectralBeamSource:
-        """The open fan every segment collimates."""
+        """The open fan every segment collimates.
+
+        Raises ``ValueError`` for a source with distinct fans per segment: those
+        are :attr:`fans`.
+        """
+        if self._given_fans is not None and any(f is not self._fan for f in self._given_fans):
+            raise ValueError("this source has one fan per segment; use fans[segment]")
         return self._fan
+
+    @property
+    def fans(self) -> tuple[SpectralBeamSource, ...]:
+        """Segment ``s``'s open fan at index ``s`` (the one fan repeated, if shared)."""
+        return self._fans
+
+    @property
+    def frames(self) -> tuple[BeamFrame, ...]:
+        """Segment ``s``'s beam frame at index ``s`` (the template's, if shared)."""
+        return self._frames
+
+    @property
+    def spectrum(self) -> Spectrum:
+        """The one spectrum every segment's fan draws from (segment 0's object)."""
+        return self._fan.spectrum
 
     @property
     def template(self) -> BeamLimitingStack:
@@ -536,8 +686,9 @@ class SegmentedPlanSource(Source):
     cumulative share exceeds the uniform is taken, the shares being cumulative sums
     divided by their own final value). Build it with
     :meth:`SegmentedFanSource.plan`. The Warp engine generates this exact type
-    in-kernel when its segments and fan are exact types too; anything else is host
-    pre-sampled. No value semantics: it hashes by identity.
+    in-kernel when its segments are the exact type and every segment's fan is an
+    exact ``SpectralBeamSource``; anything else is host pre-sampled. No value
+    semantics: it hashes by identity.
     """
 
     def __init__(self, segments: SegmentedFanSource, weights: npt.ArrayLike) -> None:
@@ -613,10 +764,11 @@ class SegmentedPlanSource(Source):
         Built from :meth:`SegmentedFanSource.sample_beamlet_batch`, segment by
         segment, so a subclass's sampling override reaches the Warp host route
         exactly as it reaches the reference engine through :meth:`emit`. The
-        segments' batches are segment-blind (row ``i`` of every segment is the same
-        fan ray), so taking each history's row from its own segment's batch is the
-        vectorized form of :meth:`emit`. Costs one full batch per distinct segment;
-        the exact types are generated in-kernel and never pay it.
+        segments' batches are segment-blind (row ``i`` of every segment comes from
+        the same uniforms, through that segment's own fan), so taking each history's
+        row from its own segment's batch is the vectorized form of :meth:`emit`.
+        Costs one full batch per distinct segment; the exact types are generated
+        in-kernel and never pay it.
         """
         segment = self.segment_of(seed, history_offset, n)
         present = np.unique(segment) if n > 0 else np.zeros(1, dtype=np.int64)

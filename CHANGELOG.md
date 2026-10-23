@@ -41,6 +41,25 @@ without a field, so results are not byte-identical to the previous release.
   attenuation pre-solves plus runs. Demonstrated by `examples/segmented_fan_demo.py`.
   New Warp module `pyradmc.backends.warp.segments`.
 
+- **Every control point of an arc in one engine launch.** `SegmentedFanSource` also
+  takes one `SpectralBeamSource` fan and one `BeamFrame` per segment
+  (`SegmentedFanSource(fans, template, xs, frames=..., tips_neg=..., ...)`, or
+  `from_stacks(fans, stacks, xs)` with each stack's own frame), so the control points of
+  a VMAT arc — each at its own gantry angle — are the columns of one `run_dij` and the
+  MU-mixed arc dose is one `run` of `plan(weights)`. Per segment the frame must sit on its
+  fan's focal point with the field downstream and the fan's aperture axes equal to the
+  frame's `u`/`v`; all fans must share one spectrum; violations are refused naming the
+  segment. `with_settings` keeps the fans and frames. New accessors `fans`, `frames`,
+  `spectrum`; `fan` raises for distinct fans. Correlated columns replay the same
+  uniforms through each segment's own fan. Generated in-kernel for the exact types (a
+  subclassed source or any subclassed fan keeps the host route). The single-fan path is
+  bit-identical on cpu and cuda (345 saved seeded outputs). Measured on a laptop RTX
+  4070, 36 control points x 100k histories: one plan run 3.8-4.0x and one `run_dij`
+  1.8-1.9x faster than one plan run per angle (180 points: 3.8-4.4x, 2.2-2.3x).
+  Demonstrated by `examples/segmented_arc_demo.py`. Internal: the segment generator
+  kernels take the fan from `SegmentArrays` (new `origin`, `rotation`, `fan` fields)
+  instead of scalar arguments.
+
 - Charged-particle transport in a **static magnetic field** (MR-linac dose).
   `pyradmc.MagneticField` — uniform, one vector per transport voxel, or a trilinear
   vector map on its own rectilinear grid, in tesla and the engine frame — is handed to

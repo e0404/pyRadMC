@@ -3,14 +3,20 @@
 The Warp half of :class:`~pyradmc.geometry.segments.SegmentedFanSource`.
 
 One uploaded :class:`~pyradmc.backends.warp.presolve.StackArrays` carries the shared
-structure of every segment (frame, device kinds, slabs, materials, leaf strips,
-focusing) and a :class:`SegmentArrays` carries the per-segment columns — jaw edges
-indexed ``segment * n_devices + device`` and leaf tips ``segment * n_tips + tip`` —
-so segment ``s``'s chord through device ``j`` is the device pre-solve's own
-``jaw_path_length``/``mlc_path_length`` twin evaluated at that segment's settings.
-The attenuation table is the pre-solve's :class:`~pyradmc.backends.warp.presolve.MuArrays`
-(uploaded from the source's own host table), so the in-kernel weight is the device
-pre-solve's ``mode="attenuation"`` weight without an air column, segment by segment.
+structure of every segment (device kinds, slabs, materials, leaf strips, focusing)
+and a :class:`SegmentArrays` carries the per-segment columns — jaw edges indexed
+``segment * n_devices + device``, leaf tips ``segment * n_tips + tip``, the beam
+frame (origin at ``segment * 3``, row-major rotation at ``segment * 9``) and the fan
+(``segment * FAN_STRIDE``: focal point, field centre, ``u``/``v`` aperture axes,
+widths) — so segment ``s``'s chord through device ``j`` is the device pre-solve's own
+``jaw_path_length``/``mlc_path_length`` twin evaluated at that segment's settings, in
+that segment's frame, on a ray of that segment's fan. A single-fan source uploads its
+one fan and frame once per segment: one layout and one kernel serve one fan and an
+arc of them alike. (The stack's own ``origin``/``rotation`` are uploaded but not read
+here.) The attenuation table is the pre-solve's
+:class:`~pyradmc.backends.warp.presolve.MuArrays` (uploaded from the source's own
+host table), so the in-kernel weight is the device pre-solve's ``mode="attenuation"``
+weight without an air column, segment by segment.
 
 The generators draw their primaries through the shared single-source samplers of
 :mod:`pyradmc.geometry.fan` (``fan_primary``, ``select_by_cdf``), the same functions
@@ -44,6 +50,7 @@ from pyradmc.rng.warp_shim import WarpRNGState, init_slot, uniform
 from pyradmc.transport.particles import PHOTON
 
 __all__ = [
+    "FAN_STRIDE",
     "SegmentArrays",
     "SegmentedFanUpload",
     "generate_segmented_fan",
@@ -61,15 +68,23 @@ mlc_path_length = _p.mlc_path_length
 fan_primary = _p.fan_primary
 select_by_cdf = _p.select_by_cdf
 
+# Floats per segment in SegmentArrays.fan: focal point (3), field centre (3),
+# u axis (3), v axis (3), width_u, width_v — fan_primary's geometry arguments.
+FAN_STRIDE = 14
+
 
 @wp.struct
 class SegmentArrays:
-    """Per-segment settings over one shared stack layout.
+    """Per-segment settings, frames and fans over one shared stack layout.
 
     ``jaw_neg``/``jaw_pos`` hold ``n_segments * n_devices`` edges (entries of non-jaw
     devices unused); ``tips_neg``/``tips_pos`` hold ``n_segments * n_tips`` leaf tips
     in the flattened-stack order, so segment ``s`` reads the MLC at device ``j`` from
-    ``s * n_tips + mlc_tips_off[j]``.
+    ``s * n_tips + mlc_tips_off[j]``. ``origin`` (3 per segment) and ``rotation`` (9
+    per segment, the row-major ``(u, v, w)`` basis of
+    :class:`~pyradmc.geometry.collimation.CompiledStack`) are segment ``s``'s beam
+    frame; ``fan`` holds :data:`FAN_STRIDE` floats per segment, the geometry
+    arguments of ``fan_primary`` for segment ``s``'s fan.
     """
 
     n_segments: int
@@ -79,6 +94,9 @@ class SegmentArrays:
     jaw_pos: wp.array(dtype=float)
     tips_neg: wp.array(dtype=float)
     tips_pos: wp.array(dtype=float)
+    origin: wp.array(dtype=float)
+    rotation: wp.array(dtype=float)
+    fan: wp.array(dtype=float)
 
 
 @dataclass
@@ -96,8 +114,11 @@ def upload_segmented_fan(source, device: str) -> SegmentedFanUpload:
     """Upload a :class:`~pyradmc.geometry.segments.SegmentedFanSource` to ``device``.
 
     The stack layout comes from the template (``flatten``), the settings from the
-    source's per-segment arrays, the attenuation table from the source's own host
-    table — one definition of each, shared with the host route.
+    source's per-segment arrays, each segment's frame and fan from its
+    :attr:`~pyradmc.geometry.segments.SegmentedFanSource.frames` and
+    :attr:`~pyradmc.geometry.segments.SegmentedFanSource.fans` (the frame in
+    ``flatten``'s layout), the attenuation table from the source's own host table —
+    one definition of each, shared with the host route.
     """
 
     def farr(values) -> wp.array:
@@ -114,7 +135,21 @@ def upload_segmented_fan(source, device: str) -> SegmentedFanUpload:
     segments.jaw_pos = farr(source.jaw_pos)
     segments.tips_neg = farr(source.tips_neg)
     segments.tips_pos = farr(source.tips_pos)
-    spectrum = source.fan.spectrum
+    frames = source.frames
+    segments.origin = farr(np.array([frame.origin for frame in frames], dtype=np.float64))
+    segments.rotation = farr(
+        np.array([(frame.u_axis, frame.v_axis, frame.w_axis) for frame in frames], np.float64)
+    )
+    segments.fan = farr(
+        np.array(
+            [
+                (*f.focal_point, *f.center, *f.u_axis, *f.v_axis, f.width_u, f.width_v)
+                for f in source.fans
+            ],
+            dtype=np.float64,
+        )
+    )
+    spectrum = source.spectrum
     return SegmentedFanUpload(
         stack=upload_stack(source.template.flatten(), device),
         segments=segments,
@@ -200,20 +235,23 @@ def segment_transmission(
     """``exp(-sum_j mu_j(E) L_{seg,j})`` for one engine-frame ray (full line).
 
     The device pre-solve's attenuation-mode arithmetic (frame map, per-device
-    chord, ``_mu_lookup``), with the chords at segment ``seg``'s settings.
+    chord, ``_mu_lookup``), in segment ``seg``'s frame with the chords at its
+    settings.
     """
-    rx = x - stack.origin[0]
-    ry = y - stack.origin[1]
-    rz = z - stack.origin[2]
-    r0 = stack.rotation[0]
-    r1 = stack.rotation[1]
-    r2 = stack.rotation[2]
-    r3 = stack.rotation[3]
-    r4 = stack.rotation[4]
-    r5 = stack.rotation[5]
-    r6 = stack.rotation[6]
-    r7 = stack.rotation[7]
-    r8 = stack.rotation[8]
+    o = seg * 3
+    k = seg * 9
+    rx = x - segs.origin[o + 0]
+    ry = y - segs.origin[o + 1]
+    rz = z - segs.origin[o + 2]
+    r0 = segs.rotation[k + 0]
+    r1 = segs.rotation[k + 1]
+    r2 = segs.rotation[k + 2]
+    r3 = segs.rotation[k + 3]
+    r4 = segs.rotation[k + 4]
+    r5 = segs.rotation[k + 5]
+    r6 = segs.rotation[k + 6]
+    r7 = segs.rotation[k + 7]
+    r8 = segs.rotation[k + 8]
     p_u = r0 * rx + r1 * ry + r2 * rz
     p_v = r3 * rx + r4 * ry + r5 * rz
     p_w = r6 * rx + r7 * ry + r8 * rz
@@ -249,6 +287,68 @@ def segment_transmission_kernel(
     )
 
 
+@wp.func
+def _queue_segment_primary(
+    tid: int,
+    state: WarpRNGState,
+    seg: int,
+    tag: int,
+    edges: wp.array(dtype=float),
+    cdf: wp.array(dtype=float),
+    n_bins: int,
+    stack: StackArrays,
+    segs: SegmentArrays,
+    mu: MuArrays,
+    slots: wp.array(dtype=wp.uint32),
+    emitted: wp.array(dtype=wp.int64),
+    q: Queue,
+):
+    """Sample segment ``seg``'s fan photon, weight it by its transmission, queue it.
+
+    ``fan_primary`` through the segment's fan (four uniforms, host order), from its
+    focal point, at its stack transmission; tagged ``tag``, ``weight * energy``
+    booked into ``emitted``.
+    """
+    b = seg * FAN_STRIDE
+    fx = segs.fan[b + 0]
+    fy = segs.fan[b + 1]
+    fz = segs.fan[b + 2]
+    energy, dx, dy, dz = fan_primary(
+        state,
+        edges,
+        cdf,
+        n_bins,
+        fx,
+        fy,
+        fz,
+        segs.fan[b + 3],
+        segs.fan[b + 4],
+        segs.fan[b + 5],
+        segs.fan[b + 6],
+        segs.fan[b + 7],
+        segs.fan[b + 8],
+        segs.fan[b + 9],
+        segs.fan[b + 10],
+        segs.fan[b + 11],
+        segs.fan[b + 12],
+        segs.fan[b + 13],
+    )
+    weight = segment_transmission(stack, segs, mu, seg, energy, fx, fy, fz, dx, dy, dz)
+    q.kind[tid] = PHOTON
+    q.beamlet[tid] = tag
+    q.primary[tid] = 1  # source photon: the only one that may split
+    q.energy[tid] = energy
+    q.weight[tid] = weight
+    q.x[tid] = fx
+    q.y[tid] = fy
+    q.z[tid] = fz
+    q.ux[tid] = dx
+    q.uy[tid] = dy
+    q.uz[tid] = dz
+    q.rng[tid] = slots[tid]
+    _escape(emitted, weight * energy)
+
+
 @wp.kernel
 def generate_segmented_fan(
     seed: int,
@@ -261,20 +361,6 @@ def generate_segmented_fan(
     edges: wp.array(dtype=float),
     cdf: wp.array(dtype=float),
     n_bins: int,
-    fx: float,
-    fy: float,
-    fz: float,
-    ax: float,
-    ay: float,
-    az: float,
-    uxa: float,
-    uya: float,
-    uza: float,
-    vxa: float,
-    vya: float,
-    vza: float,
-    width_u: float,
-    width_v: float,
     stack: StackArrays,
     segs: SegmentArrays,
     mu: MuArrays,
@@ -287,9 +373,10 @@ def generate_segmented_fan(
     The Dij block mapping of ``kernels.generate_spectral_beamlets`` — group-local
     segment ``t // per_batch``, within-segment index ``r = batch * per_batch + i``,
     stream key ``r`` (correlated) or ``segment * n_per + r`` — and the fan photon of
-    ``fan_primary`` through the fan's single field rectangle. The weight is the
-    segment's stack transmission along the sampled ray at the sampled energy;
-    ``weight * energy`` is booked into ``emitted``.
+    ``fan_primary`` through the segment's own fan. The weight is the segment's stack
+    transmission (in its own frame) along the sampled ray at the sampled energy;
+    ``weight * energy`` is booked into ``emitted``. The key never depends on the
+    chunk, so the stream of a history is chunk-invariant.
     """
     tid = wp.tid()
     t = t_offset + tid
@@ -304,40 +391,9 @@ def generate_segmented_fan(
     state = WarpRNGState()
     state.slots = slots
     state.idx = tid
-    energy, dx, dy, dz = fan_primary(
-        state,
-        edges,
-        cdf,
-        n_bins,
-        fx,
-        fy,
-        fz,
-        ax,
-        ay,
-        az,
-        uxa,
-        uya,
-        uza,
-        vxa,
-        vya,
-        vza,
-        width_u,
-        width_v,
+    _queue_segment_primary(
+        tid, state, seg, local, edges, cdf, n_bins, stack, segs, mu, slots, emitted, q
     )
-    weight = segment_transmission(stack, segs, mu, seg, energy, fx, fy, fz, dx, dy, dz)
-    q.kind[tid] = PHOTON
-    q.beamlet[tid] = local
-    q.primary[tid] = 1  # source photon: the only one that may split
-    q.energy[tid] = energy
-    q.weight[tid] = weight
-    q.x[tid] = fx
-    q.y[tid] = fy
-    q.z[tid] = fz
-    q.ux[tid] = dx
-    q.uy[tid] = dy
-    q.uz[tid] = dz
-    q.rng[tid] = slots[tid]
-    _escape(emitted, weight * energy)
 
 
 @wp.kernel
@@ -349,20 +405,6 @@ def generate_segmented_plan(
     edges: wp.array(dtype=float),
     cdf: wp.array(dtype=float),
     n_bins: int,
-    fx: float,
-    fy: float,
-    fz: float,
-    ax: float,
-    ay: float,
-    az: float,
-    uxa: float,
-    uya: float,
-    uza: float,
-    vxa: float,
-    vya: float,
-    vza: float,
-    width_u: float,
-    width_v: float,
     stack: StackArrays,
     segs: SegmentArrays,
     mu: MuArrays,
@@ -374,10 +416,11 @@ def generate_segmented_plan(
 
     The in-kernel twin of :meth:`~pyradmc.geometry.segments.SegmentedPlanSource.emit`:
     one uniform selects the segment (``select_by_cdf`` over the normalized shares),
-    ``fan_primary``'s four uniforms follow in the host order, and the weight is that
-    segment's stack transmission (no ``total_weight`` factor: the books stay at the
-    scale of one fan history). One open-field history per thread at a fixed slot
-    (``beamlet = 0``); ``weight * energy`` is booked into ``emitted``.
+    ``fan_primary``'s four uniforms follow in the host order through that segment's
+    fan, and the weight is that segment's stack transmission (no ``total_weight``
+    factor: the books stay at the scale of one fan history). One open-field history
+    per thread at a fixed slot (``beamlet = 0``); ``weight * energy`` is booked into
+    ``emitted``.
     """
     tid = wp.tid()
     slots[tid] = init_slot(seed, history_offset + tid)
@@ -385,37 +428,6 @@ def generate_segmented_plan(
     state.slots = slots
     state.idx = tid
     seg = select_by_cdf(selection_cdf, n_segments, uniform(state))
-    energy, dx, dy, dz = fan_primary(
-        state,
-        edges,
-        cdf,
-        n_bins,
-        fx,
-        fy,
-        fz,
-        ax,
-        ay,
-        az,
-        uxa,
-        uya,
-        uza,
-        vxa,
-        vya,
-        vza,
-        width_u,
-        width_v,
+    _queue_segment_primary(
+        tid, state, seg, 0, edges, cdf, n_bins, stack, segs, mu, slots, emitted, q
     )
-    weight = segment_transmission(stack, segs, mu, seg, energy, fx, fy, fz, dx, dy, dz)
-    q.kind[tid] = PHOTON
-    q.beamlet[tid] = 0
-    q.primary[tid] = 1  # source photon: the only one that may split
-    q.energy[tid] = energy
-    q.weight[tid] = weight
-    q.x[tid] = fx
-    q.y[tid] = fy
-    q.z[tid] = fz
-    q.ux[tid] = dx
-    q.uy[tid] = dy
-    q.uz[tid] = dz
-    q.rng[tid] = slots[tid]
-    _escape(emitted, weight * energy)

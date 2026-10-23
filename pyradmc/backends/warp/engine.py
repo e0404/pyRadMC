@@ -673,6 +673,17 @@ def _reset_count(q: Queue, device: str, stream=None) -> None:
         _launch(kernels.fill_int32, 1, [q.count, 0], device, stream)
 
 
+def _exact_segments(source: object) -> bool:
+    """Return whether ``source`` is an exact segmented fan of exact spectral fans.
+
+    The in-kernel route's condition: a subclass of the source or of any fan may
+    override what a history means, so it keeps the host pre-sampling route.
+    """
+    return type(source) is SegmentedFanSource and all(
+        type(fan) is SpectralBeamSource for fan in source.fans
+    )
+
+
 def _set_count(q: Queue, value: int, device: str, stream=None) -> None:
     if stream is None:
         wp.copy(q.count, wp.array(np.array([value], dtype=np.int32), device=device))
@@ -1014,12 +1025,8 @@ class WarpEngine:
             type(source) is TransmissionMaskSource and type(source.inner) is SpectralBeamSource
         )
         # A segmented plan: exact plan, segments and fan types (an override of any
-        # of the three keeps the host route).
-        is_segment_plan = (
-            type(source) is SegmentedPlanSource
-            and type(source.segments) is SegmentedFanSource
-            and type(source.segments.fan) is SpectralBeamSource
-        )
+        # of them, or of any segment's fan, keeps the host route).
+        is_segment_plan = type(source) is SegmentedPlanSource and _exact_segments(source.segments)
         if is_device_ps and source.device != self.device:
             raise ValueError(
                 f"the device pre-solve buffer is on {source.device!r} but this engine "
@@ -1829,9 +1836,10 @@ class WarpEngine:
         # primary by its segment's stack transmission, evaluated in-kernel.
         use_lattice = type(source) is BeamletGridSource  # exact type: see run()
         use_spectral = type(source) is SpectralBeamletSource
-        # The segmented fan: exact type *and* exact fan type (the TransmissionMask
-        # precedent), so an override of either keeps the host route.
-        use_segments = type(source) is SegmentedFanSource and type(source.fan) is SpectralBeamSource
+        # The segmented fan: exact type *and* exact fan types (the TransmissionMask
+        # precedent), so an override of the source or of any segment's fan keeps the
+        # host route.
+        use_segments = _exact_segments(source)
         beamlet_generator = None
         spectral_tables = None
         segment_upload = None
@@ -3043,11 +3051,6 @@ class WarpEngine:
         for q in queues:
             _reset_count(q, device, stream)
         upload, selection_cdf = segment_plan
-        fan = source.segments.fan
-        focal = fan.focal_point
-        center = fan.center
-        u_axis = fan.u_axis
-        v_axis = fan.v_axis
         _launch(
             generate_segmented_plan,
             n_chunk,
@@ -3059,20 +3062,6 @@ class WarpEngine:
                 upload.edges,
                 upload.cdf,
                 int(upload.cdf.shape[0]),
-                focal[0],
-                focal[1],
-                focal[2],
-                center[0],
-                center[1],
-                center[2],
-                u_axis[0],
-                u_axis[1],
-                u_axis[2],
-                v_axis[0],
-                v_axis[1],
-                v_axis[2],
-                fan.width_u,
-                fan.width_v,
                 upload.stack,
                 upload.segments,
                 upload.mu,
@@ -3980,11 +3969,6 @@ class WarpEngine:
         """
         from pyradmc.backends.warp.segments import generate_segmented_fan
 
-        fan = source.fan
-        focal = fan.focal_point
-        center = fan.center
-        u_axis = fan.u_axis
-        v_axis = fan.v_axis
         t = 0
         while t < block_histories:
             n_chunk = min(chunk, block_histories - t)
@@ -4004,20 +3988,6 @@ class WarpEngine:
                     upload.edges,
                     upload.cdf,
                     int(upload.cdf.shape[0]),
-                    focal[0],
-                    focal[1],
-                    focal[2],
-                    center[0],
-                    center[1],
-                    center[2],
-                    u_axis[0],
-                    u_axis[1],
-                    u_axis[2],
-                    v_axis[0],
-                    v_axis[1],
-                    v_axis[2],
-                    fan.width_u,
-                    fan.width_v,
                     upload.stack,
                     upload.segments,
                     upload.mu,

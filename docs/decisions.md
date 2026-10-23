@@ -738,3 +738,129 @@ multinomial, because `emit` never sees the history index. Stratified allocation 
 either a per-column history count in `run_dij` on both engines or an index-aware emit.
 
 **Review fix (integration):** the plan view's host batch (`SegmentedPlanSource.sample_batch`) is built from the segment source's `sample_beamlet_batch`, one batch per distinct segment, not from the bare fan. A segment subclass that reweights its primaries now reaches the Warp host route exactly as it reaches the reference engine through `emit` (reproduced before the fix: the reference halved, Warp did not). Voxel doses are not exactly proportional under reweighting because the photon roulette weight cap changes a few decisions; the test pins the emitted energy exactly and the total dose loosely.
+
+## Arcs in one launch, 2026-10-23
+
+**A VMAT arc's control points are the segments of one source.** The arc demonstrator
+built one `SegmentedFanSource` per gantry angle and paid one launch per angle per
+evaluation: 36 angles, 100k histories each, about 4 ms per launch on the laptop RTX
+4070, i.e. launch overhead rather than transport. `SegmentedFanSource` now also takes
+**one fan and one beam frame per segment** (`SegmentedFanSource(fans, template, xs,
+frames=..., tips_neg=..., ...)`, or `from_stacks(fans, stacks, xs)` taking each
+stack's frame). Segment `s` is `fans[s]` through the template's structure placed in
+`frames[s]` at its own settings: same physics, same approximations as the single fan
+(attenuation mode, no air, no head scatter). `run_dij` returns one column per control
+point and `plan(weights)` the MU-mixed arc dose from one `run`, unchanged in contract
+(normalized shares, `total_weight`). Chosen over a sibling class because routing,
+`with_settings`, the plan view and the device layout are all the same code; a single
+fan is the case of one fan repeated.
+
+**Contract per segment, refused by name otherwise.** Each frame's origin on its fan's
+focal point (1e-6 cm), the field downstream along its `w`, and — on the per-segment path
+only — the fan's aperture axes equal to the frame's `u`/`v` (1e-9 per component): a
+rotated focal spot with an unrotated frame is the likeliest arc setup error, and only
+the downstream check catches it, and only at large angles. The single-fan path keeps
+exactly its old checks (no axis contract), so no existing input is newly refused. All
+fans must draw from one spectrum (the same object, or equal edges and CDF): one machine,
+one energy, one attenuation table. The structure check is unchanged. `fan` raises for
+distinct fans; `fans`, `frames` and `spectrum` are per-segment/shared accessors.
+`with_settings` keeps the fans and frames (0.44 ms at 180 segments, revalidation
+included; 0.05 ms for a single fan).
+
+**Device layout.** `SegmentArrays` gained the per-segment frame (origin, row-major
+rotation, `flatten`'s layout) and fan (`FAN_STRIDE = 14`: focal point, field centre,
+u and v axes, widths). The generators read the segment's fan for `fan_primary` and its
+frame for the transmission; the stack's own origin/rotation are no longer read there.
+A single-fan source uploads its fan and frame once per segment, so there is one kernel
+for both. The fan scalars left the kernel signatures. **Bit identity of the single-fan
+path:** 345 seeded arrays saved before the change — every primary queue the generators
+handed to the drain, Dij (correlated, independent, `group_start > 0`), plan dose and the
+energy books of four sources incl. a rotated frame, lanes on cuda, and the host routes
+(reference Dij and plan, `sample_beamlet_batch`, plan `sample_batch`) — are
+`np.array_equal` after it, on cpu and cuda:0.
+
+**Correlated sampling across fans.** The fan's four uniforms are segment-blind, so a
+correlated history `r` replays the same uniforms in every column: the same energy and
+in-aperture offset fed to *each segment's own fan* — the same beam's-eye-view ray in
+each frame when the apertures are congruent, not the same engine-frame ray. Keys are
+unchanged (`r` correlated, `s * n_per + r` independent), independent of the chunk.
+Consequence, pinned: on one device a correlated arc column is bit-identical to the Dij
+column of that angle's single-fan source (same keys, fixed-point books, the group-size
+invariance). The AGENTS.md section 8 caveat on quadrature sigmas of correlated columns
+applies to arc columns as it does to beamlets.
+
+**Statistical evidence, with power.** `tests/dij/test_segmented_arc_dij.py`: a plain
+beam at gantry 0, a 90-degree gantry with the collimator at 30 degrees, and a
+non-coplanar 225-degree beam (a couch-like 25-degree turn about +z) with its own
+off-axis, narrower field; v-asymmetric leaf tips in every segment; 2 x 4 x 2 cm bins
+(tens of KERMA events per batch), pooled-dose mask, equal histories per side. Arc
+columns vs per-angle sources (40k per column), vs the reference engine (12k,
+independent mode), the plan view vs the MU-weighted sum of per-angle plan runs (60k
+per side, the per-angle runs allotted `N w_s / W`), and vs the reference. Unbiased
+p-values at the pinned seeds 0.75-0.94 (per-angle), 0.16-0.98 (reference), 0.71 / 0.40
+(plan). Chi-squared/null ratios of 0.66-0.92 on some columns are below 1 — the batched
+oracle is conservative there — so power was measured, not assumed: device-upload
+mutants applied to multi-segment sources only (scratch probe, cuda), each catch
+reported where the mutant touches the column:
+
+| mutant | per-angle columns | reference columns | plan vs per-angle | plan vs reference |
+|---|---|---|---|---|
+| every segment in segment 0's frame | p = 0 | p = 0 | p = 0 | p = 0 |
+| fans of two segments swapped | p = 0 | p = 0 | p = 0 | 9e-288 |
+| rotation missing (identity, origins kept) | p = 0 | p = 0 | p = 0 | p = 0 |
+| segment 2's frame tilted 0.25 deg about +y | 1.3e-4 | 2.3e-3 | 3.8e-4 | 0.12 |
+| segment 1's frame tilted 0.25 deg about +y | 0.010 | 0.83 | 0.60 | 0.32 |
+
+(On the first, coplanar version of the arc — gantry 0/90/225 about +y, every field on
+the isocentre — the same probe gave: segment 2 tilted 3 / 1 / 0.5 / 0.25 deg caught at
+p = 0 / 0 / 2e-170 / 2e-14 per-angle and 0 / 5e-197 / 2e-31 / 5e-6 reference; segment 0
+at 1 / 0.5 deg 0 / 4e-59 per-angle, 5e-43 / 0.046 reference. Sub-degree frame errors
+are seen by the per-angle and reference column tests, not reliably by the plan tests.)
+
+**Whole-array mutants are not the whole story: the first version of these tests missed
+partial ones.** The mutants above replace a segment's entire frame or fan. An
+independent review found that a kernel reading only *some components* from segment
+0 — the frame origin's y, the rotation's v row and the fan's v axis
+(`segs.origin[1]`, `segs.rotation[3..5]`, `segs.fan[9..11]`) — passed every one of the
+43 arc and segment tests while giving device weights off by up to 0.997 on an arc
+with collimator angles 0/45/90: every arc in them rotated about +y, so `v` = +y, the
+origin's and focal spot's y and every field's centre and size were the same in every
+segment. The physics arc now has a collimator-rotated segment and a rotated,
+non-coplanar, off-axis, narrower one; the Dij arc the geometry above. Swept
+2026-10-23: the review's mutant, its three reads separately, and each of the 26
+per-segment components (origin 3, rotation 9, fan 14) replaced individually by
+segment 0's — every one fails the deterministic pins (6-10 of 10 in
+`tests/physics/test_warp_segment_arc.py`) and the Dij tests (2-9 of 12). With the
+orientations but every fan still on the isocentre at one size, the five field-centre
+and width mutants passed both files; the per-fan field closed that. The deterministic
+pins are the bit-identity pin above and, in `tests/physics/test_warp_segment_arc.py`,
+the arc generator against the per-angle generator row for row, the device
+transmission per segment against the host, and a 90-degree segment with one leaf bank
+closed (a kernel reading another segment's frame sees the slab edge-on and passes
+every ray). Host mutants (template frame in `segment_stack`, segment 0's fan in
+`emit`) fail 3-4 unit tests each.
+
+**Measured** (`tests/perf/test_segmented_arc_throughput.py`; RTX 4070 laptop at 2535 MHz
+under load, no throttle reason, GPU otherwise idle during these runs but shared with the
+coordinator's experiments, best of 5 / 3 interleaved, two sessions; MLC of dense water,
+electrons on, random apertures per round, re-targeting by `with_settings` included):
+
+| control points | per-angle runs | one `run_dij` | one plan `run` |
+|---|---|---|---|
+| 36 x 100k | 141-144 ms | 74-78 ms (1.8-1.9x) | 36-37 ms (3.8-4.0x) |
+| 180 x 100k | 645-749 ms | 299-331 ms (2.2-2.3x) | 169-171 ms (3.8-4.4x) |
+
+The plan run is now transport-bound (3.6M histories in 36 ms, mostly rays through
+closed leaves ending in the soft-photon roulette); the Dij's extra cost is its dense
+per-column maps, fold and finalize. The per-angle route's ~4 ms per launch is its
+fixed cost. `examples/segmented_arc_demo.py` shows the same on a conformal 36-point arc.
+
+**Not done.** The edge-gradient route (`SegmentedEdgeSource`, not on develop) needs, to
+consume per-segment frames: read `segs.origin`/`segs.rotation` at `seg * 3`/`seg * 9`
+(or its own per-segment arrays filled from `source.frames`) for the edge-ray chords,
+take each edge's ray from `source.fans[seg]` (focal point and aperture through
+`segs.fan[seg * FAN_STRIDE ...]`), and drop the fan scalars from its launch the same
+way. Per-control-point history allocation still equal in `run_dij` and multinomial by
+MU in the plan view (as for one fan). Collimator rotation with a single shared fan is
+expressible (per-segment frames, one fan) but the axis contract then forces the frames
+to the fan's axes; a rotated collimator needs a fan per segment.
