@@ -323,3 +323,25 @@ def test_one_subclassed_fan_sends_the_arc_to_the_host_route() -> None:
         source, n_histories_per_beamlet=n, n_batches=2, seed=SEED, transport_electrons=False
     )
     assert dij.energy_emitted == pytest.approx(host, rel=1e-6)
+
+
+def test_a_duck_typed_single_fan_keeps_the_host_route() -> None:
+    """A non-spectral single fan (accepted before arcs existed) still runs, host-sampled."""
+    from tests.unit.test_segmented_arc_source import DelegatingFan
+
+    fan = DelegatingFan(arc_fan(ORIENTATIONS[0]))
+    source = SegmentedFanSource.from_stacks(fan, [_stacks()[0]] * 2, AnalyticCrossSections())
+    host = sum(
+        float(
+            np.sum(
+                source.sample_beamlet_batch(SEED, b * 300, 300, s)["weight"].astype(np.float64)
+                * fan.sample_batch(SEED, b * 300, 300)["energy"].astype(np.float64)
+            )
+        )
+        for s in range(2)
+        for b in range(2)
+    )
+    dij = _warp(_grid(), "cpu").run_dij(
+        source, n_histories_per_beamlet=600, n_batches=2, seed=SEED, transport_electrons=False
+    )
+    assert dij.energy_emitted == pytest.approx(host, rel=1e-6)

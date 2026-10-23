@@ -29,7 +29,7 @@ from pyradmc.geometry.collimation import (
     JawPair,
 )
 from pyradmc.geometry.segments import SegmentedFanSource
-from pyradmc.geometry.source import SpectralBeamSource
+from pyradmc.geometry.source import Source, SpectralBeamSource
 from pyradmc.geometry.spectrum import Spectrum
 from pyradmc.rng.host import HostRNG
 from tests.conftest import SEED
@@ -167,6 +167,54 @@ def test_an_arc_has_one_fan_and_one_frame_per_segment() -> None:
         assert source.segment_stack(s) == _stacks()[s]
     with pytest.raises(ValueError, match="one fan per segment"):
         _ = source.fan
+
+
+class DelegatingFan(Source):
+    """A fan that is not a ``SpectralBeamSource``: it wraps one and delegates to it.
+
+    Accepted as the single fan before per-segment fans existed (and host-routed on
+    Warp); a sequence test that iterates any non-spectral fan would refuse it.
+    """
+
+    def __init__(self, inner: SpectralBeamSource) -> None:
+        self.inner = inner
+
+    def __getattr__(self, name: str):
+        return getattr(self.inner, name)
+
+    @property
+    def max_energy(self) -> float:
+        return self.inner.max_energy
+
+    def emit(self, rng_state):
+        return self.inner.emit(rng_state)
+
+    def sample_batch(self, seed: int, history_offset: int, n: int):
+        return self.inner.sample_batch(seed, history_offset, n)
+
+
+def test_a_duck_typed_single_fan_is_still_one_fan() -> None:
+    """Only a sequence of fans is per-segment; any other fan object is the one fan."""
+    fan = arc_fan(0.0)
+    stacks = [arc_stack(0.0, *s) for s in SETTINGS]
+    xs = AnalyticCrossSections()
+    plain = SegmentedFanSource(fan, stacks[0], xs, **_arrays())
+    for wrapped in (
+        SegmentedFanSource(DelegatingFan(fan), stacks[0], xs, **_arrays()),
+        SegmentedFanSource.from_stacks(DelegatingFan(fan), stacks, xs),
+    ):
+        assert isinstance(wrapped.fan, DelegatingFan)
+        assert wrapped.n_segments == 3
+        assert wrapped.frames == (stacks[0].frame,) * 3
+        rng = HostRNG()
+        for s in range(3):
+            for history in range(20):
+                got = wrapped.emit(s, rng.init_state(SEED, history))
+                assert got == plain.emit(s, rng.init_state(SEED, history))
+            a = wrapped.sample_beamlet_batch(SEED, 0, 500, s)
+            b = plain.sample_beamlet_batch(SEED, 0, 500, s)
+            for name, column in a.items():
+                np.testing.assert_array_equal(column, b[name], err_msg=name)
 
 
 def test_a_single_fan_source_reports_its_fan_and_frame_per_segment() -> None:

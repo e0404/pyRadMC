@@ -64,7 +64,7 @@ from __future__ import annotations
 import dataclasses
 import math
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -91,6 +91,20 @@ _FOCAL_TOLERANCE_CM = 1.0e-6
 _AXIS_TOLERANCE = 1.0e-9
 
 FanArgument = SpectralBeamSource | Sequence[SpectralBeamSource]
+
+
+def _per_segment_fans(fan: FanArgument) -> tuple[SpectralBeamSource, ...] | None:
+    """Return the fans of a per-segment sequence, or ``None`` for a single fan.
+
+    Only an explicit ``collections.abc.Sequence`` (a list or tuple of fans) is
+    per-segment: any other object is the one fan, exactly as before per-segment fans
+    existed — including a duck-typed fan that is not a ``SpectralBeamSource``
+    (which the Warp engine host-routes).
+    """
+    if isinstance(fan, Sequence):
+        return tuple(fan)
+    return None
+
 
 # Salt of the plan view's vectorized segment-selection stream, so it is independent
 # of the fan's own PCG64(seed) batch stream (which it must not shift: the fan
@@ -236,11 +250,11 @@ class SegmentedFanSource(BeamletSource):
         attenuation_tables: _MuTables | None = None,
         frames: Sequence[BeamFrame] | None = None,
     ) -> None:
-        fans = None if isinstance(fan, SpectralBeamSource) else tuple(fan)
+        fans = _per_segment_fans(fan)
         if fans is not None and not fans:
             raise ValueError("a segmented fan needs at least one segment")
-        first = fan if fans is None else fans[0]
-        assert isinstance(first, SpectralBeamSource)
+        # Not narrowed by an isinstance check: a duck-typed single fan stays accepted.
+        first = cast(SpectralBeamSource, fan) if fans is None else fans[0]
         if attenuation_tables is None:
             pairs = tuple(zip(template.materials, template.densities, strict=True))
             tables = _MuTables(cross_sections, pairs, e_min, first.max_energy, n_table)
@@ -284,13 +298,14 @@ class SegmentedFanSource(BeamletSource):
         stacks = tuple(stacks)
         if not stacks:
             raise ValueError("a segmented fan needs at least one segment")
-        per_segment = not isinstance(fan, SpectralBeamSource)
-        if not isinstance(fan, SpectralBeamSource):
-            fan = tuple(fan)
-            if len(fan) != len(stacks):
+        fans = _per_segment_fans(fan)
+        per_segment = fans is not None
+        if fans is not None:
+            if len(fans) != len(stacks):
                 raise ValueError(
-                    f"need one fan per segment: {len(fan)} fans for {len(stacks)} stacks"
+                    f"need one fan per segment: {len(fans)} fans for {len(stacks)} stacks"
                 )
+            fan = fans
         template = stacks[0]
         for s, stack in enumerate(stacks[1:], start=1):
             if not per_segment and stack.frame != template.frame:
