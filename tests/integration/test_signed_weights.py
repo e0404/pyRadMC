@@ -13,10 +13,18 @@ continuous-loss deposits (the deposit guard tested the *weighted* amount, ``amou
 0.22 ``D(w)``; the guards now decide on the unweighted energy and on a nonzero
 photon weight, and the photon roulette cap compares ``abs(w)``. Positive-weight
 results are bit-identical to before on ref, Warp cpu and Warp cuda
-(docs/decisions.md, "DAO gradient consistency"). Pinned here: the mirror within
-each engine (statistically; exactly on the reference engine, whose every decision
-is now independent of the weight's sign and whose scoring is float64), and a
-signed-weight beam on Warp against the reference engine, electrons on.
+(docs/decisions.md, "DAO gradient consistency"). Pinned here:
+
+- the mirror within each engine, statistically on two seeds;
+- the mirror on one stream, where no decision may read the weight's sign: exact on the
+  reference engine (float64 scoring), and on Warp up to the fixed-point rounding,
+  which truncates a negative deposit toward zero (one 1e-9 MeV quantum per deposit
+  pair at most; positive-weight bit-identity forbids changing it). Both at
+  ``|w| = 0.5`` and at ``|w| = PHOTON_ROULETTE_WEIGHT_CAP``, where every roulette
+  site meets the cap (at 0.5 almost no lineage reaches it);
+- the energy books of a signed run closing (a dropped bremsstrahlung photon or
+  deposit leaves the books open);
+- a signed-weight beam on Warp against the reference engine, electrons on.
 """
 
 from __future__ import annotations
@@ -26,6 +34,7 @@ from typing import Any
 import numpy as np
 import pytest
 
+from pyradmc import PHOTON_ROULETTE_WEIGHT_CAP
 from pyradmc.backends.ref.engine import ReferenceEngine
 from pyradmc.data.analytic import AnalyticCrossSections
 from pyradmc.geometry.grid import VoxelGrid
@@ -42,6 +51,16 @@ ENGINES = [
 ]
 HISTORIES = {"ref": 1_600, "cpu": 16_000, "cuda:0": 160_000}
 FIELD = (1.0, 3.0)  # cm, in x and in y
+# |w| at which the mirrors are pinned: an ordinary weight, and the roulette cap itself.
+WEIGHTS = [0.5, PHOTON_ROULETTE_WEIGHT_CAP]
+# The Warp energy quantum and a generous bound on the deposits one history makes here
+# (measured: about 8 per history reach the dose map for this 2 MeV beam; a 2 MeV
+# cascade takes of the order of 10^2 substeps in all).
+QUANTUM_MEV = 1.0e-9
+MAX_DEPOSITS_PER_HISTORY = 1_000
+# The project's energy-balance tolerance (float32 transport, 1e-9 MeV quanta), as in
+# tests/integration/test_warp_backend.py.
+ENERGY_BALANCE_RTOL = 1.0e-4
 
 
 class _SignedBeam(Source):
@@ -138,7 +157,8 @@ def test_negative_weight_mirrors_positive_with_electrons(name: str) -> None:
     _check(name, transport_electrons=True)
 
 
-def test_reference_mirror_is_exact_on_one_stream() -> None:
+@pytest.mark.parametrize("weight", WEIGHTS)
+def test_reference_mirror_is_exact_on_one_stream(weight: float) -> None:
     """Same seed, weight -w against +w: the reference dose negates bit for bit.
 
     No transport decision may read the weight's sign (deposit guards, photon
@@ -146,12 +166,59 @@ def test_reference_mirror_is_exact_on_one_stream() -> None:
     negative run is the exact negative of its twin's.
     """
     engine = _engine("ref")
-    kwargs = dict(n_histories=400, n_batches=N_BATCHES, seed=SEED, transport_electrons=True)
-    plus = engine.run(_SignedBeam(0.5), **kwargs)
-    minus = engine.run(_SignedBeam(-0.5), **kwargs)
+    # 2000 histories: enough soft bremsstrahlung photons that the electron loop's
+    # roulette site meets the cap at |w| = 4 (400 had none).
+    kwargs = dict(n_histories=2_000, n_batches=N_BATCHES, seed=SEED, transport_electrons=True)
+    plus = engine.run(_SignedBeam(weight), **kwargs)
+    minus = engine.run(_SignedBeam(-weight), **kwargs)
     assert np.any(plus.dose > 0.0)
     np.testing.assert_array_equal(minus.dose, -plus.dose)
     assert minus.energy_deposited == -plus.energy_deposited
+
+
+@pytest.mark.warp
+@pytest.mark.parametrize("device", ["cpu", pytest.param("cuda:0", marks=pytest.mark.gpu)])
+@pytest.mark.parametrize("weight", WEIGHTS)
+def test_warp_mirror_on_one_stream_is_exact_up_to_rounding(device: str, weight: float) -> None:
+    """Same seed, weight -w against +w on Warp: equal and opposite up to the quanta.
+
+    Every amount of the negative run is the exact negative of its twin's (float32
+    negation is exact and no decision reads the sign); only the fixed-point rounding
+    differs, ``int64(x + 0.5) + int64(-x + 0.5)`` being 0 or 1 quantum per deposit
+    pair. So the summed absolute residual over the dose map, in quanta, is at most
+    one per deposit: bounded by ``MAX_DEPOSITS_PER_HISTORY`` per history. A dropped
+    bremsstrahlung photon or a roulette game played on one side only breaks it by
+    orders of magnitude.
+    """
+    engine = _engine(device)
+    n = HISTORIES[device]
+    kwargs = dict(n_histories=n, n_batches=N_BATCHES, seed=SEED, transport_electrons=True)
+    plus = engine.run(_SignedBeam(weight), **kwargs)
+    minus = engine.run(_SignedBeam(-weight), **kwargs)
+    assert np.any(plus.dose > 0.0)
+    mass = float(np.prod(_grid().spacing))  # water, density 1
+    residual_quanta = np.abs(minus.dose + plus.dose) * mass * n / QUANTUM_MEV
+    assert residual_quanta.sum() <= MAX_DEPOSITS_PER_HISTORY * n, residual_quanta.sum() / n
+
+
+@pytest.mark.parametrize("name", ENGINES)
+@pytest.mark.parametrize("weight", WEIGHTS)
+def test_signed_run_closes_its_energy_books(name: str, weight: float) -> None:
+    """A negative-weight run's books close: emitted = deposited + escaped + unscored.
+
+    The signed ledger books roulette's weight changes into ``escaped``; a photon or a
+    deposit dropped for its sign is booked nowhere and leaves the balance open.
+    """
+    result = _engine(name).run(
+        _SignedBeam(-weight),
+        n_histories=HISTORIES[name],
+        n_batches=N_BATCHES,
+        seed=SEED,
+        transport_electrons=True,
+    )
+    books = result.energy_deposited + result.energy_escaped + result.energy_unscored
+    assert result.energy_emitted < 0.0
+    assert books == pytest.approx(result.energy_emitted, rel=ENERGY_BALANCE_RTOL)
 
 
 @pytest.mark.warp
@@ -161,14 +228,16 @@ def test_signed_weight_beam_matches_the_reference_engine() -> None:
     A broad beam entering from vacuum, scored as a depth-dose curve in 16 x 16 cm
     by 5 mm slabs, so every compared bin holds many deposits per batch (on fine
     voxels at these history counts the batched chi-squared sits below its null and
-    has no power). Power: either engine alone keeping the old weighted-amount
-    deposit guard is rejected (docs/decisions.md, "DAO gradient consistency").
+    has no power), and **equal history counts** on both engines: the batched oracle
+    is miscalibrated when one side has ten times the other's histories on sparse
+    bins (docs/decisions.md). Power: either engine alone keeping the old
+    weighted-amount deposit guard is rejected.
     """
     grid = VoxelGrid.uniform_water(shape=(1, 1, 20), spacing=(16.0, 16.0, 0.5))
     beam = _SignedBeam(-0.5, field=(0.0, 16.0), z=-1.0)
     kwargs = dict(n_batches=16, transport_electrons=True)
     ref = _engine("ref", grid).run(beam, n_histories=3_200, seed=SEED, **kwargs)
-    warp = _engine("cpu", grid).run(beam, n_histories=32_000, seed=SEED, **kwargs)
+    warp = _engine("cpu", grid).run(beam, n_histories=3_200, seed=SEED, **kwargs)
     pooled = -(ref.dose + warp.dose)
     mask = pooled > 0.1 * pooled.max()
     mask &= (ref.dose_sigma > 0.0) & (warp.dose_sigma > 0.0)
