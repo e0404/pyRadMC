@@ -206,6 +206,11 @@ _GROUP_SIZE_CAP = 1024
 """Upper bound on an auto-sized group: past this the launches are already coarse
 and the marginal drain amortization is nil, while the dense maps keep growing."""
 
+_MAX_BLOCK_HISTORIES = 2**31 - 1
+"""Largest batch block (``group * per_batch`` histories) a launch can index: the
+generators' flat index ``t = t_offset + tid`` and within-beamlet index ``r`` are
+int32, and wrap silently past this, re-attributing histories to other beamlets."""
+
 _GROUP_MEMORY_FRACTION = 0.5
 """Fraction of reported-free device memory budgeted for the dense group maps; the
 rest stays for geometry, tables, queues, and the sparse compaction output."""
@@ -269,6 +274,15 @@ def _auto_group_size(
     budget = max(0, free_bytes - queue_bytes) * _GROUP_MEMORY_FRACTION
     sized = int(budget) // per_beamlet
     return max(1, min(sized, n_beamlets, _GROUP_SIZE_CAP))
+
+
+def _index_safe_group_size(group: int, per_batch: int) -> int:
+    """Largest group ``<= group`` whose batch block fits ``_MAX_BLOCK_HISTORIES``.
+
+    Group size is bit-inert (test-pinned), so the cap changes no scored value; it
+    only keeps the kernels' int32 history index from wrapping.
+    """
+    return max(1, min(group, _MAX_BLOCK_HISTORIES // max(per_batch, 1)))
 
 
 def _auto_chunk_size(device: str, queue_factor: int) -> int:
@@ -1560,7 +1574,9 @@ class WarpEngine:
             (each) device — the largest group whose dense maps fit half of it,
             clamped to ``[1, min(n_beamlets, 1024)]``, the minimum over a
             multi-device set, and 128 where free memory is unknown (cpu). An
-            explicit integer is used exactly as given.
+            explicit integer is used as given, except that either is capped so one
+            batch's block, ``group * n_histories_per_beamlet / n_batches``, stays
+            below ``2**31`` histories (the kernels' int32 history index).
 
             This is the *only* dial for the dense device cost, which is
             ``group * n_voxels * 24`` bytes — one int64 quanta map plus the two
@@ -1697,6 +1713,17 @@ class WarpEngine:
                 )
 
             beamlet_group_size = min(_fit(d) for d in device_list)
+
+        # Auto-sized or explicit, one batch's block must stay inside the generators'
+        # int32 history index; past it the index wraps and histories land in other
+        # columns with no error. Bit-inert, like every grouping.
+        if n_histories_per_beamlet > _MAX_BLOCK_HISTORIES:
+            raise ValueError(
+                f"{n_histories_per_beamlet} histories per beamlet exceed the kernels' "
+                f"int32 history index ({_MAX_BLOCK_HISTORIES}); split the run into "
+                "independently seeded calls"
+            )
+        beamlet_group_size = _index_safe_group_size(beamlet_group_size, per_batch)
 
         # Beamlet groups are independent — no cross-group reduction — so sharding them
         # over devices needs no communication at all. Assignment is greedy from a
