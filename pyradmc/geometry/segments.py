@@ -57,6 +57,33 @@ congruent. The Warp engine generates this exact type in-kernel, with the
 transmission evaluated on the device by the same collimation twins the device
 pre-solve uses; a subclass, or a subclass of any fan, keeps the host pre-sampling
 route.
+
+**Aperture importance sampling** (opt-in, ``aperture_sampling=delta``). Sampling
+the fan's whole field ``F`` uniformly spends most histories of a small segment on
+rays its leaves block, each carrying a percent of transmission. With
+``aperture_sampling`` segment ``s`` draws its in-aperture point instead from the
+defensive mixture ``q_s = delta U(F) + (1 - delta) U(A_s)`` (Hesterberg 1995,
+doi:10.1080/00401706.1995.10484303), where ``A_s`` is the segment's opening mapped
+onto its fan's aperture plane, and multiplies the weight by the likelihood ratio
+
+    p / q_s = 1 / (delta + (1 - delta) |F| / |A_s| 1_{A_s}(x)),
+
+so every column (and the plan view) is unchanged in expectation — dose per fan
+history, no change to any normalization — and only its variance moves. No
+approximation: any ``A_s`` inside ``F`` is unbiased; a poor ``A_s`` only costs
+efficiency, and the weight never exceeds ``1 / delta``. ``A_s`` is the leaf openings
+of each row widened by the tip margin (default: the rounded tips' partial-chord band,
+see ``aperture_margin``; closed pairs keep theirs, since touching rounded tips leak
+along their line of contact), intersected with the jaw openings and clipped to
+``F``; an empty ``A_s`` falls back to uniform sampling. The draw costs five uniforms
+per history instead of four (a different, still segment-blind stream: correlated
+columns replay the same five uniforms, each through its own proposal, so their
+rays, and hence their correlation, differ). Every route — ``emit``, the vectorized
+batch, the plan view, both Warp generators — samples through the one scalar
+:func:`~pyradmc.geometry.fan.fan_primary_aperture`. It needs the per-segment
+contract on every segment (aperture axes = frame ``u``/``v``, also on the single-fan
+path) and exact :class:`~pyradmc.geometry.source.SpectralBeamSource` fans. It is a
+sampling option, not physics (AGENTS.md 2.10): the estimand is the same.
 """
 
 from __future__ import annotations
@@ -70,8 +97,8 @@ import numpy as np
 import numpy.typing as npt
 
 from pyradmc.data.interface import CrossSectionSource
-from pyradmc.geometry.collimation import MLC, BeamFrame, BeamLimitingStack, JawPair
-from pyradmc.geometry.fan import select_by_cdf
+from pyradmc.geometry.collimation import MLC, BeamFrame, BeamLimitingStack, CompiledStack, JawPair
+from pyradmc.geometry.fan import fan_primary_aperture, select_by_cdf
 from pyradmc.geometry.head import _MuTables
 from pyradmc.geometry.source import BeamletSource, Primary, Source, SpectralBeamSource
 from pyradmc.geometry.spectrum import Spectrum
@@ -184,6 +211,175 @@ def _settings_array(
     return array
 
 
+# --- aperture importance sampling: the per-segment tables -------------------------------
+
+
+def _tip_band(mlc: MLC) -> float:
+    """Width beyond a rounded leaf tip's apex over which a ray cuts less than the full leaf.
+
+    A ray parallel to ``w`` at distance ``x`` beyond the apex cuts the tip disc
+    (radius ``R``) in a chord ``2 sqrt(2 R x - x^2)``, which reaches the leaf height
+    ``H`` at ``x = R - sqrt(R^2 - (H / 2)^2)``; beyond it the ray sees the whole leaf
+    (the flat body's transmission). The default aperture margin (mid-plane cm).
+    """
+    half = 0.5 * (mlc.z_bottom - mlc.z_top)
+    return float(mlc.tip_radius - math.sqrt(mlc.tip_radius**2 - half**2))
+
+
+def _aperture_tables(
+    compiled: CompiledStack,
+    fans: Sequence[SpectralBeamSource],
+    frames: Sequence[BeamFrame],
+    jaw_neg: _F64,
+    jaw_pos: _F64,
+    tips_neg: _F64,
+    tips_pos: _F64,
+    delta: float,
+    margins: Sequence[float],
+) -> tuple[_F64, _F64]:
+    """Build every segment's aperture table (vectorized over segments) and ``|A_s| / |F|``.
+
+    The region ``A_s`` lives in segment ``s``'s fan aperture plane, in the in-aperture
+    offsets ``(du, dv)`` of the ``width_u x width_v`` field ``F``. By the
+    per-segment contract the frame's origin is the fan's focal point and the fan's
+    aperture axes are the frame's ``u``/``v``, so the aperture plane is ``w = c_w``
+    with ``c = R_s (center - focal)`` the field centre in frame coordinates, and the
+    focal ray through ``(du, dv)`` crosses device ``j``'s mid-plane ``z_j`` at the
+    transverse point ``(c_u + du, c_v + dv) z_j / c_w``. A mid-plane setting ``t``
+    (jaw edge, leaf tip, leaf strip edge) therefore maps to the offset
+    ``t c_w / z_j - c_u`` (``- c_v`` along ``v``): a positive scale, so order is kept.
+
+    ``A_s`` is the intersection, clipped to ``F``, of: each ``u`` jaw's opening; each
+    ``v`` jaw's opening; each MLC's leaf openings widened by its margin, row by row —
+    ``[tip_neg_i - m, tip_pos_i + m]`` over the row's strip, a closed pair (touching
+    tips) included, since its rounded tips leak along the line where they touch;
+    and outside the bank's strips no MLC constraint. The jaw edges and strip edges
+    are taken exactly (a focused edge or side is exact for focal rays; an unfocused
+    one only lets through a band at under ``exp(-mu H / 2)``). Along ``v`` the field
+    is cut at every mapped strip edge and jaw edge, a fixed number of bands per
+    stack structure, each holding one ``u`` interval. Any ``A_s`` inside ``F`` gives
+    an unbiased estimate; a poor one only costs efficiency.
+    """
+    n_seg = jaw_neg.shape[0]
+    focal = np.array([f.focal_point for f in fans], dtype=np.float64)
+    centre = np.array([f.center for f in fans], dtype=np.float64)
+    rotation = np.array([(fr.u_axis, fr.v_axis, fr.w_axis) for fr in frames], dtype=np.float64)
+    c = np.einsum("sij,sj->si", rotation, centre - focal)
+    c_u, c_v, c_w = c[:, 0:1], c[:, 1:2], c[:, 2:3]
+    half_u = 0.5 * np.array([f.width_u for f in fans], dtype=np.float64)[:, None]
+    half_v = 0.5 * np.array([f.width_v for f in fans], dtype=np.float64)[:, None]
+    z_mid = 0.5 * (compiled.z_top + compiled.z_bottom)
+    scale = c_w / z_mid[None, :]  # (n_seg, n_devices): mid-plane -> aperture plane
+
+    def strip_edges(j: int) -> _F64:
+        off = int(compiled.mlc_edges_off[j])
+        return compiled.leaf_edges_v[off : off + int(compiled.mlc_n_pairs[j]) + 1]
+
+    jaws = [j for j in range(compiled.n_devices) if compiled.kind[j] == 0]
+    mlcs = [j for j in range(compiled.n_devices) if compiled.kind[j] == 1]
+    v_jaws = [j for j in jaws if compiled.jaw_axis[j] == 1]
+    u_jaws = [j for j in jaws if compiled.jaw_axis[j] == 0]
+
+    cuts = [-half_v, half_v]
+    for j in mlcs:
+        cuts.append(strip_edges(j)[None, :] * scale[:, j : j + 1] - c_v)
+    for j in v_jaws:
+        cuts.append(jaw_neg[:, j : j + 1] * scale[:, j : j + 1] - c_v)
+        cuts.append(jaw_pos[:, j : j + 1] * scale[:, j : j + 1] - c_v)
+    v_edges = np.sort(np.clip(np.concatenate(cuts, axis=1), -half_v, half_v), axis=1)
+    middle = 0.5 * (v_edges[:, :-1] + v_edges[:, 1:])
+    height = np.diff(v_edges, axis=1)
+    u_lo = np.broadcast_to(-half_u, middle.shape).copy()
+    u_hi = np.broadcast_to(half_u, middle.shape).copy()
+    for j in u_jaws:
+        u_lo = np.maximum(u_lo, jaw_neg[:, j : j + 1] * scale[:, j : j + 1] - c_u)
+        u_hi = np.minimum(u_hi, jaw_pos[:, j : j + 1] * scale[:, j : j + 1] - c_u)
+    for j in v_jaws:
+        lo = jaw_neg[:, j : j + 1] * scale[:, j : j + 1] - c_v
+        hi = jaw_pos[:, j : j + 1] * scale[:, j : j + 1] - c_v
+        shut = (middle < lo) | (middle >= hi)
+        u_hi = np.where(shut, u_lo, u_hi)
+    for j, margin in zip(mlcs, margins, strict=True):
+        edges = strip_edges(j)
+        n_pairs = edges.size - 1
+        tips_off = int(compiled.mlc_tips_off[j])
+        mid_plane_v = (middle + c_v) / scale[:, j : j + 1]
+        row = np.searchsorted(edges, mid_plane_v.ravel(), side="right").reshape(middle.shape) - 1
+        in_bank = (row >= 0) & (row < n_pairs)
+        row = np.clip(row, 0, n_pairs - 1)
+        t_neg = np.take_along_axis(tips_neg[:, tips_off : tips_off + n_pairs], row, axis=1)
+        t_pos = np.take_along_axis(tips_pos[:, tips_off : tips_off + n_pairs], row, axis=1)
+        k = scale[:, j : j + 1]
+        u_lo = np.where(in_bank, np.maximum(u_lo, (t_neg - margin) * k - c_u), u_lo)
+        u_hi = np.where(in_bank, np.minimum(u_hi, (t_pos + margin) * k - c_u), u_hi)
+    empty = (u_hi <= u_lo) | (height <= 0.0)
+    u_lo = np.where(empty, 0.0, u_lo)
+    u_hi = np.where(empty, 0.0, u_hi)
+
+    area = height * (u_hi - u_lo)
+    cumulative = np.cumsum(area, axis=1)
+    total = cumulative[:, -1]
+    field = 4.0 * half_u[:, 0] * half_v[:, 0]
+    valid = (total > 0.0) & (field > 0.0)
+    # Divided by its own last entry: the final share is exactly 1 and trailing empty
+    # bands repeat it exactly, so no rounding gap can select them (the plan's idiom).
+    share = cumulative / np.where(valid, total, 1.0)[:, None]
+    n_bands = middle.shape[1]
+    keep = 1.0 - delta
+    cdf = np.empty((n_seg, n_bands + 1), dtype=np.float64)
+    cdf[:, 0] = 1.0 - keep
+    cdf[:, 1:] = 1.0 - keep * (1.0 - share)
+    defensive = cdf[:, 0]  # the share of the whole field, as the CDF states it
+    factor_out = 1.0 / defensive
+    factor_in = 1.0 / (defensive + (1.0 - defensive) * field / np.where(valid, total, 1.0))
+    cdf[~valid] = 1.0
+    factor_out = np.where(valid, factor_out, 1.0)
+    factor_in = np.where(valid, factor_in, 1.0)
+    table = np.concatenate(
+        [factor_out[:, None], factor_in[:, None], cdf, v_edges, u_lo, u_hi], axis=1
+    )
+    fraction = np.where(valid, total / np.where(field > 0.0, field, 1.0), 0.0)
+    return np.ascontiguousarray(table), np.asarray(fraction, dtype=np.float64)
+
+
+def _region_contains(
+    v_edges: _F64, u_lo: _F64, u_hi: _F64, du: _F64, dv: _F64
+) -> npt.NDArray[np.bool_]:
+    """Vectorized :func:`~pyradmc.geometry.fan.aperture_contains` on one region."""
+    n = u_lo.size
+    i = np.searchsorted(v_edges, dv, side="right")
+    band = np.clip(i - 1, 0, n - 1)
+    return np.asarray((i >= 1) & (i <= n) & (du >= u_lo[band]) & (du < u_hi[band]))
+
+
+def _aperture_offsets(
+    table: _F64, n_bands: int, width_u: float, width_v: float, u: _F64
+) -> tuple[_F64, _F64, _F64]:
+    """Vectorized in-aperture draw of :func:`~pyradmc.geometry.fan.fan_primary_aperture`.
+
+    ``table`` is one segment's row, ``u`` the ``(n, 3)`` component, ``u`` and ``v``
+    uniforms; returns the offsets ``(du, dv)`` and the importance factor, with the
+    scalar sampler's arithmetic.
+    """
+    n = n_bands
+    cdf = table[2 : 3 + n]
+    v_edges = table[3 + n : 4 + 2 * n]
+    u_lo = table[4 + 2 * n : 4 + 3 * n]
+    u_hi = table[4 + 3 * n : 4 + 4 * n]
+    k = np.minimum(np.searchsorted(cdf, u[:, 0], side="right"), n)
+    du = (u[:, 1] - 0.5) * width_u
+    dv = (u[:, 2] - 0.5) * width_v
+    factor = np.full(u.shape[0], table[1], dtype=np.float64)
+    band = k > 0
+    b = k[band] - 1
+    du[band] = u_lo[b] + (u_hi[b] - u_lo[b]) * u[band, 1]
+    dv[band] = v_edges[b] + (v_edges[b + 1] - v_edges[b]) * u[band, 2]
+    whole = ~band
+    inside = _region_contains(v_edges, u_lo, u_hi, du[whole], dv[whole])
+    factor[whole] = np.where(inside, table[1], table[0])
+    return du, dv, factor
+
+
 class SegmentedFanSource(BeamletSource):
     """One photon fan through several collimator settings; segment ``s`` is beamlet ``s``.
 
@@ -224,6 +420,19 @@ class SegmentedFanSource(BeamletSource):
         the template's frame (which is then unused): segment ``s``'s stack is the
         template structure in ``frames[s]``. ``None`` puts every segment in the
         template's frame.
+    aperture_sampling
+        ``None`` (default): every segment samples its fan's field uniformly, the
+        fan's own four-uniform draw. A float ``delta`` in ``(0, 1)``: aperture
+        importance sampling (module docstring) with defensive uniform share
+        ``delta``; the rest of the histories go to the segment's opening. A small
+        ``delta`` concentrates more but weights the blocked region's histories by
+        up to ``1 / delta`` (measured in docs/decisions.md).
+    aperture_margin
+        How far beyond each leaf tip (cm, at its MLC's mid-plane) the sampled
+        region extends. ``None`` (default): each MLC's rounded-tip partial-chord
+        band ``R - sqrt(R^2 - (H / 2)^2)`` — beyond it a ray parallel to the beam
+        axis cuts the full leaf height ``H``, so every ray transmitting more than
+        the leaf body lies inside. Only with ``aperture_sampling``.
 
     At least one per-segment array — a settings array, or a sequence of fans or
     frames — is required; together they fix ``n_segments`` and must agree on it.
@@ -249,6 +458,8 @@ class SegmentedFanSource(BeamletSource):
         n_table: int = 512,
         attenuation_tables: _MuTables | None = None,
         frames: Sequence[BeamFrame] | None = None,
+        aperture_sampling: float | None = None,
+        aperture_margin: float | None = None,
     ) -> None:
         fans = _per_segment_fans(fan)
         if fans is not None and not fans:
@@ -277,6 +488,7 @@ class SegmentedFanSource(BeamletSource):
             tips_neg,
             tips_pos,
         )
+        self._setup_aperture(aperture_sampling, aperture_margin)
 
     @classmethod
     def from_stacks(
@@ -287,6 +499,8 @@ class SegmentedFanSource(BeamletSource):
         *,
         e_min: float = 0.010,
         n_table: int = 512,
+        aperture_sampling: float | None = None,
+        aperture_margin: float | None = None,
     ) -> SegmentedFanSource:
         """Build the source from one stack per segment (the first is the template).
 
@@ -345,6 +559,8 @@ class SegmentedFanSource(BeamletSource):
             e_min=e_min,
             n_table=n_table,
             frames=[stack.frame for stack in stacks] if per_segment else None,
+            aperture_sampling=aperture_sampling,
+            aperture_margin=aperture_margin,
         )
         source._stacks.update(enumerate(stacks))
         return source
@@ -364,7 +580,9 @@ class SegmentedFanSource(BeamletSource):
         A setting not given keeps *this* source's values when the given arrays
         have this source's segment count (or none is given), and falls back to
         the template's otherwise. A source with one fan or frame per segment
-        keeps them, so its segment count is fixed.
+        keeps them, so its segment count is fixed. Aperture sampling and its
+        margin are kept; the per-segment aperture tables are rebuilt for the new
+        settings (vectorized over segments).
         """
         given = [a for a in (jaw_neg, jaw_pos, tips_neg, tips_pos) if a is not None]
         n_new = np.shape(given[0])[0] if given else self.n_segments
@@ -384,6 +602,8 @@ class SegmentedFanSource(BeamletSource):
             tips_pos=tips_pos,
             attenuation_tables=self._tables,
             frames=self._given_frames,
+            aperture_sampling=self._aperture_delta,
+            aperture_margin=self._aperture_margin_given,
         )
 
     def _setup(
@@ -486,6 +706,66 @@ class SegmentedFanSource(BeamletSource):
         self._mlc_devices = tuple(mlcs)
         self._stacks: dict[int, BeamLimitingStack] = {}
 
+    def _setup_aperture(self, delta: float | None, margin: float | None) -> None:
+        """Validate the aperture-sampling option and build the per-segment tables."""
+        self._aperture_delta: float | None = None
+        self._aperture_margin_given: float | None = None
+        self._aperture_margins: tuple[float, ...] = ()
+        self._aperture_table: _F64 | None = None
+        self._aperture_flat: _F64 | None = None
+        self._aperture_fraction: _F64 | None = None
+        self._aperture_bands = 0
+        if delta is None:
+            if margin is not None:
+                raise ValueError(
+                    "aperture_margin is only used by aperture sampling; give aperture_sampling too"
+                )
+            return
+        delta = float(delta)
+        if not 0.0 < delta < 1.0:  # also refuses nan
+            raise ValueError(
+                f"aperture_sampling is the defensive uniform share and must lie in (0, 1), "
+                f"got {delta}"
+            )
+        if margin is not None:
+            margin = float(margin)
+            if not (math.isfinite(margin) and margin >= 0.0):
+                raise ValueError(f"aperture_margin must be finite and non-negative, got {margin}")
+        if any(type(f) is not SpectralBeamSource for f in self._fans):
+            raise ValueError(
+                "aperture sampling replaces the fan's own aperture draw, so every fan must be "
+                "an exact SpectralBeamSource (a subclass may change what a history means)"
+            )
+        if self._given_fans is None and self._given_frames is None:
+            # The single-fan path does not check the axis contract otherwise.
+            _check_fan_in_frame(
+                self._fan, self._template.frame, "aperture sampling: ", check_axes=True
+            )
+        mlcs = [self._template.devices[j] for j in self._mlc_devices]
+        margins = tuple(
+            margin if margin is not None else _tip_band(cast(MLC, device)) for device in mlcs
+        )
+        table, fraction = _aperture_tables(
+            self._template.flatten(),
+            self._fans,
+            self._frames,
+            self._jaw_neg,
+            self._jaw_pos,
+            self._tips_neg,
+            self._tips_pos,
+            delta,
+            margins,
+        )
+        table.setflags(write=False)
+        fraction.setflags(write=False)
+        self._aperture_delta = delta
+        self._aperture_margin_given = margin
+        self._aperture_margins = margins
+        self._aperture_table = table
+        self._aperture_flat = table.reshape(-1)
+        self._aperture_fraction = fraction
+        self._aperture_bands = (table.shape[1] - 4) // 4
+
     # --- the BeamletSource contract ----------------------------------------------------
 
     @property
@@ -504,8 +784,13 @@ class SegmentedFanSource(BeamletSource):
         Consumes exactly the fan's four uniforms; the segment never touches the
         stream, so correlated sampling replays the same uniforms in every column,
         each through that segment's own fan (with one shared fan: the same ray).
+        With aperture sampling, five uniforms through
+        :func:`~pyradmc.geometry.fan.fan_primary_aperture` with this segment's
+        table, and the weight also carries its importance factor.
         """
         self._check(beamlet)
+        if self._aperture_flat is not None:
+            return self._emit_aperture(beamlet, rng_state)
         primary = self._fans[beamlet].emit(rng_state)
         factor = self.transmission(
             beamlet,
@@ -523,9 +808,14 @@ class SegmentedFanSource(BeamletSource):
         Chunk-invariant and segment-blind, exactly as a fan's own batch is: every
         segment draws the same uniforms through its own fan (a *different* stream
         from :meth:`emit`'s per-history spawn, the spectral sources' precedent: the
-        backends agree statistically, never bit-wise).
+        backends agree statistically, never bit-wise). With aperture sampling the
+        batch draws five uniforms per history from ``PCG64(seed)`` advanced to
+        ``5 * history_offset`` (chunk-invariant, segment-blind) and maps them
+        exactly as :func:`~pyradmc.geometry.fan.fan_primary_aperture` does.
         """
         self._check(beamlet)
+        if self._aperture_table is not None:
+            return self._aperture_batch(seed, history_offset, n, beamlet)
         columns = self._fans[beamlet].sample_batch(seed, history_offset, n)
         origins = np.stack([columns["x"], columns["y"], columns["z"]], axis=1).astype(np.float64)
         directions = np.stack([columns["ux"], columns["uy"], columns["uz"]], axis=1).astype(
@@ -537,6 +827,155 @@ class SegmentedFanSource(BeamletSource):
         out = dict(columns)
         out["weight"] = (columns["weight"].astype(np.float64) * factors).astype(np.float32)
         return out
+
+    # --- aperture importance sampling ----------------------------------------------------
+
+    def _emit_aperture(self, beamlet: int, rng_state: RNGState) -> Primary:
+        fan = self._fans[beamlet]
+        spectrum = fan.spectrum
+        assert self._aperture_flat is not None
+        energy, ux, uy, uz, factor = fan_primary_aperture(
+            rng_state,
+            spectrum.edges,
+            spectrum.cdf,
+            spectrum.cdf.size,
+            *fan.focal_point,
+            *fan.center,
+            *fan.u_axis,
+            *fan.v_axis,
+            fan.width_u,
+            fan.width_v,
+            self._aperture_flat,
+            beamlet * (4 * self._aperture_bands + 4),
+            self._aperture_bands,
+        )
+        primary = Primary(float(energy), *fan.focal_point, float(ux), float(uy), float(uz))
+        transmission = self.transmission(
+            beamlet,
+            np.array([primary.energy]),
+            np.array([[primary.x, primary.y, primary.z]]),
+            np.array([[primary.ux, primary.uy, primary.uz]]),
+        )
+        return primary._replace(weight=float(factor) * float(transmission[0]))
+
+    def _aperture_batch(
+        self, seed: int, history_offset: int, n: int, beamlet: int
+    ) -> dict[str, npt.NDArray[Any]]:
+        fan = self._fans[beamlet]
+        assert self._aperture_table is not None
+        bitgen = np.random.PCG64(seed)
+        bitgen.advance(5 * history_offset)
+        u = np.random.Generator(bitgen).random((n, 5))
+        energy = fan.spectrum.sample_energies(u[:, 0], u[:, 1])
+        du, dv, factor = _aperture_offsets(
+            self._aperture_table[beamlet], self._aperture_bands, fan.width_u, fan.width_v, u[:, 2:]
+        )
+        # fan_primary_aperture's arithmetic, vectorized in the same order.
+        f, a, ua, va = fan.focal_point, fan.center, fan.u_axis, fan.v_axis
+        dx = a[0] + du * ua[0] + dv * va[0] - f[0]
+        dy = a[1] + du * ua[1] + dv * va[1] - f[1]
+        dz = a[2] + du * ua[2] + dv * va[2] - f[2]
+        inv_norm = 1.0 / np.sqrt(dx * dx + dy * dy + dz * dz)
+        columns: dict[str, npt.NDArray[Any]] = {
+            "particle_type": np.ones(n, dtype=np.int32),
+            "energy": energy.astype(np.float32),
+            "x": np.full(n, f[0], dtype=np.float32),
+            "y": np.full(n, f[1], dtype=np.float32),
+            "z": np.full(n, f[2], dtype=np.float32),
+            "ux": (dx * inv_norm).astype(np.float32),
+            "uy": (dy * inv_norm).astype(np.float32),
+            "uz": (dz * inv_norm).astype(np.float32),
+        }
+        # The transmission of the ray as transported (float32), as on the uniform route.
+        origins = np.stack([columns["x"], columns["y"], columns["z"]], axis=1).astype(np.float64)
+        directions = np.stack([columns["ux"], columns["uy"], columns["uz"]], axis=1).astype(
+            np.float64
+        )
+        transmission = self.transmission(
+            beamlet, columns["energy"].astype(np.float64), origins, directions
+        )
+        columns["weight"] = (factor * transmission).astype(np.float32)
+        return columns
+
+    def aperture_region(self, segment: int) -> tuple[_F64, _F64, _F64]:
+        """Segment ``segment``'s aperture region ``A_s`` in its fan's aperture plane.
+
+        Returns ``(v_edges, u_lo, u_hi)``: band ``b`` is ``v_edges[b] <= dv <
+        v_edges[b + 1]`` with ``u_lo[b] <= du < u_hi[b]`` (empty where they are
+        equal), in the fan's in-aperture offsets ``(du, dv)`` (cm, the
+        ``width_u x width_v`` field centred at ``center``). Requires aperture
+        sampling.
+        """
+        self._check(segment)
+        if self._aperture_table is None:
+            raise ValueError("this source does not sample its apertures (aperture_sampling=None)")
+        n = self._aperture_bands
+        row = self._aperture_table[segment]
+        return (
+            row[3 + n : 4 + 2 * n].copy(),
+            row[4 + 2 * n : 4 + 3 * n].copy(),
+            row[4 + 3 * n : 4 + 4 * n].copy(),
+        )
+
+    def proposal_density(self, segment: int, du: npt.ArrayLike, dv: npt.ArrayLike) -> _F64:
+        """Return the density ``q_s`` the offsets ``(du, dv)`` are drawn from (1/cm^2).
+
+        ``delta / |F| + (1 - delta) 1_{A_s} / |A_s|`` on the field ``F``, zero
+        outside it; ``1 / |F|`` (uniform) for an empty region or without aperture
+        sampling. Computed from the region itself, not from the stored factors,
+        so ``factor * q_s = 1 / |F|`` is a check of the table.
+        """
+        self._check(segment)
+        fan = self._fans[segment]
+        du_ = np.asarray(du, dtype=np.float64)
+        dv_ = np.asarray(dv, dtype=np.float64)
+        field = fan.width_u * fan.width_v
+        in_field = (np.abs(du_) <= fan.width_u / 2) & (np.abs(dv_) <= fan.width_v / 2)
+        uniform_density = np.where(in_field, 1.0 / field, 0.0)
+        if self._aperture_table is None or self._aperture_delta is None:
+            return np.asarray(uniform_density, dtype=np.float64)
+        v_edges, u_lo, u_hi = self.aperture_region(segment)
+        area = float(np.sum(np.diff(v_edges) * (u_hi - u_lo)))
+        if area <= 0.0:
+            return np.asarray(uniform_density, dtype=np.float64)
+        delta = self._aperture_delta
+        inside = _region_contains(v_edges, u_lo, u_hi, du_, dv_)
+        return np.asarray(
+            np.where(in_field, delta / field + (1.0 - delta) * inside / area, 0.0),
+            dtype=np.float64,
+        )
+
+    @property
+    def aperture_sampling(self) -> float | None:
+        """The defensive uniform share ``delta`` of aperture sampling, or ``None`` (off)."""
+        return self._aperture_delta
+
+    @property
+    def aperture_margins(self) -> tuple[float, ...]:
+        """The leaf-tip margin of each MLC in stack order (its mid-plane, cm); ``()`` off."""
+        return self._aperture_margins
+
+    @property
+    def aperture_table(self) -> _F64 | None:
+        """Per-segment aperture tables, ``(n_segments, 4 * aperture_bands + 4)``, or ``None``.
+
+        Row ``s`` is the table :func:`~pyradmc.geometry.fan.fan_primary_aperture`
+        reads for segment ``s`` (layout in :mod:`pyradmc.geometry.fan`): the weights
+        outside and inside the region, the component CDF (the whole field first),
+        the band edges along ``v`` and the bands' ``u`` bounds, in the fan's
+        in-aperture offsets. Read-only; what a device backend uploads.
+        """
+        return self._aperture_table
+
+    @property
+    def aperture_bands(self) -> int:
+        """Bands per aperture table (fixed by the stack structure); 0 when off."""
+        return self._aperture_bands
+
+    @property
+    def aperture_fraction(self) -> _F64 | None:
+        """``|A_s| / |F|`` per segment (0 for an empty region), or ``None`` when off."""
+        return self._aperture_fraction
 
     # --- geometry and attenuation --------------------------------------------------------
 
