@@ -1021,8 +1021,9 @@ aperture / uniform region sums 1.0004 +- 0.0011 (open field), 0.9996 +- 0.0022
 
 **Truncation is sampler-dependent in the low-dose tail.** With the default Dij
 truncation (1e-3 of the column maximum) the same replicates give a below-2 % ratio of
-0.9946 or 1.0130 +- 0.0026, depending only on how the region is drawn: thresholding a
-noisy per-voxel estimate is biased, and the bias depends on the per-voxel noise
+0.9946 or 1.0130 +- 0.0026 for two definitions of the below-2 % mask (the sign and size
+of the shift follow the mask, not the sampler alone): thresholding a noisy per-voxel
+estimate is biased, and the bias depends on the per-voxel noise
 distribution, which the sampler changes. Not a defect of either sampler, and nothing
 was changed; but a uniform-vs-aperture comparison in the tail must use `truncation=0`,
 and the AGENTS.md section 2.8 caveat on truncation applies with a sampler-dependent

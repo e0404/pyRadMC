@@ -425,9 +425,11 @@ def generate_segmented_fan(
     The Dij block mapping of ``kernels.generate_spectral_beamlets`` — group-local
     segment ``t // per_batch``, within-segment index ``r = batch * per_batch + i``,
     stream key ``r`` (correlated) or ``segment * n_per + r`` — and the fan photon of
-    ``fan_primary`` through the segment's own fan. The weight is the segment's stack
-    transmission (in its own frame) along the sampled ray at the sampled energy;
-    ``weight * energy`` is booked into ``emitted``. The key never depends on the
+    ``fan_primary`` through the segment's own fan (``fan_primary_aperture`` on its
+    table under aperture sampling). The weight is the segment's stack transmission
+    (in its own frame) along the sampled ray at the sampled energy, times the
+    importance factor under aperture sampling; ``weight * energy`` is booked into
+    ``emitted``. The key never depends on the
     chunk, so the stream of a history is chunk-invariant.
     """
     tid = wp.tid()
@@ -468,9 +470,11 @@ def generate_segmented_plan(
 
     The in-kernel twin of :meth:`~pyradmc.geometry.segments.SegmentedPlanSource.emit`:
     one uniform selects the segment (``select_by_cdf`` over the normalized shares),
-    ``fan_primary``'s four uniforms follow in the host order through that segment's
-    fan, and the weight is that segment's stack transmission (no ``total_weight``
-    factor: the books stay at the scale of one fan history). One open-field history
+    ``fan_primary``'s four uniforms (``fan_primary_aperture``'s five under aperture
+    sampling) follow in the host order through that segment's fan, and the weight is
+    that segment's stack transmission, times its importance factor under aperture
+    sampling (no ``total_weight`` factor: the books stay at the scale of one fan
+    history). One open-field history
     per thread at a fixed slot (``beamlet = 0``); ``weight * energy`` is booked into
     ``emitted``.
     """
