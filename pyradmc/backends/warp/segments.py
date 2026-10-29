@@ -16,7 +16,11 @@ arc of them alike. (The stack's own ``origin``/``rotation`` are uploaded but not
 here.) The attenuation table is the pre-solve's
 :class:`~pyradmc.backends.warp.presolve.MuArrays` (uploaded from the source's own
 host table), so the in-kernel weight is the device pre-solve's ``mode="attenuation"``
-weight without an air column, segment by segment.
+weight without an air column, segment by segment. A source with aperture importance
+sampling also uploads its per-segment aperture tables (the host's, cast to float32),
+and the generators then draw through ``fan_primary_aperture`` and multiply the weight
+by its importance factor; without it they run the uniform draw, bit for bit as before
+the option existed.
 
 The generators draw their primaries through the shared single-source samplers of
 :mod:`pyradmc.geometry.fan` (``fan_primary``, ``select_by_cdf``), the same functions
@@ -66,6 +70,7 @@ _p = warp_physics()
 jaw_path_length = _p.jaw_path_length
 mlc_path_length = _p.mlc_path_length
 fan_primary = _p.fan_primary
+fan_primary_aperture = _p.fan_primary_aperture
 select_by_cdf = _p.select_by_cdf
 
 # Floats per segment in SegmentArrays.fan: focal point (3), field centre (3),
@@ -85,6 +90,12 @@ class SegmentArrays:
     :class:`~pyradmc.geometry.collimation.CompiledStack`) are segment ``s``'s beam
     frame; ``fan`` holds :data:`FAN_STRIDE` floats per segment, the geometry
     arguments of ``fan_primary`` for segment ``s``'s fan.
+
+    Aperture importance sampling: ``aperture`` is 1 when the source samples its
+    apertures (then ``fan_primary_aperture`` replaces ``fan_primary``), 0 otherwise;
+    ``aperture_table`` holds segment ``s``'s table at ``s * (4 * aperture_bands +
+    4)`` (the host's :attr:`~pyradmc.geometry.segments.SegmentedFanSource.aperture_table`
+    row, in float32), a one-float placeholder when off.
     """
 
     n_segments: int
@@ -97,6 +108,9 @@ class SegmentArrays:
     origin: wp.array(dtype=float)
     rotation: wp.array(dtype=float)
     fan: wp.array(dtype=float)
+    aperture: int
+    aperture_bands: int
+    aperture_table: wp.array(dtype=float)
 
 
 @dataclass
@@ -149,6 +163,10 @@ def upload_segmented_fan(source, device: str) -> SegmentedFanUpload:
             dtype=np.float64,
         )
     )
+    table = source.aperture_table
+    segments.aperture = 0 if table is None else 1
+    segments.aperture_bands = int(source.aperture_bands)
+    segments.aperture_table = farr(np.zeros(1) if table is None else table)
     spectrum = source.spectrum
     return SegmentedFanUpload(
         stack=upload_stack(source.template.flatten(), device),
@@ -307,33 +325,67 @@ def _queue_segment_primary(
 
     ``fan_primary`` through the segment's fan (four uniforms, host order), from its
     focal point, at its stack transmission; tagged ``tag``, ``weight * energy``
-    booked into ``emitted``.
+    booked into ``emitted``. With aperture sampling (``segs.aperture``),
+    ``fan_primary_aperture`` on the segment's table instead (five uniforms), and
+    the weight also carries its importance factor.
     """
     b = seg * FAN_STRIDE
     fx = segs.fan[b + 0]
     fy = segs.fan[b + 1]
     fz = segs.fan[b + 2]
-    energy, dx, dy, dz = fan_primary(
-        state,
-        edges,
-        cdf,
-        n_bins,
-        fx,
-        fy,
-        fz,
-        segs.fan[b + 3],
-        segs.fan[b + 4],
-        segs.fan[b + 5],
-        segs.fan[b + 6],
-        segs.fan[b + 7],
-        segs.fan[b + 8],
-        segs.fan[b + 9],
-        segs.fan[b + 10],
-        segs.fan[b + 11],
-        segs.fan[b + 12],
-        segs.fan[b + 13],
-    )
+    energy = float(0.0)  # noqa: UP018 - Warp needs float() for a var assigned in a branch
+    dx = float(0.0)  # noqa: UP018
+    dy = float(0.0)  # noqa: UP018
+    dz = float(0.0)  # noqa: UP018
+    factor = float(1.0)  # noqa: UP018
+    if segs.aperture != 0:
+        energy, dx, dy, dz, factor = fan_primary_aperture(
+            state,
+            edges,
+            cdf,
+            n_bins,
+            fx,
+            fy,
+            fz,
+            segs.fan[b + 3],
+            segs.fan[b + 4],
+            segs.fan[b + 5],
+            segs.fan[b + 6],
+            segs.fan[b + 7],
+            segs.fan[b + 8],
+            segs.fan[b + 9],
+            segs.fan[b + 10],
+            segs.fan[b + 11],
+            segs.fan[b + 12],
+            segs.fan[b + 13],
+            segs.aperture_table,
+            seg * (4 * segs.aperture_bands + 4),
+            segs.aperture_bands,
+        )
+    else:
+        energy, dx, dy, dz = fan_primary(
+            state,
+            edges,
+            cdf,
+            n_bins,
+            fx,
+            fy,
+            fz,
+            segs.fan[b + 3],
+            segs.fan[b + 4],
+            segs.fan[b + 5],
+            segs.fan[b + 6],
+            segs.fan[b + 7],
+            segs.fan[b + 8],
+            segs.fan[b + 9],
+            segs.fan[b + 10],
+            segs.fan[b + 11],
+            segs.fan[b + 12],
+            segs.fan[b + 13],
+        )
     weight = segment_transmission(stack, segs, mu, seg, energy, fx, fy, fz, dx, dy, dz)
+    if segs.aperture != 0:
+        weight = weight * factor
     q.kind[tid] = PHOTON
     q.beamlet[tid] = tag
     q.primary[tid] = 1  # source photon: the only one that may split
