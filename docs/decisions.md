@@ -947,3 +947,112 @@ way. Per-control-point history allocation still equal in `run_dij` and multinomi
 MU in the plan view (as for one fan). Collimator rotation with a single shared fan is
 expressible (per-segment frames, one fan) but the axis contract then forces the frames
 to the fan's axes; a rotated collimator needs a fan per segment.
+
+## Aperture importance sampling of segments, 2026-10-29
+
+**Why.** A `SegmentedFanSource` segment samples its fan's whole field `F` uniformly and
+carries the stack transmission as its weight. On the TG-119 direct-aperture study the
+open aperture was 8-19 % of the fan area (IMRT segments 2-8 %), so 80-92 % of the
+forward histories were transported in full at 1-2 % weight, and forward-dose noise
+limited the optimization.
+
+**What.** Opt-in, `SegmentedFanSource(..., aperture_sampling=delta, aperture_margin=m)`
+(also `from_stacks`; `with_settings` keeps both and rebuilds the tables: +0.2 ms at
+10 segments x 20 pairs, +0.8 ms at 180 x 60, vectorized). Segment `s` draws its
+in-aperture offset from the defensive mixture `q_s = delta U(F) + (1 - delta) U(A_s)`
+(Hesterberg 1995) and multiplies the weight by `p / q_s = 1 / (delta + (1 - delta)
+|F| / |A_s| 1_A)`. Columns stay "dose per fan history"; no normalization changes; the
+weight is bounded by `1 / delta`; any `A_s` inside `F` is unbiased, so this is variance
+reduction, not an approximation. The default `None` is the old four-uniform draw: 164
+seeded arrays saved before the change (host `emit` and batches, reference Dij, Warp cpu
+and cuda Dij correlated and independent, plan doses, energy books, a rotated frame and
+an arc) are `np.array_equal` after it.
+
+**The region.** In the fan's aperture plane, by the per-segment contract (frame origin
+on the focal point, aperture axes = frame `u`/`v`, now required on the single-fan path
+too when sampling): a mid-plane setting `t` of device `j` maps to the offset
+`t c_w / z_j - c_u` (`c` = field centre in frame coordinates). `A_s` = each leaf row's
+`[tip_neg - m, tip_pos + m]` over its strip, cut by the jaw openings, clipped to `F`;
+outside the bank no MLC constraint; an empty `A_s` falls back to uniform. Bands along
+`v` at every mapped strip and jaw edge: a fixed band count per stack structure. Two
+refinements of the original design, both derived:
+
+- **Closed pairs keep their margin band.** Touching rounded tips leave a cusp: a ray at
+  distance `x` from the contact cuts only `2 sqrt(2 R x)`, so a closed pair transmits
+  like an open gap of `1 / (2 mu^2 R)` (0.08 cm at mid-plane for tungsten at 2 MeV,
+  `R` = 8 cm), the stripe visible in `segmented_fan_demo.png`. Excluding closed rows
+  would put that fluence at weight `1 / delta`; a back-of-envelope second moment for a
+  2-row segment among 38 closed rows came out 5x *worse* than uniform.
+- **Default margin from the tip geometry**: `R - sqrt(R^2 - (H / 2)^2)` per MLC (0.58 cm
+  at `R` = 8, `H` = 6), beyond which a ray parallel to `w` cuts the full leaf. Jaw and
+  leaf-side edges are taken exactly (focused: exact for focal rays; unfocused: the band
+  they let through is below `exp(-mu H / 2)`).
+
+**One sampler, five uniforms.** `geometry.fan.fan_primary_aperture` (spectrum bin,
+within-bin, component by `select_by_cdf` over the per-segment shares with the whole
+field first, then `u` and `v` in the chosen rectangle) serves `emit`, the vectorized
+batch (`PCG64(seed)` advanced to `5 * offset`, pinned row for row to the scalar
+sampler), both plan routes and both Warp generators (a runtime branch on the uploaded
+flag; the uniform branch is the old code). Correlated columns still replay the same
+uniforms, each through its own proposal, so their rays, and with them their
+correlation, differ from the uniform route's. Exact `SpectralBeamSource` fans are
+required: the sampler replaces the fan's draw, so a fan subclass is refused rather than
+silently bypassed.
+
+**Statistical evidence, with power.** Source level (`tests/unit`): `E_q[factor 1_R] =
+|R| / |F|` over a 10 x 9 grid, one chi-squared with the full sample covariance; 280 null
+pairs give 1.4 % below 0.01 (KS p 0.16); a 1 % inside-weight error is caught at
+p < 1e-8 at 400k draws. Device pins: the queue against the host sampler on the replayed
+uniforms; kernel mutants (segment 0's table, the next segment's table, factor dropped)
+each fail. Transport (`tests/dij`, dense-water collimators at 3.5 mfp, KERMA, 1 x 4 x 8
+cm bins, pooled-dose mask, **equal histories**, 1M per column): aperture vs uniform for
+the fan, the arc, the host pre-sampling route and the plan view; reference vs Warp at
+12k. Null over 30 reseeded pairs: fan 0-1 / 30 per column below 0.01, arc 0 / 30; mean
+chi-squared/null 0.89-1.03 (uniform vs uniform 0.91-0.96, the oracle's own slight
+conservatism). The pinned-seed fan ratios of 0.53-0.79 are one shared fluctuation of
+correlated columns, so power was measured at those seeds: a 3 % inside-weight mutant
+fails at p = 0.0096 / 2e-10 / 3e-8 (fan, three open segments), 1e-3 / 2e-4 (arc),
+4e-4 / 4e-23 / 1e-5 (host route), 5e-4 (plan); a 5 % wrong component share at 7e-10 /
+3e-12. At 12k the reference comparison sees only gross errors (factor dropped: p = 0);
+its `emit` is pinned exactly to the scalar sampler instead. On **real tungsten** (6 MV,
+2 x 2 cm segment, focused jaws, electrons on), 40 replicate pairs at 2M, `truncation=0`:
+aperture / uniform region sums 1.0004 +- 0.0011 (open field), 0.9996 +- 0.0022
+(2-20 %), 1.0019 +- 0.0022 (below 2 %), 1.0003 +- 0.0011 (total).
+
+**Truncation is sampler-dependent in the low-dose tail.** With the default Dij
+truncation (1e-3 of the column maximum) the same replicates give a below-2 % ratio of
+0.9946 or 1.0130 +- 0.0026, depending only on how the region is drawn: thresholding a
+noisy per-voxel estimate is biased, and the bias depends on the per-voxel noise
+distribution, which the sampler changes. Not a defect of either sampler, and nothing
+was changed; but a uniform-vs-aperture comparison in the tail must use `truncation=0`,
+and the AGENTS.md section 2.8 caveat on truncation applies with a sampler-dependent
+sign.
+
+**Measured.** RTX 4070 laptop at 2535 MHz under load, no throttle reason, GPU shared but
+otherwise idle; interleaved best of 5; 6 MV Ali-Rogers, tungsten (EPICS), 12 x 10 x 12
+cm water at 0.25 x 0.25 x 0.5 cm, electrons on, 1M histories per column; sigma = the
+region RMS of the batch sigma relative to the column maximum; FOM gain =
+`sigma_u^2 t_u / (sigma_a^2 t_a)`. Segments 1 x 1 / 2 x 2 off-axis / 5 x 5 cm in a
+10 x 10 cm fan:
+
+| setup | delta | margin (cm) | `|A|/|F|` | FOM gain, open field | FOM gain, 5-20 % |
+|---|---|---|---|---|---|
+| focused jaws tracking the segment | 0.1 | default 0.58 | 0.04 / 0.08 / 0.31 | 27 / 12 / 3.6 | 24 / 11 / 2.5 |
+| | 0.1 | 0.25 | 0.03 / 0.07 / 0.30 | 37 / 16 / 3.8 | 26 / 13 / 2.7 |
+| | 0.05 / 0.2 / 0.3 | 0.25 | | 41 / 34 / 30 (1 x 1) | 22 / 26 / 25 (1 x 1) |
+| no jaws (closed pairs meet in the field) | 0.1 | default 0.58 | 0.23 / 0.26 / 0.47 | 5.1 / 4.2 / 2.5 | 4.3 / 3.8 / 1.9 |
+| | 0.1 | 0.25 | 0.10 / 0.13 / 0.34 | 10.5 / 7.7 / 3.3 | 8.1 / 6.6 / 2.4 |
+| | 0.1 | 0.1 | 0.05 / 0.08 / 0.29 | 21 / 12 / 4.0 | 2.6 / 3.4 / 2.4 |
+
+Wall time per history is neutral on the GPU (ratio 0.97-1.04). The gain tracks the
+region fraction; `delta` matters little between 0.05 and 0.3. A margin inside the tip
+band (0.1 cm) helps the open field but loses the low-dose region, where tip and cusp
+leakage then arrive at weight `1 / delta`. Jaws that track the segment matter: without
+them every closed pair's band is sampled. `examples/aperture_sampling_demo.py` (2 x 2
+cm, 2M, jaws): sigma ratio 0.29 open field, 0.29 at 2-20 %, 0.38 below 2 %; gain x12 /
+x12 / x7.
+
+**Not done.** The default margin stays geometric (material-free); 0.25 cm measured
+better for tungsten at 6 MV in both regions and both setups, but on one MLC geometry.
+No adaptive `delta`. The edge-gradient route (`SegmentedEdgeSource`, not on develop)
+does not see the option.
