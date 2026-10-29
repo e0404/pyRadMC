@@ -583,3 +583,45 @@ def test_a_fan_subclass_is_refused_when_sampling() -> None:
         SegmentedFanSource.from_stacks(
             fan, stacks, AnalyticCrossSections(), aperture_sampling=DELTA
         )
+
+
+class _LegacySubclass(SegmentedFanSource):
+    """A user subclass written against the constructor before aperture sampling."""
+
+    def __init__(
+        self,
+        fan,
+        template,
+        cross_sections,
+        *,
+        jaw_neg=None,
+        jaw_pos=None,
+        tips_neg=None,
+        tips_pos=None,
+        e_min=0.010,
+        n_table=512,
+        attenuation_tables=None,
+        frames=None,
+    ) -> None:
+        super().__init__(
+            fan,
+            template,
+            cross_sections,
+            jaw_neg=jaw_neg,
+            jaw_pos=jaw_pos,
+            tips_neg=tips_neg,
+            tips_pos=tips_pos,
+            e_min=e_min,
+            n_table=n_table,
+            attenuation_tables=attenuation_tables,
+            frames=frames,
+        )
+
+
+def test_a_subclass_without_the_option_still_builds_and_resets() -> None:
+    source = _LegacySubclass.from_stacks(
+        _fan(), [_stack(*s) for s in SETTINGS], AnalyticCrossSections()
+    )
+    moved = source.with_settings(tips_neg=source.tips_neg - 0.1)
+    assert type(moved) is _LegacySubclass
+    np.testing.assert_array_equal(moved.tips_neg, source.tips_neg - 0.1)

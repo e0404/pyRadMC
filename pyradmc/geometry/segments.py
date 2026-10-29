@@ -48,7 +48,8 @@ costs its validation; the array constructor takes the tips directly
 frames as well), and the host route builds the stacks lazily, only when it needs
 them.
 
-The fan draws are segment-blind (four uniforms, the spectral fan's own contract),
+The fan draws are segment-blind (four uniforms, the spectral fan's own contract;
+five with aperture sampling, below),
 so under correlated Dij sampling every column replays the same uniforms and only
 the weight differs — with one fan, the same ray; with a fan per segment, the same
 energy and the same in-aperture offset fed to *each segment's own fan*, i.e. the
@@ -69,7 +70,13 @@ onto its fan's aperture plane, and multiplies the weight by the likelihood ratio
     p / q_s = 1 / (delta + (1 - delta) |F| / |A_s| 1_{A_s}(x)),
 
 so every column (and the plan view) is unchanged in expectation — dose per fan
-history, no change to any normalization — and only its variance moves. No
+history, no change to any normalization — and only its variance moves. That holds
+for the estimate itself; a Dij *truncated* at a threshold (``run_dij``'s default)
+is not unbiased under either sampler, and since the threshold acts on the noise,
+which this option changes, the truncated low-dose tail moves too (measured about
+1 % below 2 % of the maximum at the default 1e-3, sign depending on the region;
+``docs/decisions.md``). Compare the two samplers, or rely on the tail, at
+``truncation=0``. No
 approximation: any ``A_s`` inside ``F`` is unbiased; a poor ``A_s`` only costs
 efficiency, and the weight never exceeds ``1 / delta``. ``A_s`` is the leaf openings
 of each row widened by the tip margin (default: the rounded tips' partial-chord band,
@@ -78,9 +85,10 @@ along their line of contact), intersected with the jaw openings and clipped to
 ``F``; an empty ``A_s`` falls back to uniform sampling. The draw costs five uniforms
 per history instead of four (a different, still segment-blind stream: correlated
 columns replay the same five uniforms, each through its own proposal, so their
-rays, and hence their correlation, differ). Every route — ``emit``, the vectorized
-batch, the plan view, both Warp generators — samples through the one scalar
-:func:`~pyradmc.geometry.fan.fan_primary_aperture`. It needs the per-segment
+rays, and hence their correlation, differ). ``emit``, the plan view and both Warp
+generators sample through the one scalar
+:func:`~pyradmc.geometry.fan.fan_primary_aperture`; the vectorized host batch is its
+NumPy twin, pinned to it row for row. It needs the per-segment
 contract on every segment (aperture axes = frame ``u``/``v``, also on the single-fan
 path) and exact :class:`~pyradmc.geometry.source.SpectralBeamSource` fans. It is a
 sampling option, not physics (AGENTS.md 2.10): the estimand is the same.
@@ -91,7 +99,7 @@ from __future__ import annotations
 import dataclasses
 import math
 from collections.abc import Sequence
-from typing import Any, cast
+from typing import Any, TypedDict, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -195,6 +203,26 @@ def _check_fan_in_frame(
                 f"{prefix}the fan's aperture {name} {fan_axis} must be the frame's "
                 f"{name} {frame_axis}"
             )
+
+
+class _ApertureKeywords(TypedDict, total=False):
+    aperture_sampling: float
+    aperture_margin: float
+
+
+def _aperture_keywords(delta: float | None, margin: float | None) -> _ApertureKeywords:
+    """Return the aperture-sampling constructor keywords that are set, and only those.
+
+    A subclass written against the constructor before aperture sampling (no such
+    keywords, no ``**kwargs``) keeps working through ``from_stacks`` and
+    ``with_settings`` while the option is off.
+    """
+    keywords = _ApertureKeywords()
+    if delta is not None:
+        keywords["aperture_sampling"] = delta
+    if margin is not None:
+        keywords["aperture_margin"] = margin
+    return keywords
 
 
 def _settings_array(
@@ -559,8 +587,7 @@ class SegmentedFanSource(BeamletSource):
             e_min=e_min,
             n_table=n_table,
             frames=[stack.frame for stack in stacks] if per_segment else None,
-            aperture_sampling=aperture_sampling,
-            aperture_margin=aperture_margin,
+            **_aperture_keywords(aperture_sampling, aperture_margin),
         )
         source._stacks.update(enumerate(stacks))
         return source
@@ -602,8 +629,7 @@ class SegmentedFanSource(BeamletSource):
             tips_pos=tips_pos,
             attenuation_tables=self._tables,
             frames=self._given_frames,
-            aperture_sampling=self._aperture_delta,
-            aperture_margin=self._aperture_margin_given,
+            **_aperture_keywords(self._aperture_delta, self._aperture_margin_given),
         )
 
     def _setup(
@@ -781,7 +807,8 @@ class SegmentedFanSource(BeamletSource):
     def emit(self, beamlet: int, rng_state: RNGState) -> Primary:
         """Emit segment ``beamlet``'s fan primary, weighted by its stack transmission.
 
-        Consumes exactly the fan's four uniforms; the segment never touches the
+        Without aperture sampling, consumes exactly the fan's four uniforms; the
+        segment never touches the
         stream, so correlated sampling replays the same uniforms in every column,
         each through that segment's own fan (with one shared fan: the same ray).
         With aperture sampling, five uniforms through
@@ -1106,7 +1133,8 @@ class SegmentedPlanSource(Source):
     Each history first chooses a segment with probability ``p_s = w_s / W``
     (``W = sum_s w_s`` is :attr:`total_weight`; one uniform), then emits the fan
     exactly as :meth:`SegmentedFanSource.emit` does for that segment, at weight
-    ``exp(-tau_s)``. ``run`` therefore estimates, **per history**,
+    ``exp(-tau_s)`` (times its importance factor under aperture sampling). ``run``
+    therefore estimates, **per history**,
 
         sum_s (w_s / W) * column_s,
 
