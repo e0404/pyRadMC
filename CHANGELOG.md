@@ -74,6 +74,25 @@ without a field, so results are not byte-identical to the previous release.
   kernels take the fan from `SegmentArrays` (new `origin`, `rotation`, `fan` fields)
   instead of scalar arguments.
 
+- **Aperture importance sampling of segments (opt-in).**
+  `SegmentedFanSource(..., aperture_sampling=delta, aperture_margin=m)` (also
+  `from_stacks`, kept by `with_settings`) draws each segment's in-aperture point from
+  the defensive mixture `delta * uniform(field) + (1 - delta) * uniform(opening)` and
+  multiplies the weight by the likelihood ratio, so every Dij column and the plan view
+  are unchanged in expectation while their noise drops. The opening is each leaf row's
+  tips widened by `m` (default: the rounded tip's partial-chord band
+  `R - sqrt(R^2 - (H/2)^2)`; closed pairs included), cut by the jaws. One scalar
+  sampler, `pyradmc.geometry.fan.fan_primary_aperture` (five uniforms), serves `emit`,
+  the host batch, the plan view and both Warp generators. The default (`None`) is
+  bit-identical to before on host, reference, Warp cpu and cuda (164 saved seeded
+  outputs). Measured on 6 MV through tungsten, equal histories, laptop RTX 4070:
+  efficiency gain 27 / 12 / 3.6 for 1 x 1 / 2 x 2 / 5 x 5 cm segments of a 10 x 10 cm
+  fan with tracking jaws, 5.1 / 4.2 / 2.5 without jaws; wall time per history
+  unchanged. New accessors `aperture_sampling`, `aperture_margins`, `aperture_table`,
+  `aperture_bands`, `aperture_fraction`, `aperture_region()`, `proposal_density()`.
+  Requires exact `SpectralBeamSource` fans aligned with their frames. Demonstrated by
+  `examples/aperture_sampling_demo.py`; record in docs/decisions.md.
+
 - Charged-particle transport in a **static magnetic field** (MR-linac dose).
   `pyradmc.MagneticField` — uniform, one vector per transport voxel, or a trilinear
   vector map on its own rectilinear grid, in tesla and the engine frame — is handed to
