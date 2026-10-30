@@ -11,8 +11,9 @@ Three questions the field raises about wall time, each recorded via pytest-bench
    gyration cap binds only below ~1.5 MeV there.
 3. What does a field cost in air? A water / air / water slab at 0.35 and 1.5 T:
    1.20 and 2.27 at adoption. In air the gyration cap replaces the voxel face as
-   the limiter and multiplies the substep count; this is the known cost and the
-   place an exact-helix low-density path would act (docs/decisions.md).
+   the limiter and multiplies the substep count; this is the known cost, which the
+   exterior-air path acts on in air far from the body
+   (``test_exterior_air_throughput.py``, docs/decisions.md).
 
 The one hard assertion is the catastrophic floor the open-field benchmark also
 carries: the 1.5 T slab must still exceed 1e6 histories per second on CUDA

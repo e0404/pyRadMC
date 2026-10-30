@@ -326,6 +326,60 @@ exit plane (the commissioning example's air-gap pattern). The head pre-solve's s
 slide of contaminant electrons and the fringe field in the head are documented
 limitations, not loop code.
 
+## Exterior air under a uniform field, 2026-10-30
+
+**The problem.** At 1.5 T with 3 cm of air kept around a TG-119 plan, about 70 % of the wall
+was field-in-air: the gyration cap binds on every air substep, about 31 per gyration, while
+almost nothing physical happens there. The air cannot just be removed: without it the body's
+outer shell is 1.8 % low at 1.5 T and 4.2 % low at 0.35 T, because electrons must be able to
+curve back.
+
+**What was built, and what is not decided.** `ExteriorAirMap`: the air face-connected to the
+grid boundary, with an exact box-to-box safety distance per voxel. Where it is at least
+0.5 cm a substep takes exact helix chords limited by that safety and the energy fraction,
+because path bounds displacement. Data, not a flag (AGENTS.md 2.10): the engine takes the
+map next to the grid and the field, and a run without one is the current stepping. Whether
+it becomes the default is the maintainer's call and is deliberately not made here.
+
+**Who is in the air.** Counted on the reference loop (100k histories, 6 MV 10 x 10 cm AP,
+3 cm margin, no kernel change): air is only 5 to 11 % of mean substeps. Of those at 1.5 T,
+along the body axis, 62 % belong to electrons that never reach the body, 35 % to returning
+ones and 4 % to ones that left for good; across the body 31, 17 and 51 %. At 0.35 T across
+the body it is 9, 44 and 46 %. So at 1.5 T the cost is mostly *not* the electrons that had
+to be kept. The longest single electron is the telling number: 3667 and 8630 substeps fall to
+1371 and 2270, while the mean per history falls only from 7.26 to 7.08 and 7.74 to 7.16.
+Wall follows the lanes that last, as expected of a width-bound kernel; this was not measured
+in the kernel itself, so it is an inference from the reference counters and the wall.
+
+**Wall.** RTX 4070 at 2520 MHz, interleaved, best of 3, one engine alive, 100 M histories,
+tabulated body of 3 mm voxels, ratio new over old: 0 T 1.00 at every margin; 0 cm 0.99 and
+0.95; 3 cm 0.64 at 0.35 T and 0.65 at 1.5 T along the body (5.89 to 3.80 s), 0.43 at 1.5 T
+across it (10.0 to 4.26 s); 6 cm 0.49 and 0.50. At 10 M histories, best of 5, a minimum safety
+of 0.25 cm gives 0.63, 0.49, 0.30 and 0.49, 0.40 at the same points, and 1.0 cm gives 0.81,
+0.84, 0.67 and 0.61, 0.69. The 0.25 cm map passes the same Fano and realistic comparisons
+(shell within 0.06 +- 0.05 %; Fano map against current at most +0.34 +- 0.12 %), without its
+own mutant runs.
+
+**Accuracy.** Tabulated, 6 MV, 8 seeds of 40 M per arm, new against old, shell the outer two
+voxels: at 3 cm shell -0.039 +- 0.049, -0.046 +- 0.057, +0.005 +- 0.067 and -0.062 +- 0.051 %
+(1.5 T along AP, across AP, along LAT, 0.35 T along AP), body within 0.003 +- 0.018 %, block
+chi-squared p 0.11 to 0.59. A 6 cm margin and noisy CT air (log-normal, up to 8x density
+contrast inside the region) are the same within noise. Power: a 4x inflated safety is caught
+everywhere (shell -0.46 to -6.7 %, block p near 1e-6 or below); 1.5x only at 0.35 T
+(-0.70 %).
+
+**A wrong chord is invisible in body dose.** The small-step chord put in the long steps moves
+the shell by at most +0.07 % at those statistics, so the realistic comparison gives it no
+protection. The Fano cavity sees it at once (cavity -7 to -18 %, long-step voxels -10 to
+-47 %), the fast twin check at 1.5 T, and the analytic orbit test directly.
+
+**Fano.** Field-free the new cavity is within 0.25 %. Map against current stepping moves it by
++0.07, -0.09, +0.28, -0.14 % (cavity) at 0.5 / 1 MeV and 0.35 / 1.5 T, all inside the 1 % gate.
+The +0.28 % is real: over three more seeds at 100 M, 1 MeV and 0.35 T, it is +0.25 +- 0.03 %
+(cavity) and +0.47 +- 0.04 % (long-step voxels), and +0.54 / +0.82 % at 0.5 MeV with a 2 cm
+wall, always toward unity. Not explained. The current stepping's own -1.3 to -1.4 % on this
+cavity is in AGENTS.md section 8.
+
 ## Hazards learned the hard way
 
 **Kernel compilation could leak into host modules.** Loading the Warp physics patched

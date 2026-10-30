@@ -90,7 +90,10 @@ For MR-linac geometries, a static magnetic field is world data handed to either 
 construction — `magnetic_field=MagneticField.uniform((0.0, 0.0, 1.5))`, or a per-voxel or
 trilinear vector map on its own grid — and every charged particle is bent by the Lorentz force
 (photons are unaffected). Without a field the engines are byte-identical to before the field
-existed.
+existed. Air is where a field costs most; an optional `ExteriorAirMap.from_grid(grid)`, handed
+to the engine as `exterior_air=` under a uniform field, takes exact-helix steps through the air
+far from the body (`examples/exterior_air_demo.py`; a named approximation, not the default,
+see AGENTS.md section 8).
 
 ![6 MV photons in a transverse field: the electron return effect](https://raw.githubusercontent.com/e0404/pyRadMC/main/docs/assets/magnetic_field_demo.png)
 

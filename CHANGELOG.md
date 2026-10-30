@@ -17,6 +17,17 @@ without a field, so results are not byte-identical to the previous release.
 
 ### Added
 
+- **Exterior-air stepping under a uniform field, opt-in and off by default.**
+  `ExteriorAirMap.from_grid(grid)`, handed to either engine as `exterior_air=`, replaces the
+  gyration cap with exact helix chords and a safety distance in air connected to the grid
+  boundary and at least 0.5 cm from anything else. Without a map nothing moves: doses are
+  byte-identical to before on ref, Warp cpu and cuda, field or no field, and a map is inert
+  field-free, in a zero field and in a non-uniform field. With one, on a tabulated 6 MV body
+  in 3 cm of air: shell within 0.06 +- 0.05 % and body within 0.003 +- 0.018 % of the current
+  stepping, wall x0.64 to x0.65 with 1.5 or 0.35 T along the body and x0.43 at 1.5 T across
+  it, x0.50 at 6 cm. A named approximation: the deposit within a long step is not spatially
+  resolved and dose in air voxels is not comparable voxel by voxel. See AGENTS.md section 8.
+
 - **Cheaper head pre-solve setup.** The attenuation curves the collimator pre-solve
   and `CollimatedSource` read through `CrossSectionSource` are memoised per source object
   (`pyradmc.geometry.mucache`; `mucache.clear()` drops them), and `presolve_head_device`
