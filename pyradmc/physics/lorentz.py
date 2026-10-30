@@ -36,6 +36,7 @@ from pyradmc import ELECTRON_MASS_MEV, MEV_C_PER_TESLA_CM
 
 __all__ = [
     "gyroradius_cm",
+    "helix_chord",
     "lorentz_rotation_angle",
     "momentum_mev_c",
     "rotate_about_axis",
@@ -178,3 +179,57 @@ def lorentz_rotation_angle(s_cm: float, gyroradius_cm: float, is_positron: bool)
     if is_positron:
         return -angle
     return angle
+
+
+def helix_chord(
+    ux: float,
+    uy: float,
+    uz: float,
+    ax: float,
+    ay: float,
+    az: float,
+    half_angle: float,
+) -> tuple[float, float, float]:
+    r"""Exact helix displacement per unit path, from the direction at the path's midpoint.
+
+    Over a path :math:`s` turning through :math:`\theta = s / r_g` at constant radius, the
+    motion along the unit field axis :math:`\hat{\mathbf{a}}` is unchanged and the
+    transverse motion is a chord of the gyration circle, of length
+    :math:`2 r \sin(\theta/2)` for the transverse path, pointing along the transverse
+    direction at the midpoint. With :math:`\mathbf{u}` the direction already turned by
+    :math:`\theta/2`,
+
+    .. math::
+
+        \frac{\Delta\mathbf{p}}{s} = k\,\mathbf{u}
+            + (1 - k)\,(\hat{\mathbf{a}}\cdot\mathbf{u})\,\hat{\mathbf{a}},
+        \qquad k = \frac{\sin(\theta/2)}{\theta/2}.
+
+    The small-step scheme of the transport loops drifts the full :math:`s` along
+    :math:`\mathbf{u}`, which is this with :math:`k = 1`: an error of
+    :math:`s\,\theta^2/24` that the curvature cap bounds and an arbitrary angle does not.
+    The result has length at most 1, which is what a safety bound on the path leans on.
+    Bielajew (1988), doi:10.1007/978-1-4613-1059-4_19.
+
+    Pure geometry: the sign of the turn does not enter (``k`` is even), so electrons and
+    positrons differ only through the direction they were turned to, and no random number
+    is consumed.
+
+    Parameters
+    ----------
+    ux, uy, uz
+        Direction at the midpoint of the path; a unit vector.
+    ax, ay, az
+        Field axis; a unit vector (the caller normalises once per step).
+    half_angle
+        Half the signed gyration angle of the path, radians.
+    """
+    h = abs(half_angle)
+    # Series below 0.01 rad: sin(h)/h is exact there to float64 rounding (next term h^6/5040), and a
+    # fast-math sine is not guaranteed to keep the ratio at 1 for tiny arguments.
+    h2 = h * h
+    k = 1.0 - h2 / 6.0 * (1.0 - h2 / 20.0)
+    if h >= 0.01:
+        k = math.sin(h) / h
+    along = (ax * ux + ay * uy + az * uz) * (1.0 - k)
+    return (k * ux + along * ax, k * uy + along * ay, k * uz + along * az)

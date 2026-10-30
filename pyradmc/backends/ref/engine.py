@@ -15,6 +15,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import partial
 
+import numpy as np
+import numpy.typing as npt
+
 from pyradmc import (
     DIJ_TRUNCATION_RELATIVE,
     ECUT_MEV,
@@ -24,6 +27,7 @@ from pyradmc import (
 )
 from pyradmc.backends.results import RunProvenance, TransportResult
 from pyradmc.data.interface import CrossSectionSource
+from pyradmc.geometry.exterior import ExteriorAirMap, resolve_exterior_safety
 from pyradmc.geometry.field import MagneticField
 from pyradmc.geometry.grid import VoxelGrid
 from pyradmc.geometry.source import BeamletSource, Source
@@ -80,9 +84,17 @@ class ReferenceEngine:
     field-free world; an explicit zero field reproduces it byte for byte. World
     data, like ``grid``: a gridded map must cover the transport grid
     (:meth:`~pyradmc.geometry.field.MagneticField.covers`), checked here once."""
+    exterior_air: ExteriorAirMap | None = None
+    """Where charged particles may take long exact-helix steps under a uniform field
+    (:mod:`pyradmc.geometry.exterior`); ``None`` is the current stepping. World data
+    derived from ``grid``, and refused if derived from another. Inert without a uniform
+    non-zero field. Not the default: whether it becomes one is a maintainer decision
+    (AGENTS.md section 8)."""
 
     def __post_init__(self) -> None:
-        """Refuse a gridded field map that does not cover the transport grid."""
+        """Refuse a field map missing the grid and an exterior map of another grid."""
+        if self.exterior_air is not None and not self.exterior_air.matches(self.grid):
+            raise ValueError("the exterior-air map was derived from another grid")
         if self.magnetic_field is not None and not self.magnetic_field.covers(self.grid):
             raise ValueError(
                 "the magnetic field map does not cover the transport grid: "
@@ -124,7 +136,16 @@ class ReferenceEngine:
             magnetic_field=(
                 None if self.magnetic_field is None else self.magnetic_field.provenance
             ),
+            exterior_air=(
+                None
+                if self.exterior_air is None or self._exterior_safety() is None
+                else self.exterior_air.provenance
+            ),
         )
+
+    def _exterior_safety(self) -> npt.NDArray[np.float64] | None:
+        """Return the safety array this engine's runs step by, or ``None``."""
+        return resolve_exterior_safety(self.exterior_air, self.magnetic_field)
 
     def run(
         self,
@@ -293,6 +314,7 @@ class ReferenceEngine:
                     deposit_resolution_cm=deposit_resolution_cm,
                     msc_model=msc_model,
                     field=self.magnetic_field,
+                    exterior_safety=self._exterior_safety(),
                 )
             scorer.end_batch(per_batch)
             emitter.tick(per_batch)
@@ -458,6 +480,7 @@ class ReferenceEngine:
                         deposit_resolution_cm=deposit_resolution_cm,
                         msc_model=msc_model,
                         field=self.magnetic_field,
+                        exterior_safety=self._exterior_safety(),
                     )
             scorer.end_batch(per_batch)
             emitter.tick(n_beamlets * per_batch)

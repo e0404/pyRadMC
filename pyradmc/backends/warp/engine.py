@@ -56,6 +56,7 @@ from pyradmc.backends.warp import kernels
 from pyradmc.backends.warp.kernels import ENERGY_QUANTUM_MEV, GridInfo, Queue, Tables
 from pyradmc.data.interface import CrossSectionSource
 from pyradmc.geometry.collimation import TransmissionMaskSource
+from pyradmc.geometry.exterior import ExteriorAirMap, resolve_exterior_safety
 from pyradmc.geometry.field import FIELD_NONE, MagneticField
 from pyradmc.geometry.grid import VoxelGrid
 from pyradmc.geometry.segments import SegmentedFanSource, SegmentedPlanSource
@@ -110,6 +111,12 @@ def _no_field(device: str):
     return wp.zeros((1, 1, 1), dtype=wp.vec3, device=device)
 
 
+def _fill_no_exterior(gi: GridInfo, device: str) -> None:
+    """Set the exterior-air members of ``gi`` to the inert current-stepping values."""
+    gi.air_on = 0
+    gi.air_safety = wp.zeros((1, 1, 1), dtype=float, device=device)
+
+
 def _fill_no_field(gi: GridInfo, device: str) -> None:
     """Set the magnetic-field members of ``gi`` to the inert field-free values."""
     gi.b_mode = FIELD_NONE
@@ -118,6 +125,7 @@ def _fill_no_field(gi: GridInfo, device: str) -> None:
     gi.b_sx = gi.b_sy = gi.b_sz = 1.0
     gi.b_nx = gi.b_ny = gi.b_nz = 1
     gi.b_values = _no_field(device)
+    _fill_no_exterior(gi, device)
 
 
 def _scoring_info(scoring: ScoringGeometry, device: str) -> GridInfo:
@@ -738,6 +746,12 @@ class WarpEngine:
         each device. World data like ``grid``: uploaded once per device next to
         the density and material maps, and a gridded map must cover the transport
         grid (checked at construction).
+    exterior_air
+        Where charged particles may take long exact-helix steps under a uniform field
+        (:mod:`pyradmc.geometry.exterior`); ``None`` is the current stepping. World data
+        derived from ``grid``, refused if derived from another, uploaded with the voxel
+        maps, and inert without a uniform non-zero field. Not the default: whether it
+        becomes one is a maintainer decision (AGENTS.md section 8).
     drain_rounds
         Advanced; leave at the default unless profiling says otherwise. How the
         photon/electron queues are drained between chunks — bit-inert
@@ -760,6 +774,7 @@ class WarpEngine:
     queue_factor: int = 16
     magnetic_field: MagneticField | None = None
     drain_rounds: int | None = None
+    exterior_air: ExteriorAirMap | None = None
     _auto_chunk: dict = field(default_factory=dict, init=False, repr=False, compare=False)
     _drain: _DrainState = field(default_factory=_DrainState, init=False, repr=False, compare=False)
     # Host-table cache: build_tables flattens the source by looping the Python query
@@ -782,7 +797,9 @@ class WarpEngine:
     _default_scoring: dict = field(default_factory=dict, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        """Refuse a negative drain block or a field map that misses the grid."""
+        """Refuse a negative drain block, a field map missing the grid, a foreign map."""
+        if self.exterior_air is not None and not self.exterior_air.matches(self.grid):
+            raise ValueError("the exterior-air map was derived from another grid")
         if self.drain_rounds is not None and self.drain_rounds < 0:
             raise ValueError(f"drain_rounds must be None or >= 0, got {self.drain_rounds}")
         if self.magnetic_field is not None and not self.magnetic_field.covers(self.grid):
@@ -822,6 +839,12 @@ class WarpEngine:
             deposit_resolution_cm=deposit_resolution_cm,
             magnetic_field=(
                 None if self.magnetic_field is None else self.magnetic_field.provenance
+            ),
+            exterior_air=(
+                None
+                if self.exterior_air is None
+                or resolve_exterior_safety(self.exterior_air, self.magnetic_field) is None
+                else self.exterior_air.provenance
             ),
         )
 
@@ -4280,6 +4303,14 @@ class WarpEngine:
             gi.b_sx, gi.b_sy, gi.b_sz = (float(v) for v in b.spacing)
             gi.b_nx, gi.b_ny, gi.b_nz = (int(n) for n in b.shape)
             gi.b_values = wp.array(b.values.astype(np.float32), dtype=wp.vec3, device=device)
+            # The long-step map rides along for the same reason. air_on == 0 keeps the
+            # kernel on the current stepping, and it is zero unless the field is uniform.
+            safety = resolve_exterior_safety(self.exterior_air, b)
+            if safety is None:
+                _fill_no_exterior(gi, device)
+            else:
+                gi.air_on = 1
+                gi.air_safety = wp.array(safety.astype(np.float32), dtype=float, device=device)
         density = wp.array(self.grid.density.astype(np.float32), dtype=float, device=device)
         # Material indices travel as uint8: 4x narrower than int32 on the transport
         # kernels' random per-step load, and lossless for any registry the tables can

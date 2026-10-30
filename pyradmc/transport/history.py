@@ -11,6 +11,9 @@ is either deposited through the callback or returned as escaped.
 
 from __future__ import annotations
 
+import numpy as np
+import numpy.typing as npt
+
 from pyradmc.data.interface import CrossSectionSource
 from pyradmc.geometry.field import MagneticField
 from pyradmc.geometry.grid import VoxelGrid
@@ -51,6 +54,7 @@ def transport_history(
     deposit_resolution_cm: float | None = None,
     msc_model: str = "gs",
     field: MagneticField | None = None,
+    exterior_safety: npt.NDArray[np.float64] | None = None,
 ) -> float:
     """Transport one primary and all its descendants; returns the escaped energy.
 
@@ -95,6 +99,9 @@ def transport_history(
         Static magnetic field the charged particles move in, or ``None`` for the
         field-free world. Photons never see it; it is handed to
         :func:`~pyradmc.transport.electron.electron_steps` alone.
+    exterior_safety
+        Per-voxel safety of an exterior-air map, or ``None`` for the current stepping;
+        handed to :func:`~pyradmc.transport.electron.electron_steps` alone.
     """
     stack: list[StackEntry] = [(kind, energy, weight, x, y, z, ux, uy, uz)]
     escaped = 0.0
@@ -153,5 +160,6 @@ def transport_history(
                 deposit_resolution_cm=deposit_resolution_cm,
                 msc_model=msc_model,
                 field=field,
+                exterior_safety=exterior_safety,
             )
     return escaped

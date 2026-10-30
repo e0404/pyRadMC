@@ -68,6 +68,11 @@ class RunProvenance:
     engine was built without one. An explicit zero field reproduces that path
     byte for byte on each target. The field is engine data, not a run
     option, so it is recorded here rather than inferred from the engine later."""
+    exterior_air: str | None = None
+    """Provenance of the exterior-air map the run actually stepped by, from
+    :attr:`~pyradmc.geometry.exterior.ExteriorAirMap.provenance`; ``None`` for the
+    current stepping, including when a map was given but is inert (no field, a zero
+    field, a non-uniform field). It distinguishes two otherwise identical field runs."""
 
     def summary(self) -> str:
         """One-line human-readable digest, for logs and file headers."""
@@ -75,7 +80,7 @@ class RunProvenance:
             f"pyradmc {self.version} {self.backend}/{self.device} seed={self.seed} "
             f"pcut={self.pcut_mev} ecut={self.ecut_mev} msc={self.msc_model} "
             f"step={self.step_energy_fraction} deposit_res={self.deposit_resolution_cm} "
-            f"xs=[{self.cross_sections}] B=[{self.magnetic_field}]"
+            f"xs=[{self.cross_sections}] B=[{self.magnetic_field}] air=[{self.exterior_air}]"
         )
 
 
