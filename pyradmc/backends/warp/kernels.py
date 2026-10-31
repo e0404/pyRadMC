@@ -159,6 +159,7 @@ edge_bin_index = _p.edge_bin_index
 substep_pieces = _p.substep_pieces
 field_at = _p.field_at
 gyroradius_cm = _p.gyroradius_cm
+helix_chord = _p.helix_chord
 lorentz_rotation_angle = _p.lorentz_rotation_angle
 rotate_about_axis = _p.rotate_about_axis
 slab_entry_distance = _p.slab_entry_distance
@@ -231,6 +232,9 @@ class GridInfo:
     b_ny: int
     b_nz: int
     b_values: wp.array3d(dtype=wp.vec3)
+    # --- exterior-air safety (air_on != 0, only under a uniform field); else unread -
+    air_on: int
+    air_safety: wp.array3d(dtype=float)
 
 
 @wp.struct
@@ -1760,6 +1764,12 @@ def electron_kernel(
                 b_uz = bz / b_mag
                 has_field = True
 
+        # Long exact-helix step in exterior air (mirror of the reference loop): zero is
+        # the current stepping, and a field-free substep never reads the map.
+        exterior = 0.0
+        if has_field and gi.air_on != 0:
+            exterior = gi.air_safety[ix, iy, iz]
+
         # --- substep length ----------------------------------------------------
         range_cm = (
             lookup_2d(tab.csda_range, mat, tab.e_log_e_min, tab.e_inv_dlog, tab.n_points, e) / rho
@@ -1780,31 +1790,38 @@ def electron_kernel(
             )
             s_max = min(s_max, s_theta)
         if has_field:
-            # Curvature cap (LORENTZ_STEP_ANGLE_MAX), as in the reference loop.
-            s_max = min(s_max, LORENTZ_STEP_ANGLE_MAX * gyroradius_cm(e, b_mag))
+            # Curvature cap (LORENTZ_STEP_ANGLE_MAX), as in the reference loop; the
+            # safety replaces it on a long step, whose chords are exact at any angle.
+            if exterior > 0.0:
+                s_max = min(s_max, exterior)
+            else:
+                s_max = min(s_max, LORENTZ_STEP_ANGLE_MAX * gyroradius_cm(e, b_mag))
         # Cap at the next voxel face (plus the nudge across it) so the substep's
         # density and material stay those of the voxel it starts in (to within the
         # chord's bend under a field; see the reference loop).
-        s_boundary = (
-            distance_to_voxel_boundary(
-                x,
-                y,
-                z,
-                ux,
-                uy,
-                uz,
-                gi.x_lo,
-                gi.y_lo,
-                gi.z_lo,
-                gi.sx,
-                gi.sy,
-                gi.sz,
-                gi.nx,
-                gi.ny,
-                gi.nz,
+        # A long step has no face cap (mirror of the reference loop).
+        s_boundary = _INFINITY_CM
+        if exterior <= 0.0:
+            s_boundary = (
+                distance_to_voxel_boundary(
+                    x,
+                    y,
+                    z,
+                    ux,
+                    uy,
+                    uz,
+                    gi.x_lo,
+                    gi.y_lo,
+                    gi.z_lo,
+                    gi.sx,
+                    gi.sy,
+                    gi.sz,
+                    gi.nx,
+                    gi.ny,
+                    gi.nz,
+                )
+                + BOUNDARY_NUDGE_CM
             )
-            + BOUNDARY_NUDGE_CM
-        )
         s_geometry = min(s_max, s_boundary)
         sigma_moller = rho * lookup_2d(
             tab.moller, mat, tab.e_log_e_min, tab.e_inv_dlog, tab.n_points, e
@@ -1895,33 +1912,10 @@ def electron_kernel(
         if has_field:
             half = 0.5 * lorentz_rotation_angle(s1, gyroradius_cm(e - 0.5 * d1, b_mag), is_positron)
             ux, uy, uz = rotate_about_axis(ux, uy, uz, b_ux, b_uy, b_uz, half)
-            # Bent chord may reach a face sooner than the pre-rotation cap allowed:
-            # stop there and end the substep (mirror of the reference loop).
-            s1_face = distance_to_voxel_boundary(
-                x,
-                y,
-                z,
-                ux,
-                uy,
-                uz,
-                gi.x_lo,
-                gi.y_lo,
-                gi.z_lo,
-                gi.sx,
-                gi.sy,
-                gi.sz,
-                gi.nx,
-                gi.ny,
-                gi.nz,
-            )
-            if s1 >= s1_face:
-                d1_scale = 0.0
-                if s1 > 0.0:
-                    d1_scale = s1_face / s1
-                d1 = d1 * d1_scale
-                s1 = s1_face
-                cut = True
-                axis = voxel_face_axis(
+            if exterior <= 0.0:
+                # Bent chord may reach a face sooner than the pre-rotation cap allowed:
+                # stop there and end the substep (mirror of the reference loop).
+                s1_face = distance_to_voxel_boundary(
                     x,
                     y,
                     z,
@@ -1938,11 +1932,42 @@ def electron_kernel(
                     gi.ny,
                     gi.nz,
                 )
-                # Whole turn = the cut chord's (mirror of the reference loop).
-                half = (
-                    lorentz_rotation_angle(s1, gyroradius_cm(e - 0.5 * d1, b_mag), is_positron)
-                    - half
-                )
+                if s1 >= s1_face:
+                    d1_scale = 0.0
+                    if s1 > 0.0:
+                        d1_scale = s1_face / s1
+                    d1 = d1 * d1_scale
+                    s1 = s1_face
+                    cut = True
+                    axis = voxel_face_axis(
+                        x,
+                        y,
+                        z,
+                        ux,
+                        uy,
+                        uz,
+                        gi.x_lo,
+                        gi.y_lo,
+                        gi.z_lo,
+                        gi.sx,
+                        gi.sy,
+                        gi.sz,
+                        gi.nx,
+                        gi.ny,
+                        gi.nz,
+                    )
+                    # Whole turn = the cut chord's (mirror of the reference loop).
+                    half = (
+                        lorentz_rotation_angle(s1, gyroradius_cm(e - 0.5 * d1, b_mag), is_positron)
+                        - half
+                    )
+        # A long step's chord is the true helix displacement (mirror of the reference
+        # loop); its midpoint is inside the safety ball, so the deposit stays exterior.
+        cx = ux
+        cy = uy
+        cz = uz
+        if exterior > 0.0:
+            cx, cy, cz = helix_chord(ux, uy, uz, b_ux, b_uy, b_uz, half)
         _deposit_spread(
             edep,
             escaped,
@@ -1954,9 +1979,9 @@ def electron_kernel(
             x,
             y,
             z,
-            ux,
-            uy,
-            uz,
+            cx,
+            cy,
+            cz,
             s1,
             w * d1,
             substep_factor,
@@ -1964,9 +1989,9 @@ def electron_kernel(
             deposit_resolution,
         )
         e -= d1
-        x += ux * s1
-        y += uy * s1
-        z += uz * s1
+        x += cx * s1
+        y += cy * s1
+        z += cz * s1
         if has_field:
             ux, uy, uz = rotate_about_axis(ux, uy, uz, b_ux, b_uy, b_uz, half)
         if cut:
@@ -2072,36 +2097,14 @@ def electron_kernel(
         # The deflected second chord stops at the voxel face it would cross, so this
         # voxel's energy loss never lands in the neighbour (mirror of the reference
         # loop; the second-leg interface rule of the random hinge).
-        s2_face = distance_to_voxel_boundary(
-            x,
-            y,
-            z,
-            ux,
-            uy,
-            uz,
-            gi.x_lo,
-            gi.y_lo,
-            gi.z_lo,
-            gi.sx,
-            gi.sy,
-            gi.sz,
-            gi.nx,
-            gi.ny,
-            gi.nz,
-        )
-        if s2 >= s2_face or (face_limited and s2_face - s2 <= BOUNDARY_NUDGE_CM):
-            # A face-limited substep ends on its face unless the hinge turned the
-            # particle away by more than a nudge; the exact test alone leaves a
-            # particle a rounding residue short of the face stuck for ever (mirror
-            # of the reference loop).
-            d2_scale = 0.0
-            if s2 > 0.0:
-                d2_scale = s2_face / s2
-            d2 = d2 * d2_scale
-            s2 = s2_face
-            moller_pending = False
-            crossing = True
-            axis = voxel_face_axis(
+        # A long step has no interface to stop at (mirror of the reference loop).
+        cx = ux
+        cy = uy
+        cz = uz
+        if exterior > 0.0:
+            cx, cy, cz = helix_chord(ux, uy, uz, b_ux, b_uy, b_uz, half)
+        else:
+            s2_face = distance_to_voxel_boundary(
                 x,
                 y,
                 z,
@@ -2118,11 +2121,40 @@ def electron_kernel(
                 gi.ny,
                 gi.nz,
             )
-            if has_field:
-                half = (
-                    lorentz_rotation_angle(s2, gyroradius_cm(e - 0.5 * d2, b_mag), is_positron)
-                    - half
+            if s2 >= s2_face or (face_limited and s2_face - s2 <= BOUNDARY_NUDGE_CM):
+                # A face-limited substep ends on its face unless the hinge turned the
+                # particle away by more than a nudge; the exact test alone leaves a
+                # particle a rounding residue short of the face stuck for ever (mirror
+                # of the reference loop).
+                d2_scale = 0.0
+                if s2 > 0.0:
+                    d2_scale = s2_face / s2
+                d2 = d2 * d2_scale
+                s2 = s2_face
+                moller_pending = False
+                crossing = True
+                axis = voxel_face_axis(
+                    x,
+                    y,
+                    z,
+                    ux,
+                    uy,
+                    uz,
+                    gi.x_lo,
+                    gi.y_lo,
+                    gi.z_lo,
+                    gi.sx,
+                    gi.sy,
+                    gi.sz,
+                    gi.nx,
+                    gi.ny,
+                    gi.nz,
                 )
+                if has_field:
+                    half = (
+                        lorentz_rotation_angle(s2, gyroradius_cm(e - 0.5 * d2, b_mag), is_positron)
+                        - half
+                    )
         _deposit_spread(
             edep,
             escaped,
@@ -2134,9 +2166,9 @@ def electron_kernel(
             x,
             y,
             z,
-            ux,
-            uy,
-            uz,
+            cx,
+            cy,
+            cz,
             s2,
             w * d2,
             substep_factor,
@@ -2144,9 +2176,9 @@ def electron_kernel(
             deposit_resolution,
         )
         e -= d2
-        x += ux * s2
-        y += uy * s2
-        z += uz * s2
+        x += cx * s2
+        y += cy * s2
+        z += cz * s2
         if has_field:
             ux, uy, uz = rotate_about_axis(ux, uy, uz, b_ux, b_uy, b_uz, half)
         if crossing:

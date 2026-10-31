@@ -32,6 +32,8 @@ installed; touching it then raises an error naming the extra to install.
 
 ::: pyradmc.geometry.field.MagneticField
 
+::: pyradmc.geometry.exterior.ExteriorAirMap
+
 ::: pyradmc.scoring.grid.ScoringGrid
 
 ::: pyradmc.scoring.cylinder.CylindricalScoringGrid

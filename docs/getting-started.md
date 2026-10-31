@@ -241,7 +241,9 @@ scoring grid and dose-to-water), `spectral_source_demo.py` (6 MV polyenergetic f
 one fan in a single launch: a dose column per segment, and the MU-weighted plan from one
 run), `segmented_arc_demo.py` (a 36-point arc, each control point its own fan and beam
 frame, in one launch), `magnetic_field_demo.py` (the electron
-return effect in a water / air / water slab at 0, 0.2, 0.7, 1.5 and 3 T), `virtual_source_demo.py`
+return effect in a water / air / water slab at 0, 0.2, 0.7, 1.5 and 3 T),
+`exterior_air_demo.py` (long exact-helix steps through the air around a body: same dose,
+measured wall), `virtual_source_demo.py`
 (measured-primary-fluence source model), `phasespace_demo.py` (IAEA phase-space source),
 `custom_source_demo.py`, `pencil_kernel_demo.py` and `pencil_kernel_database.py`
 (see [pencil-beam kernels](#pencil-beam-kernels)), and `noise_bias_study.py`

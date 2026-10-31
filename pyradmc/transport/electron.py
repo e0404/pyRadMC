@@ -33,6 +33,21 @@ One particle at a time, for the reference backend. The scheme, per docs/decision
   a substep, as in every production code; the decoupling error is bounded by the
   gyration-angle cap :data:`LORENTZ_STEP_ANGLE_MAX`. Outside the grid there is no
   field: a charged particle born outside flies straight to the entry face.
+- **Long exact-helix steps in exterior air**, a named approximation and the default
+  under a uniform field (:mod:`pyradmc.geometry.exterior`; the engines warn once), taken
+  in a voxel whose safety distance is non-zero; ``exterior_air=None`` on the engine
+  turns it off. The substep is then limited by the energy fraction and that safety
+  alone: no gyration cap, no voxel face. Path bounds displacement, so the whole step
+  stays in the exterior. Each chord is the exact helix
+  (:func:`~pyradmc.physics.lorentz.helix_chord`) at the chord's mid-energy radius.
+  Hinge, loss, Moller, brems and the ledger are the ordinary loop's. What is
+  approximate, and only here: **the deposit of a long step is not spatially resolved**
+  (it files at the two chord midpoints, which lie in exterior voxels and never in the
+  body, or along the straight chords under ``deposit_resolution_cm``, never along the
+  arc), and **the whole step is charged at its start voxel's density and material**,
+  though it may cross exterior voxels of other densities below the region's bound.
+  Rotation draws no random number, and the hinge decouples from the field exactly as
+  above, over a larger angle.
 
 Substeps are limited four ways: a fraction of the CSDA range (energy-loss
 accuracy), a mean-square hinge-angle ceiling (multiple-scattering accuracy — the
@@ -41,6 +56,7 @@ angular cap that replaced the historic half-voxel-edge limit; see
 (:data:`LORENTZ_STEP_ANGLE_MAX`), and truncation at the next voxel face
 (heterogeneity: a substep's density and material are those of the voxel it
 runs in — exactly so without a field, and to within the chord's bend with one).
+A long exterior-air step (above) replaces the last two with its safety distance.
 The reference backend keeps the caps conservative; the Warp backend
 mirrors this loop step for step and is validated against it — step aggressiveness
 beyond it must be bought with better transport mechanics, not by loosening the
@@ -52,6 +68,9 @@ Electrons at or below ECUT deposit their kinetic energy locally and terminate.
 from __future__ import annotations
 
 import math
+
+import numpy as np
+import numpy.typing as npt
 
 from pyradmc import (
     ELECTRON_MASS_MEV,
@@ -69,7 +88,12 @@ from pyradmc.geometry.grid import (
 )
 from pyradmc.physics.brems import bremsstrahlung_step_parameters, sample_bremsstrahlung_energy
 from pyradmc.physics.direction import rotate_direction
-from pyradmc.physics.lorentz import gyroradius_cm, lorentz_rotation_angle, rotate_about_axis
+from pyradmc.physics.lorentz import (
+    gyroradius_cm,
+    helix_chord,
+    lorentz_rotation_angle,
+    rotate_about_axis,
+)
 from pyradmc.physics.moller import moller_direction_cosines, sample_moller_delta_energy
 from pyradmc.physics.msc import sample_hinge_cos_theta
 from pyradmc.physics.path import sample_path_length
@@ -185,7 +209,9 @@ times the cost.
 Where it binds: in water at 1.5 T, ``s_B`` is 0.63 mm at 1 MeV against the 0.9 mm
 energy-limited GS step, so it shortens substeps below roughly 1.5 MeV; at 0.35 T it is
 inert in tissue. In air the energy-limited step is metres and the voxel face bound the
-substep before; now ``s_B`` does, so air costs several substeps per voxel.
+substep before; now ``s_B`` does, so air costs several substeps per voxel. An
+:class:`~pyradmc.geometry.exterior.ExteriorAirMap` lifts it in air far from the body,
+where the chords are exact instead; it is not relaxed anywhere else.
 
 Accuracy-defining (AGENTS.md 2.8): changing it needs the Fano-in-field gate and a
 measurement on realistic spectral, heterogeneous geometry, never water alone.
@@ -270,6 +296,7 @@ def electron_steps(
     msc_model: str = "gs",
     deposit_resolution_cm: float | None = None,
     field: MagneticField | None = None,
+    exterior_safety: npt.NDArray[np.float64] | None = None,
 ) -> float:
     """Transport one electron or positron; secondaries go to ``spawn``.
 
@@ -328,6 +355,12 @@ def electron_steps(
     draws no random number. An explicit zero field therefore reproduces ``None``
     byte for byte; the separate boundary and loss fixes can change historical
     field-free results (see CHANGELOG.md).
+
+    ``exterior_safety`` is the per-voxel safety of an
+    :class:`~pyradmc.geometry.exterior.ExteriorAirMap`, or ``None`` for the current
+    stepping; the engines pass it only under a uniform non-zero field
+    (:func:`~pyradmc.geometry.exterior.resolve_exterior_air`). Where it is positive the
+    substep is the long exact-helix step of the module docstring.
     """
     if msc_model not in ("gaussian", "gs"):
         raise ValueError(f"unknown msc_model {msc_model!r}; expected 'gaussian' or 'gs'")
@@ -443,6 +476,13 @@ def electron_steps(
                 b_uz = bz / b_mag
                 has_field = True
 
+        # Long exact-helix step in exterior air: positive means the whole of a path this
+        # long from here is exterior (pyradmc.geometry.exterior). Zero is the current
+        # stepping, and a field-free substep never reads the map.
+        exterior = 0.0
+        if has_field and exterior_safety is not None:
+            exterior = float(exterior_safety[ix, iy, iz])
+
         # --- substep length --------------------------------------------------------
         range_cm = cross_sections.csda_range(e, material) / rho
         s_max = step_energy_fraction * range_cm
@@ -461,7 +501,12 @@ def electron_steps(
         if has_field:
             # Curvature cap (LORENTZ_STEP_ANGLE_MAX): bound the gyration angle per
             # substep so each straight chord stays close to the arc it stands for.
-            s_max = min(s_max, LORENTZ_STEP_ANGLE_MAX * gyroradius_cm(e, b_mag))
+            if exterior > 0.0:
+                # The safety replaces the curvature cap: the chords below are exact at
+                # any angle, so the cap has nothing left to protect.
+                s_max = min(s_max, exterior)
+            else:
+                s_max = min(s_max, LORENTZ_STEP_ANGLE_MAX * gyroradius_cm(e, b_mag))
         # Cap at the next voxel face (plus the nudge across it) so the substep's
         # density and material stay those of the voxel it starts in. The distance
         # is taken along the pre-rotation direction: a bent chord can end up to
@@ -469,12 +514,15 @@ def electron_steps(
         # off the straight-line prediction, so under a field the one-voxel
         # invariant holds to that tolerance and the next substep re-reads its
         # voxel — the stated approximation of this scheme.
-        s_boundary = (
-            distance_to_voxel_boundary(
-                x, y, z, ux, uy, uz, *grid.origin, *grid.spacing, *grid.shape
+        # A long step has no face cap: it crosses faces between exterior voxels freely.
+        s_boundary = math.inf
+        if exterior <= 0.0:
+            s_boundary = (
+                distance_to_voxel_boundary(
+                    x, y, z, ux, uy, uz, *grid.origin, *grid.spacing, *grid.shape
+                )
+                + BOUNDARY_NUDGE_CM
             )
-            + BOUNDARY_NUDGE_CM
-        )
         s_geometry = min(s_max, s_boundary)
         sigma_moller = rho * cross_sections.moller_cross_section(e, material, ecut)
         s_interaction = (
@@ -541,31 +589,38 @@ def electron_steps(
         if has_field:
             half = 0.5 * lorentz_rotation_angle(s1, gyroradius_cm(e - 0.5 * d1, b_mag), is_positron)
             ux, uy, uz = rotate_about_axis(ux, uy, uz, b_ux, b_uy, b_uz, half)
-            # The face cap was taken along the pre-rotation direction; the bent
-            # chord may reach a face sooner. Stop there and end the substep (the
-            # PENELOPE rule for an interface met before the hinge): the remainder
-            # is transported from the new voxel with that voxel's medium.
-            s1_face = distance_to_voxel_boundary(
-                x, y, z, ux, uy, uz, *grid.origin, *grid.spacing, *grid.shape
-            )
-            if s1 >= s1_face:
-                d1 = d1 * (s1_face / s1) if s1 > 0.0 else 0.0
-                s1 = s1_face
-                cut = True
-                axis = voxel_face_axis(
+            if exterior <= 0.0:
+                # The face cap was taken along the pre-rotation direction; the bent
+                # chord may reach a face sooner. Stop there and end the substep (the
+                # PENELOPE rule for an interface met before the hinge): the remainder
+                # is transported from the new voxel with that voxel's medium.
+                s1_face = distance_to_voxel_boundary(
                     x, y, z, ux, uy, uz, *grid.origin, *grid.spacing, *grid.shape
                 )
-                # The first half-turn was the full chord's; make the whole turn the
-                # cut chord's, so direction and path stay on the same arc.
-                half = (
-                    lorentz_rotation_angle(s1, gyroradius_cm(e - 0.5 * d1, b_mag), is_positron)
-                    - half
-                )
-        escaped += deposit_spread(x, y, z, ux, uy, uz, s1, w * d1, substep_factor)
+                if s1 >= s1_face:
+                    d1 = d1 * (s1_face / s1) if s1 > 0.0 else 0.0
+                    s1 = s1_face
+                    cut = True
+                    axis = voxel_face_axis(
+                        x, y, z, ux, uy, uz, *grid.origin, *grid.spacing, *grid.shape
+                    )
+                    # The first half-turn was the full chord's; make the whole turn the
+                    # cut chord's, so direction and path stay on the same arc.
+                    half = (
+                        lorentz_rotation_angle(s1, gyroradius_cm(e - 0.5 * d1, b_mag), is_positron)
+                        - half
+                    )
+        # A chord runs along the direction at its midpoint; a long step's is shortened
+        # to the true helix displacement, whose midpoint is inside the safety ball, so
+        # its deposit lands in an exterior voxel and never in the body.
+        cx, cy, cz = ux, uy, uz
+        if exterior > 0.0:
+            cx, cy, cz = helix_chord(ux, uy, uz, b_ux, b_uy, b_uz, half)
+        escaped += deposit_spread(x, y, z, cx, cy, cz, s1, w * d1, substep_factor)
         e -= d1
-        x += ux * s1
-        y += uy * s1
-        z += uz * s1
+        x += cx * s1
+        y += cy * s1
+        z += cz * s1
         if has_field:
             ux, uy, uz = rotate_about_axis(ux, uy, uz, b_ux, b_uy, b_uz, half)
         if cut:
@@ -627,30 +682,37 @@ def electron_steps(
         # not reached (the flight is re-sampled next substep; memoryless). This is
         # the second-leg interface rule of the random hinge (Salvat et al.,
         # PENELOPE-2018, sec. 4.3) and it closes the Fano test at air contrast.
-        s2_face = distance_to_voxel_boundary(
-            x, y, z, ux, uy, uz, *grid.origin, *grid.spacing, *grid.shape
-        )
-        if s2 >= s2_face or (face_limited and s2_face - s2 <= BOUNDARY_NUDGE_CM):
-            # A face-limited substep ends on its face unless the hinge turned the
-            # particle away from it by more than a nudge. The exact test alone is
-            # not enough: a chord split leaves the particle a rounding residue
-            # short of the face, the next substep then has no in-voxel path at all
-            # and the exact test is false for ever, so the particle never moves.
-            d2 = d2 * (s2_face / s2) if s2 > 0.0 else 0.0
-            s2 = s2_face
-            moller_pending = False
-            crossing = True
-            axis = voxel_face_axis(x, y, z, ux, uy, uz, *grid.origin, *grid.spacing, *grid.shape)
-            if has_field:
-                half = (
-                    lorentz_rotation_angle(s2, gyroradius_cm(e - 0.5 * d2, b_mag), is_positron)
-                    - half
+        # A long step has no interface to stop at: the safety holds for the whole path.
+        cx, cy, cz = ux, uy, uz
+        if exterior > 0.0:
+            cx, cy, cz = helix_chord(ux, uy, uz, b_ux, b_uy, b_uz, half)
+        else:
+            s2_face = distance_to_voxel_boundary(
+                x, y, z, ux, uy, uz, *grid.origin, *grid.spacing, *grid.shape
+            )
+            if s2 >= s2_face or (face_limited and s2_face - s2 <= BOUNDARY_NUDGE_CM):
+                # A face-limited substep ends on its face unless the hinge turned the
+                # particle away from it by more than a nudge. The exact test alone is
+                # not enough: a chord split leaves the particle a rounding residue
+                # short of the face, the next substep then has no in-voxel path at all
+                # and the exact test is false for ever, so the particle never moves.
+                d2 = d2 * (s2_face / s2) if s2 > 0.0 else 0.0
+                s2 = s2_face
+                moller_pending = False
+                crossing = True
+                axis = voxel_face_axis(
+                    x, y, z, ux, uy, uz, *grid.origin, *grid.spacing, *grid.shape
                 )
-        escaped += deposit_spread(x, y, z, ux, uy, uz, s2, w * d2, substep_factor)
+                if has_field:
+                    half = (
+                        lorentz_rotation_angle(s2, gyroradius_cm(e - 0.5 * d2, b_mag), is_positron)
+                        - half
+                    )
+        escaped += deposit_spread(x, y, z, cx, cy, cz, s2, w * d2, substep_factor)
         e -= d2
-        x += ux * s2
-        y += uy * s2
-        z += uz * s2
+        x += cx * s2
+        y += cy * s2
+        z += cz * s2
         if has_field:
             ux, uy, uz = rotate_about_axis(ux, uy, uz, b_ux, b_uy, b_uz, half)
         if crossing:

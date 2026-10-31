@@ -50,7 +50,9 @@ enough for beamlet-resolved planning, and readable.
   `MagneticField` (uniform, per voxel, or a trilinear map on its own grid) is handed to
   the engine next to the grid; charged particles are bent by the Lorentz force in both
   backends, photons are unaffected, and without a field the engines are byte-identical
-  to before the field existed. There is no switch.
+  to before the field existed. There is no switch. Under a uniform field the engines by
+  default replace the gyration-capped stepping in air away from the body with exact-helix
+  steps, a named approximation they warn about once; `exterior_air=None` turns it off.
 
 ## What it deliberately does not do
 

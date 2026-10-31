@@ -34,6 +34,7 @@ from pyradmc.backends.ref.engine import ReferenceEngine  # noqa: E402
 from pyradmc.data.tabulated import build  # noqa: E402
 from pyradmc.data.tabulated.precompile import compile_materials  # noqa: E402
 from pyradmc.data.tabulated.source import TabulatedCrossSections  # noqa: E402
+from pyradmc.geometry.exterior import EXTERIOR_AUTO  # noqa: E402
 from pyradmc.geometry.field import MagneticField  # noqa: E402
 from pyradmc.geometry.source import SpectralBeamSource  # noqa: E402
 from pyradmc.geometry.spectrum import ali_rogers_mv  # noqa: E402
@@ -62,6 +63,13 @@ def thorax():
     return grid, xs
 
 
+def _expecting_caveat(exterior_air, build):
+    if exterior_air is None:
+        return build()
+    with pytest.warns(UserWarning, match="exterior-air"):
+        return build()
+
+
 def _source() -> SpectralBeamSource:
     cx, cy = SHAPE[0] * SPACING[0] / 2.0, SHAPE[1] * SPACING[1] / 2.0
     return SpectralBeamSource(
@@ -81,11 +89,17 @@ def _depth_energy_profile(dose: np.ndarray, grid) -> np.ndarray:
 
 @pytest.mark.gpu
 @pytest.mark.parametrize(
-    "magnetic_field",
-    [None, MagneticField.uniform((1.5, 0.0, 0.0))],
-    ids=["field-free", "transverse-1.5T"],
+    ("magnetic_field", "exterior_air"),
+    [
+        (None, None),
+        (MagneticField.uniform((1.5, 0.0, 0.0)), None),
+        (MagneticField.uniform((1.5, 0.0, 0.0)), EXTERIOR_AUTO),
+    ],
+    ids=["field-free", "transverse-1.5T-current", "transverse-1.5T-default"],
 )
-def test_gs_thorax_depth_profile_agrees_across_backends(thorax, magnetic_field) -> None:
+def test_gs_thorax_depth_profile_agrees_across_backends(
+    thorax, magnetic_field, exterior_air
+) -> None:
     """Ref and Warp CUDA agree in laterally-integrated depth dose under GS f=0.20.
 
     The calibrated chi-squared runs over every z-slab carrying more than 1
@@ -109,8 +123,15 @@ def test_gs_thorax_depth_profile_agrees_across_backends(thorax, magnetic_field) 
 
     ref_profiles = []
     ref_totals = []
-    engine = ReferenceEngine(
-        grid=grid, cross_sections=xs, rng=HostRNG(), magnetic_field=magnetic_field
+    engine = _expecting_caveat(
+        exterior_air,
+        lambda: ReferenceEngine(
+            grid=grid,
+            cross_sections=xs,
+            rng=HostRNG(),
+            magnetic_field=magnetic_field,
+            exterior_air=exterior_air,
+        ),
     )
     for s in range(N_SEEDS):
         result = engine.run(
@@ -124,8 +145,15 @@ def test_gs_thorax_depth_profile_agrees_across_backends(thorax, magnetic_field) 
         ref_profiles.append(_depth_energy_profile(result.dose, grid))
         ref_totals.append(result.energy_deposited / result.n_histories)
 
-    warp_engine = WarpEngine(
-        grid=grid, cross_sections=xs, device="cuda:0", magnetic_field=magnetic_field
+    warp_engine = _expecting_caveat(
+        exterior_air,
+        lambda: WarpEngine(
+            grid=grid,
+            cross_sections=xs,
+            device="cuda:0",
+            magnetic_field=magnetic_field,
+            exterior_air=exterior_air,
+        ),
     )
     warp_profiles = []
     warp_totals = []

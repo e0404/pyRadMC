@@ -17,6 +17,20 @@ without a field, so results are not byte-identical to the previous release.
 
 ### Added
 
+- **Exterior-air stepping under a uniform field, on by default, with a warning.** Under a
+  uniform non-zero field the engines replace the gyration cap with exact helix chords and a
+  safety distance in air connected to the grid boundary and at least 0.25 cm from anything
+  else, deriving `ExteriorAirMap.from_grid(grid)` themselves. **This moves dose** in any such
+  run compared with the previous behaviour, which `exterior_air=None` keeps: on a tabulated
+  6 MV body in 3 cm of air, shell within 0.06 +- 0.05 % and body within 0.003 +- 0.018 %, for
+  wall x0.64 at 0.35 T, x0.48 at 1.5 T along the body, x0.30 at 1.5 T across it, x0.38 to
+  x0.45 at 6 cm. On air-density Fano cavities the ratio shifts by up to +0.75 % in the worst
+  case tested, cause not established; default-on with that open is a maintainer decision
+  (docs/decisions.md). Dose in exterior air voxels is not comparable voxel by voxel, because a
+  long step's deposit is not spatially resolved. Each engine that uses the path warns once, at
+  construction. Field-free, zero-field and non-uniform-field runs build no map and are byte
+  identical to `exterior_air=None`. See AGENTS.md section 8.
+
 - **Cheaper head pre-solve setup.** The attenuation curves the collimator pre-solve
   and `CollimatedSource` read through `CrossSectionSource` are memoised per source object
   (`pyradmc.geometry.mucache`; `mucache.clear()` drops them), and `presolve_head_device`

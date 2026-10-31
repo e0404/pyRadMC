@@ -12,8 +12,11 @@ itself (launch and memory management only, AGENTS.md section 3).
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import partial
+
+import numpy as np
+import numpy.typing as npt
 
 from pyradmc import (
     DIJ_TRUNCATION_RELATIVE,
@@ -24,6 +27,13 @@ from pyradmc import (
 )
 from pyradmc.backends.results import RunProvenance, TransportResult
 from pyradmc.data.interface import CrossSectionSource
+from pyradmc.geometry.exterior import (
+    EXTERIOR_AUTO,
+    ExteriorAirChoice,
+    ExteriorAirMap,
+    resolve_exterior_air,
+    warn_exterior_air,
+)
 from pyradmc.geometry.field import MagneticField
 from pyradmc.geometry.grid import VoxelGrid
 from pyradmc.geometry.source import BeamletSource, Source
@@ -80,9 +90,21 @@ class ReferenceEngine:
     field-free world; an explicit zero field reproduces it byte for byte. World
     data, like ``grid``: a gridded map must cover the transport grid
     (:meth:`~pyradmc.geometry.field.MagneticField.covers`), checked here once."""
+    exterior_air: ExteriorAirChoice = EXTERIOR_AUTO
+    """Where charged particles may take long exact-helix steps under a uniform field
+    (:mod:`pyradmc.geometry.exterior`). The default derives the map from ``grid`` when a
+    run can use it; ``None`` is the explicit way to the current stepping; a map is used
+    as given, and refused if derived from another grid. Inert without a uniform non-zero
+    field or without usable exterior air. An engine that uses it warns once, at
+    construction: a named approximation (AGENTS.md section 8)."""
+    _exterior: ExteriorAirMap | None = field(default=None, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        """Refuse a gridded field map that does not cover the transport grid."""
+        """Refuse a field map missing the grid or a foreign map; resolve the exterior air."""
+        if isinstance(self.exterior_air, ExteriorAirMap) and not self.exterior_air.matches(
+            self.grid
+        ):
+            raise ValueError("the exterior-air map was derived from another grid")
         if self.magnetic_field is not None and not self.magnetic_field.covers(self.grid):
             raise ValueError(
                 "the magnetic field map does not cover the transport grid: "
@@ -90,6 +112,11 @@ class ReferenceEngine:
                 f"{self.magnetic_field.upper_corner} cm, grid {self.grid.origin} to "
                 f"{self.grid.upper_corner} cm"
             )
+        resolved = resolve_exterior_air(self.exterior_air, self.grid, self.magnetic_field)
+        object.__setattr__(self, "_exterior", resolved)
+        if resolved is not None:
+            # __post_init__ <- generated __init__ <- the caller who built this engine.
+            warn_exterior_air(stacklevel=3)
 
     def _provenance(
         self,
@@ -124,7 +151,12 @@ class ReferenceEngine:
             magnetic_field=(
                 None if self.magnetic_field is None else self.magnetic_field.provenance
             ),
+            exterior_air=None if self._exterior is None else self._exterior.provenance,
         )
+
+    def _exterior_safety(self) -> npt.NDArray[np.float64] | None:
+        """Return the safety array this engine's runs step by, or ``None``."""
+        return None if self._exterior is None else self._exterior.safety
 
     def run(
         self,
@@ -293,6 +325,7 @@ class ReferenceEngine:
                     deposit_resolution_cm=deposit_resolution_cm,
                     msc_model=msc_model,
                     field=self.magnetic_field,
+                    exterior_safety=self._exterior_safety(),
                 )
             scorer.end_batch(per_batch)
             emitter.tick(per_batch)
@@ -458,6 +491,7 @@ class ReferenceEngine:
                         deposit_resolution_cm=deposit_resolution_cm,
                         msc_model=msc_model,
                         field=self.magnetic_field,
+                        exterior_safety=self._exterior_safety(),
                     )
             scorer.end_batch(per_batch)
             emitter.tick(n_beamlets * per_batch)

@@ -152,6 +152,7 @@ if TYPE_CHECKING:
         MaterialData,
     )
     from pyradmc.data.tabulated.source import TabulatedCrossSections
+    from pyradmc.geometry.exterior import ExteriorAirMap
     from pyradmc.geometry.field import MagneticField
     from pyradmc.geometry.fluence import RadialFluence
     from pyradmc.geometry.grid import VoxelGrid
@@ -197,6 +198,7 @@ _LAZY_EXPORTS: dict[str, str] = {
     "CylindricalScoringGrid": "pyradmc.scoring.cylinder",
     "DijResult": "pyradmc.scoring.dij",
     "GaussianSpotBeamSource": "pyradmc.geometry.source",
+    "ExteriorAirMap": "pyradmc.geometry.exterior",
     "GaussianSpotBeamletSource": "pyradmc.geometry.source",
     "HostRNG": "pyradmc.rng.host",
     "InMemoryPhaseSpaceSource": "pyradmc.geometry.phasespace",
@@ -289,6 +291,7 @@ __all__ = [
     "CrossSectionSource",
     "CylindricalScoringGrid",
     "DijResult",
+    "ExteriorAirMap",
     "GaussianSpotBeamSource",
     "GaussianSpotBeamletSource",
     "HostRNG",

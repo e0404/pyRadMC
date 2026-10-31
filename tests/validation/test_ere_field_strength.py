@@ -35,6 +35,7 @@ import numpy as np
 import pytest
 
 from pyradmc import AIR, WATER, MagneticField
+from pyradmc.geometry.exterior import EXTERIOR_AUTO
 from pyradmc.geometry.grid import VoxelGrid
 from pyradmc.geometry.source import SpectralBeamSource
 from pyradmc.geometry.spectrum import ali_rogers_mv
@@ -67,9 +68,13 @@ def _phantom() -> VoxelGrid:
     return VoxelGrid(shape=shape, spacing=(DXY, DXY, DZ), density=density, material=material)
 
 
-@pytest.fixture(scope="module")
-def exit_curves():
-    """Central-axis depth dose and exit-face lateral profile per field strength."""
+@pytest.fixture(scope="module", params=[None, EXTERIOR_AUTO], ids=["current", "default"])
+def exit_curves(request):
+    """Central-axis depth dose and exit-face lateral profile per field strength, per path.
+
+    The air behind the water reaches the grid boundary, so the shipped default steps through
+    it on the long-step path. The paper's numbers are held on both paths, unchanged.
+    """
     if not wp.is_cuda_available():
         pytest.skip("four 4e7-history fields; CUDA only")
     from pyradmc.backends.warp.engine import WarpEngine
@@ -105,7 +110,24 @@ def exit_curves():
     curves = {}
     for b in (0.0, 0.75, 1.5, 3.0):
         field = None if b == 0.0 else MagneticField.uniform((b, 0.0, 0.0))
-        engine = WarpEngine(grid=grid, cross_sections=xs, device="cuda:0", magnetic_field=field)
+        air = request.param
+        if field is None or air is None:
+            engine = WarpEngine(
+                grid=grid,
+                cross_sections=xs,
+                device="cuda:0",
+                magnetic_field=field,
+                exterior_air=air,
+            )
+        else:
+            with pytest.warns(UserWarning, match="exterior-air"):
+                engine = WarpEngine(
+                    grid=grid,
+                    cross_sections=xs,
+                    device="cuda:0",
+                    magnetic_field=field,
+                    exterior_air=air,
+                )
         result = engine.run(source, n_histories=N_HISTORIES, n_batches=10, seed=SEED)
         axis = result.dose[core, core, :].mean(axis=(0, 1))
         exit_profile = result.dose[core, :, exit_band].mean(axis=(0, 2))
