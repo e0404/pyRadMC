@@ -33,19 +33,21 @@ One particle at a time, for the reference backend. The scheme, per docs/decision
   a substep, as in every production code; the decoupling error is bounded by the
   gyration-angle cap :data:`LORENTZ_STEP_ANGLE_MAX`. Outside the grid there is no
   field: a charged particle born outside flies straight to the entry face.
-- **Long exact-helix steps in exterior air**, a named approximation, taken only when the
-  engine holds a map (:mod:`pyradmc.geometry.exterior`) under a uniform field, in a voxel
-  whose safety distance is non-zero. The substep is then limited by the energy fraction
-  and that safety alone: no gyration cap, no voxel face. Path bounds displacement, so
-  the whole step stays in the exterior. Each chord is the exact helix
-  (:func:`~pyradmc.physics.lorentz.helix_chord`) at the chord's mid-energy radius. Hinge,
-  loss, Moller, brems and the ledger are the ordinary loop's. What is approximate, and
-  only here: **the deposit of a long step is not spatially resolved** (it files at the two
-  chord midpoints, which lie in exterior voxels and never in the body, or along the
-  straight chords under ``deposit_resolution_cm``, never along the arc), and **the whole
-  step is charged at its start voxel's density and material**, though it may cross
-  exterior voxels of other densities below the region's bound. Rotation draws no random
-  number, and the hinge decouples from the field exactly as above, over a larger angle.
+- **Long exact-helix steps in exterior air**, a named approximation and the default
+  under a uniform field (:mod:`pyradmc.geometry.exterior`; the engines warn once), taken
+  in a voxel whose safety distance is non-zero; ``exterior_air=None`` on the engine
+  turns it off. The substep is then limited by the energy fraction and that safety
+  alone: no gyration cap, no voxel face. Path bounds displacement, so the whole step
+  stays in the exterior. Each chord is the exact helix
+  (:func:`~pyradmc.physics.lorentz.helix_chord`) at the chord's mid-energy radius.
+  Hinge, loss, Moller, brems and the ledger are the ordinary loop's. What is
+  approximate, and only here: **the deposit of a long step is not spatially resolved**
+  (it files at the two chord midpoints, which lie in exterior voxels and never in the
+  body, or along the straight chords under ``deposit_resolution_cm``, never along the
+  arc), and **the whole step is charged at its start voxel's density and material**,
+  though it may cross exterior voxels of other densities below the region's bound.
+  Rotation draws no random number, and the hinge decouples from the field exactly as
+  above, over a larger angle.
 
 Substeps are limited four ways: a fraction of the CSDA range (energy-loss
 accuracy), a mean-square hinge-angle ceiling (multiple-scattering accuracy — the
@@ -357,7 +359,7 @@ def electron_steps(
     ``exterior_safety`` is the per-voxel safety of an
     :class:`~pyradmc.geometry.exterior.ExteriorAirMap`, or ``None`` for the current
     stepping; the engines pass it only under a uniform non-zero field
-    (:func:`~pyradmc.geometry.exterior.resolve_exterior_safety`). Where it is positive the
+    (:func:`~pyradmc.geometry.exterior.resolve_exterior_air`). Where it is positive the
     substep is the long exact-helix step of the module docstring.
     """
     if msc_model not in ("gaussian", "gs"):

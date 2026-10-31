@@ -28,7 +28,7 @@ import pytest
 from pyradmc.backends.ref.engine import ReferenceEngine
 from pyradmc.data.analytic import AnalyticCrossSections
 from pyradmc.data.materials import WATER
-from pyradmc.geometry.exterior import ExteriorAirMap, exterior_region
+from pyradmc.geometry.exterior import ExteriorAirMap, exterior_region, resolve_exterior_air
 from pyradmc.geometry.field import MagneticField
 from pyradmc.geometry.grid import VoxelGrid
 from pyradmc.geometry.source import BeamletGridSource, ParallelBeamSource
@@ -98,9 +98,26 @@ def _nonuniform(grid: VoxelGrid) -> MagneticField:
     return MagneticField.on_grid(grid, values)
 
 
+def _expecting_caveat(build, grid: VoxelGrid, field, air):
+    """Build an engine; one that will use the path must warn, one that will not, must not."""
+    if resolve_exterior_air(air, grid, field) is None:
+        return build()
+    with pytest.warns(UserWarning, match="exterior-air"):
+        return build()
+
+
 def _ref(grid: VoxelGrid, field: MagneticField | None, air: ExteriorAirMap | None):
-    return ReferenceEngine(
-        grid=grid, cross_sections=_xs(grid), rng=HostRNG(), magnetic_field=field, exterior_air=air
+    return _expecting_caveat(
+        lambda: ReferenceEngine(
+            grid=grid,
+            cross_sections=_xs(grid),
+            rng=HostRNG(),
+            magnetic_field=field,
+            exterior_air=air,
+        ),
+        grid,
+        field,
+        air,
     )
 
 
@@ -331,8 +348,17 @@ def device(request) -> str:
 def _warp(device: str, grid: VoxelGrid, field: MagneticField | None, air: ExteriorAirMap | None):
     from pyradmc.backends.warp.engine import WarpEngine
 
-    return WarpEngine(
-        grid=grid, cross_sections=_xs(grid), device=device, magnetic_field=field, exterior_air=air
+    return _expecting_caveat(
+        lambda: WarpEngine(
+            grid=grid,
+            cross_sections=_xs(grid),
+            device=device,
+            magnetic_field=field,
+            exterior_air=air,
+        ),
+        grid,
+        field,
+        air,
     )
 
 
@@ -439,13 +465,18 @@ class TestWarp:
             n_histories=4000, n_batches=2, seed=SEED, primary_kind="electron"
         )
         base = _warp(device, grid, TRANSVERSE, air).run(_air_electrons(), **kwargs)
-        chunked = WarpEngine(
-            grid=grid,
-            cross_sections=_xs(grid),
-            device=device,
-            magnetic_field=TRANSVERSE,
-            exterior_air=air,
-            chunk_size=512,
+        chunked = _expecting_caveat(
+            lambda: WarpEngine(
+                grid=grid,
+                cross_sections=_xs(grid),
+                device=device,
+                magnetic_field=TRANSVERSE,
+                exterior_air=air,
+                chunk_size=512,
+            ),
+            grid,
+            TRANSVERSE,
+            air,
         ).run(_air_electrons(), **kwargs)
         np.testing.assert_array_equal(base.dose, chunked.dose)
 

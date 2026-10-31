@@ -15,7 +15,6 @@ import pytest
 
 from pyradmc.data.analytic import AnalyticCrossSections
 from pyradmc.data.materials import WATER
-from pyradmc.geometry.exterior import ExteriorAirMap
 from pyradmc.geometry.field import MagneticField
 from pyradmc.geometry.grid import VoxelGrid
 from pyradmc.geometry.source import ParallelBeamSource
@@ -50,13 +49,14 @@ def test_body_in_air(benchmark, path: str, b_tesla: float) -> None:
 
     grid = _grid()
     xs = AnalyticCrossSections(geometry_densities=grid.max_density_by_material())
-    engine = WarpEngine(
-        grid=grid,
-        cross_sections=xs,
-        device="cuda:0",
-        magnetic_field=MagneticField.uniform((b_tesla, 0.0, 0.0)),
-        exterior_air=ExteriorAirMap.from_grid(grid) if path == "exterior" else None,
-    )
+    field = MagneticField.uniform((b_tesla, 0.0, 0.0))
+    if path == "exterior":
+        with pytest.warns(UserWarning, match="exterior-air"):
+            engine = WarpEngine(grid=grid, cross_sections=xs, device="cuda:0", magnetic_field=field)
+    else:
+        engine = WarpEngine(
+            grid=grid, cross_sections=xs, device="cuda:0", magnetic_field=field, exterior_air=None
+        )
     cx, cy = grid.shape[0] * grid.spacing[0] / 2.0, grid.shape[1] * grid.spacing[1] / 2.0
     beam = ParallelBeamSource(
         energy=6.0, z=-1.0, x_range=(cx - 5.0, cx + 5.0), y_range=(cy - 5.0, cy + 5.0)

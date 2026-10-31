@@ -17,11 +17,12 @@ import pytest
 from pyradmc.data.materials import WATER
 from pyradmc.geometry.exterior import (
     EXTERIOR_AIR_DENSITY_MAX,
+    EXTERIOR_AUTO,
     EXTERIOR_MIN_SAFETY_CM,
     SAFETY_GUARD_CM,
     ExteriorAirMap,
     exterior_region,
-    resolve_exterior_safety,
+    resolve_exterior_air,
     safety_distance,
 )
 from pyradmc.geometry.field import MagneticField
@@ -229,25 +230,40 @@ class TestMap:
 
 
 class TestResolve:
-    def _air(self) -> ExteriorAirMap:
-        return ExteriorAirMap.from_grid(_grid(_body_with_cavities()))
+    def _grid(self) -> VoxelGrid:
+        return _grid(_body_with_cavities())
 
-    def test_no_map_or_no_field_is_inactive(self) -> None:
+    def test_none_or_no_field_is_inactive(self) -> None:
         field = MagneticField.uniform((1.5, 0.0, 0.0))
-        assert resolve_exterior_safety(None, field) is None
-        assert resolve_exterior_safety(self._air(), None) is None
+        grid = self._grid()
+        assert resolve_exterior_air(None, grid, field) is None
+        assert resolve_exterior_air(EXTERIOR_AUTO, grid, None) is None
+        assert resolve_exterior_air(ExteriorAirMap.from_grid(grid), grid, None) is None
 
     def test_a_zero_field_is_inactive(self) -> None:
-        assert resolve_exterior_safety(self._air(), MagneticField.uniform((0.0, 0.0, 0.0))) is None
+        zero = MagneticField.uniform((0.0, 0.0, 0.0))
+        assert resolve_exterior_air(EXTERIOR_AUTO, self._grid(), zero) is None
 
     def test_a_nonuniform_map_is_inactive(self) -> None:
-        grid = _grid(_body_with_cavities())
+        grid = self._grid()
         values = np.zeros((*grid.shape, 3))
         values[..., 0] = 1.5
         field = MagneticField.on_grid(grid, values)
-        assert resolve_exterior_safety(self._air(), field) is None
+        assert resolve_exterior_air(EXTERIOR_AUTO, grid, field) is None
 
-    def test_a_uniform_field_is_active(self) -> None:
-        air = self._air()
-        safety = resolve_exterior_safety(air, MagneticField.uniform((1.5, 0.0, 0.0)))
-        assert safety is air.safety
+    def test_auto_derives_the_map_under_a_uniform_field(self) -> None:
+        grid = self._grid()
+        field = MagneticField.uniform((1.5, 0.0, 0.0))
+        air = resolve_exterior_air(EXTERIOR_AUTO, grid, field)
+        assert air is not None
+        assert air.digest == ExteriorAirMap.from_grid(grid).digest
+
+    def test_a_given_map_is_used_as_given(self) -> None:
+        grid = self._grid()
+        air = ExteriorAirMap.from_grid(grid, min_safety_cm=0.5)
+        assert resolve_exterior_air(air, grid, MagneticField.uniform((1.5, 0.0, 0.0))) is air
+
+    def test_a_map_with_no_safety_anywhere_is_inactive(self) -> None:
+        grid = VoxelGrid.uniform_water(shape=(6, 6, 6), spacing=(0.5, 0.5, 0.5))
+        field = MagneticField.uniform((1.5, 0.0, 0.0))
+        assert resolve_exterior_air(EXTERIOR_AUTO, grid, field) is None

@@ -49,6 +49,13 @@ Geant4's step limits).
    bookkeeping error, and it is the number to re-check if the shipped fraction is ever
    changed (AGENTS.md section 8).
 
+**Which path.** These cavities are sealed in water, so they are not exterior air and the
+shipped default leaves them on the current stepping with no opt-out needed; the gates above
+are gates of that stepping, and it is pinned explicitly. Gates 1, 2 and 3 are also run, with the
+same numbers, on the long-step path by declaring the 2 cm air gap exterior. The 0.2 cm gap
+cannot take long steps at all (no voxel has the minimum safety), and the 0.1 and 0.01
+densities are not exterior air.
+
 **Test instrument: ECUT 0.05 MeV.** Fano holds for any cutoff, but the dose in a gas
 voxel is carried to 40 % by 0.2 MeV terminations and so is nearly all of its variance;
 at 0.05 MeV the gap sigma is 3.5 times smaller for the same histories, which is what
@@ -66,6 +73,7 @@ import pytest
 
 from pyradmc.backends.results import TransportResult
 from pyradmc.data.analytic import AnalyticCrossSections
+from pyradmc.geometry.exterior import EXTERIOR_AIR_DENSITY_MAX, ExteriorAirMap
 from pyradmc.geometry.field import MagneticField
 from tests.conftest import SEED
 from tests.fano_fixtures import FanoElectronSource, fano_phantom
@@ -105,13 +113,32 @@ def _gap_to_wall(
     field: MagneticField | None,
     step_energy_fraction: float | None = None,
     n_histories: int | None = None,
+    long_steps: bool = False,
 ) -> tuple[float, float, float]:
-    """(gap/wall ratio, its sigma, upstream/downstream wall ratio) on CUDA."""
+    """(gap/wall ratio, its sigma, upstream/downstream wall ratio) on CUDA.
+
+    Current stepping unless ``long_steps``: then the gap is declared exterior air, the only way
+    to put these sealed cavities through the long-step path (see the module docstring).
+    """
     from pyradmc.backends.warp.engine import WarpEngine
 
     grid, core, upstream, gap, downstream = fano_phantom(gap_cm, gap_density)
     xs = AnalyticCrossSections(geometry_densities=grid.max_density_by_material())
-    engine = WarpEngine(grid=grid, cross_sections=xs, device=_device(), magnetic_field=field)
+    if long_steps and field is not None:
+        air = ExteriorAirMap.from_region(grid, np.asarray(grid.density) < EXTERIOR_AIR_DENSITY_MAX)
+        assert np.any(air.safety > 0.0), "this gap takes no long steps; the case tests nothing"
+        with pytest.warns(UserWarning, match="exterior-air"):
+            engine = WarpEngine(
+                grid=grid,
+                cross_sections=xs,
+                device=_device(),
+                magnetic_field=field,
+                exterior_air=air,
+            )
+    else:
+        engine = WarpEngine(
+            grid=grid, cross_sections=xs, device=_device(), magnetic_field=field, exterior_air=None
+        )
     if n_histories is None:
         n_histories = 40_000_000 if gap_density >= 0.01 else 60_000_000
     result = engine.run(
@@ -151,6 +178,26 @@ def test_dose_per_mass_is_uniform_across_the_gap(
     gap_cm: float, gap_density: float, fields_tesla: tuple[float, ...], energy: float
 ) -> None:
     """Gates 1 and 2: the field moves the ratio by < 1 %; field-free within its gate."""
+    _gates_1_and_2(gap_cm, gap_density, fields_tesla, energy, long_steps=False)
+
+
+@pytest.mark.parametrize("fields_tesla", [(0.0, 0.35), (0.0, 1.5)], ids=["0.35T", "1.5T"])
+@pytest.mark.parametrize("energy", [0.5, 1.0])
+def test_dose_per_mass_is_uniform_through_long_steps(
+    fields_tesla: tuple[float, ...], energy: float
+) -> None:
+    """Gates 1 and 2, same numbers, the 2 cm air gap on the long-step path."""
+    _gates_1_and_2(2.0, AIR_LIKE, fields_tesla, energy, long_steps=True)
+
+
+def _gates_1_and_2(
+    gap_cm: float,
+    gap_density: float,
+    fields_tesla: tuple[float, ...],
+    energy: float,
+    *,
+    long_steps: bool,
+) -> None:
     _needs_cuda()
     gate_0 = FIELD_FREE_GATE[gap_density]
     gate_b = gate_0 if gap_cm == THIN_GAP_CM and gap_density < 0.1 else FIELD_GATE
@@ -158,7 +205,7 @@ def test_dose_per_mass_is_uniform_across_the_gap(
     ratio_0 = None
     for b in fields_tesla:
         fld = None if b == 0.0 else MagneticField.uniform((b, 0.0, 0.0))
-        ratio, sigma, walls = _gap_to_wall(gap_cm, gap_density, energy, fld)
+        ratio, sigma, walls = _gap_to_wall(gap_cm, gap_density, energy, fld, long_steps=long_steps)
         report.append(f"B={b} T: gap/wall={ratio:.4f} +- {sigma:.4f}, up/down walls={walls:.4f}")
         where = f"{report[-1]} (gap {gap_cm} cm, rho {gap_density}, {energy} MeV)"
         assert abs(walls - 1.0) < FIELD_GATE, f"walls differ: {where}"
@@ -178,17 +225,28 @@ def test_dose_per_mass_is_uniform_across_the_gap(
 def test_thin_air_gap_converges_with_the_substep(energy: float) -> None:
     """Gate 3: at a substep fraction of 0.02 the 0.2 cm air gap is within 1.5 % of Fano,
     with and without the field, and the field moves it by less than 1.5 %."""
+    _gate_3(THIN_GAP_CM, energy, long_steps=False)
+
+
+@pytest.mark.parametrize("energy", [0.5, 1.0])
+def test_air_gap_converges_through_long_steps(energy: float) -> None:
+    """Gate 3, same numbers, on the long-step path: a 2 cm gap, since 0.2 cm has no safety."""
+    _gate_3(2.0, energy, long_steps=True)
+
+
+def _gate_3(gap_cm: float, energy: float, *, long_steps: bool) -> None:
     _needs_cuda()
     ratios = {}
     for b in (0.0, 1.5):
         fld = None if b == 0.0 else MagneticField.uniform((b, 0.0, 0.0))
         ratio, sigma, walls = _gap_to_wall(
-            THIN_GAP_CM,
+            gap_cm,
             AIR_LIKE,
             energy,
             fld,
             step_energy_fraction=CONVERGED_STEP_FRACTION,
             n_histories=CONVERGED_HISTORIES,
+            long_steps=long_steps,
         )
         where = (
             f"B={b} T: gap/wall={ratio:.4f} +- {sigma:.4f}, "

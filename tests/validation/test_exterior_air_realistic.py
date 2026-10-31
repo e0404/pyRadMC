@@ -11,15 +11,16 @@ quantities: body blocks, blocks of the outer shell (two voxels next to the air, 
 have to curve back), mean shell dose and mean body dose.
 
 **Power is part of the gate.** The same oracle must reject a safety map inflated four times.
-Measured 2026-10-30 at these statistics, mutant against current stepping: shell -0.46 to
--6.7 %, shell-block chi-squared p below 1e-70, against -0.06 to +0.01 % and p above 0.7 for the
-true map. A wrong *chord* is **not** visible here (shell at most +0.07 %): body dose does not
-resolve what happens in the air far from it. The chord is pinned by the analytic orbit in
+Measured 2026-10-31 at the 0.25 cm minimum and these statistics, mutant against current
+stepping: shell -1.13 to -7.1 %, block chi-squared p at most 1e-210, against -0.06 to +0.02 % and
+p above 0.1 for the true map. The same statistic misses a 1.5x map except at 0.35 T. A wrong
+*chord* is **not** visible here (shell at most +0.11 +- 0.07 %): body dose does not resolve what
+happens in the air far from it. The chord is pinned by the analytic orbit in
 ``tests/physics/test_exterior_helix.py`` on the reference loop and through the compiled form on
 Warp, and that is where its protection is, not here.
 
-The shell's own z-squared sums read somewhat below expectation (0.76 to 0.93), which on sparse
-data is a warning rather than a pass; the mutant's 2.8 to 475 on the same statistic is what
+The shell's own z-squared sums read somewhat below expectation (0.79 to 0.93), which on sparse
+data is a warning rather than a pass; the mutant's 12.7 to 474 on the same statistic is what
 shows the oracle is not blind.
 """
 
@@ -52,7 +53,7 @@ N_SEEDS = 8
 N_HISTORIES = 40_000_000
 BLOCK = 4  # voxels of 3 mm
 MASK_FRACTION = 0.05
-SHELL_GATE = 0.0025  # measured at most 0.0006 +- 0.0005; the 4x mutant at least 0.0046
+SHELL_GATE = 0.0025  # measured at most 0.0006 +- 0.0005; the 4x mutant at least 0.0113
 BODY_GATE = 0.001  # measured at most 0.0001 +- 0.0002
 INFLATION = 4.0
 TWIN_SEEDS = 6
@@ -107,13 +108,21 @@ def _arm(world, b, geometry: str, air: ExteriorAirMap | None, seed_offset: int) 
 
     grid, xs = world
     masks = body_masks(grid)
-    engine = WarpEngine(
-        grid=grid,
-        cross_sections=xs,
-        device="cuda:0",
-        magnetic_field=MagneticField.uniform(b),
-        exterior_air=air,
-    )
+
+    def build() -> WarpEngine:
+        return WarpEngine(
+            grid=grid,
+            cross_sections=xs,
+            device="cuda:0",
+            magnetic_field=MagneticField.uniform(b),
+            exterior_air=air,
+        )
+
+    if air is None:
+        engine = build()
+    else:
+        with pytest.warns(UserWarning, match="exterior-air"):
+            engine = build()
     source = _source(grid, geometry)
     blocks, shells, shell_mean, body_mean = [], [], [], []
     for k in range(N_SEEDS):
@@ -201,12 +210,14 @@ def test_warp_matches_the_reference_on_the_body(world, b) -> None:
     def profile(result) -> np.ndarray:
         return np.sum(np.asarray(result.dose) * density * volume, axis=(0, 2))
 
-    ref_engine = ReferenceEngine(
-        grid=grid, cross_sections=xs, rng=HostRNG(), magnetic_field=field, exterior_air=air
-    )
-    warp_engine = WarpEngine(
-        grid=grid, cross_sections=xs, device="cuda:0", magnetic_field=field, exterior_air=air
-    )
+    with pytest.warns(UserWarning, match="exterior-air"):
+        ref_engine = ReferenceEngine(
+            grid=grid, cross_sections=xs, rng=HostRNG(), magnetic_field=field, exterior_air=air
+        )
+    with pytest.warns(UserWarning, match="exterior-air"):
+        warp_engine = WarpEngine(
+            grid=grid, cross_sections=xs, device="cuda:0", magnetic_field=field, exterior_air=air
+        )
     kwargs: dict[str, Any] = {"n_histories": TWIN_HISTORIES, "n_batches": 1}
     ref = np.stack(
         [profile(ref_engine.run(source, seed=SEED + k, **kwargs)) for k in range(TWIN_SEEDS)]

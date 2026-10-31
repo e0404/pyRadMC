@@ -56,7 +56,13 @@ from pyradmc.backends.warp import kernels
 from pyradmc.backends.warp.kernels import ENERGY_QUANTUM_MEV, GridInfo, Queue, Tables
 from pyradmc.data.interface import CrossSectionSource
 from pyradmc.geometry.collimation import TransmissionMaskSource
-from pyradmc.geometry.exterior import ExteriorAirMap, resolve_exterior_safety
+from pyradmc.geometry.exterior import (
+    EXTERIOR_AUTO,
+    ExteriorAirChoice,
+    ExteriorAirMap,
+    resolve_exterior_air,
+    warn_exterior_air,
+)
 from pyradmc.geometry.field import FIELD_NONE, MagneticField
 from pyradmc.geometry.grid import VoxelGrid
 from pyradmc.geometry.segments import SegmentedFanSource, SegmentedPlanSource
@@ -748,10 +754,11 @@ class WarpEngine:
         grid (checked at construction).
     exterior_air
         Where charged particles may take long exact-helix steps under a uniform field
-        (:mod:`pyradmc.geometry.exterior`); ``None`` is the current stepping. World data
-        derived from ``grid``, refused if derived from another, uploaded with the voxel
-        maps, and inert without a uniform non-zero field. Not the default: whether it
-        becomes one is a maintainer decision (AGENTS.md section 8).
+        (:mod:`pyradmc.geometry.exterior`). The default derives the map from ``grid`` when a
+        run can use it; ``None`` is the explicit way to the current stepping; a map is used
+        as given, and refused if derived from another grid. Uploaded with the voxel maps;
+        inert without a uniform non-zero field or without usable exterior air. An engine
+        that uses it warns once, at construction: a named approximation (AGENTS.md section 8).
     drain_rounds
         Advanced; leave at the default unless profiling says otherwise. How the
         photon/electron queues are drained between chunks — bit-inert
@@ -774,7 +781,8 @@ class WarpEngine:
     queue_factor: int = 16
     magnetic_field: MagneticField | None = None
     drain_rounds: int | None = None
-    exterior_air: ExteriorAirMap | None = None
+    exterior_air: ExteriorAirChoice = EXTERIOR_AUTO
+    _exterior: ExteriorAirMap | None = field(default=None, init=False, repr=False, compare=False)
     _auto_chunk: dict = field(default_factory=dict, init=False, repr=False, compare=False)
     _drain: _DrainState = field(default_factory=_DrainState, init=False, repr=False, compare=False)
     # Host-table cache: build_tables flattens the source by looping the Python query
@@ -798,7 +806,9 @@ class WarpEngine:
 
     def __post_init__(self) -> None:
         """Refuse a negative drain block, a field map missing the grid, a foreign map."""
-        if self.exterior_air is not None and not self.exterior_air.matches(self.grid):
+        if isinstance(self.exterior_air, ExteriorAirMap) and not self.exterior_air.matches(
+            self.grid
+        ):
             raise ValueError("the exterior-air map was derived from another grid")
         if self.drain_rounds is not None and self.drain_rounds < 0:
             raise ValueError(f"drain_rounds must be None or >= 0, got {self.drain_rounds}")
@@ -809,6 +819,11 @@ class WarpEngine:
                 f"{self.magnetic_field.upper_corner} cm, grid {self.grid.origin} to "
                 f"{self.grid.upper_corner} cm"
             )
+        resolved = resolve_exterior_air(self.exterior_air, self.grid, self.magnetic_field)
+        object.__setattr__(self, "_exterior", resolved)
+        if resolved is not None:
+            # __post_init__ <- generated __init__ <- the caller who built this engine.
+            warn_exterior_air(stacklevel=3)
 
     def _provenance(
         self,
@@ -840,12 +855,7 @@ class WarpEngine:
             magnetic_field=(
                 None if self.magnetic_field is None else self.magnetic_field.provenance
             ),
-            exterior_air=(
-                None
-                if self.exterior_air is None
-                or resolve_exterior_safety(self.exterior_air, self.magnetic_field) is None
-                else self.exterior_air.provenance
-            ),
+            exterior_air=None if self._exterior is None else self._exterior.provenance,
         )
 
     def _chunk_histories(self, device: str | None = None) -> int:
@@ -4305,12 +4315,13 @@ class WarpEngine:
             gi.b_values = wp.array(b.values.astype(np.float32), dtype=wp.vec3, device=device)
             # The long-step map rides along for the same reason. air_on == 0 keeps the
             # kernel on the current stepping, and it is zero unless the field is uniform.
-            safety = resolve_exterior_safety(self.exterior_air, b)
-            if safety is None:
+            if self._exterior is None:
                 _fill_no_exterior(gi, device)
             else:
                 gi.air_on = 1
-                gi.air_safety = wp.array(safety.astype(np.float32), dtype=float, device=device)
+                gi.air_safety = wp.array(
+                    self._exterior.safety.astype(np.float32), dtype=float, device=device
+                )
         density = wp.array(self.grid.density.astype(np.float32), dtype=float, device=device)
         # Material indices travel as uint8: 4x narrower than int32 on the transport
         # kernels' random per-step load, and lossless for any registry the tables can

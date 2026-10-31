@@ -21,19 +21,26 @@ value would be below ``min_safety_cm`` the map stores zero, which is the kernels
 to run the current stepping unchanged: behaviour at the body surface and at the grid
 boundary is exactly that of a run without a map.
 
-**This is data, not a flag (AGENTS.md 2.10).** The engines take an
-:class:`ExteriorAirMap` next to the grid and the field; a run without one is the current
-stepping, and a map is inert unless the field is uniform and non-zero
-(:func:`resolve_exterior_safety`). Until the maintainer rules on the default, the map's
-absence is what lets the two paths be compared on one grid. ``safety`` is a plain array
-on purpose: a test can hand in an inflated map as a mutant without patching a kernel.
+**The default, by maintainer decision (2026-10-31).** Under a uniform non-zero field an
+engine given no explicit choice derives the map from its grid (:data:`EXTERIOR_AUTO`) and
+warns once at construction (:data:`EXTERIOR_AIR_CAVEAT`), with the Fano shift the caveat
+states still unexplained; the maintainer weighed that against no relevant dose change in the
+body and the cost of air. ``exterior_air=None`` is the explicit way to current stepping and
+what makes the two paths comparable on one grid. The map stays data rather than a physics
+flag (AGENTS.md 2.10): it is derived from the grid, a caller may hand in another, and
+``safety`` is a plain array so a test can pass an inflated map as a mutant without patching a
+kernel. It is inert unless the field is uniform and non-zero and some voxel has safety
+(:func:`resolve_exterior_air`); then no map is built, nothing warns and the bytes are those of
+current stepping.
 
 Host-side only: NumPy and SciPy, one source for both engines. The kernels read the array.
 """
 
 from __future__ import annotations
 
+import enum
 import hashlib
+import warnings
 from dataclasses import dataclass
 
 import numpy as np
@@ -44,13 +51,17 @@ from pyradmc.geometry.field import FIELD_UNIFORM, MagneticField
 from pyradmc.geometry.grid import VoxelGrid
 
 __all__ = [
+    "EXTERIOR_AIR_CAVEAT",
     "EXTERIOR_AIR_DENSITY_MAX",
+    "EXTERIOR_AUTO",
     "EXTERIOR_MIN_SAFETY_CM",
     "SAFETY_GUARD_CM",
+    "ExteriorAirChoice",
     "ExteriorAirMap",
     "exterior_region",
-    "resolve_exterior_safety",
+    "resolve_exterior_air",
     "safety_distance",
+    "warn_exterior_air",
 ]
 
 EXTERIOR_AIR_DENSITY_MAX: float = 0.01
@@ -65,15 +76,16 @@ the start voxel's density and material (:func:`pyradmc.transport.electron.electr
 so the bound also limits how far that can be from the truth. Changing it needs the gates of
 AGENTS.md section 8."""
 
-EXTERIOR_MIN_SAFETY_CM: float = 0.5
+EXTERIOR_MIN_SAFETY_CM: float = 0.25
 """Smallest safety at which a long step is taken, in cm. Accuracy-defining.
 
 Below it the voxel stores zero and the current stepping runs unchanged, which is what
 keeps the electron return at the body surface on the validated scheme: on a 3 mm grid the
-two voxel layers next to the body (and next to the grid boundary) stay on the current
-stepping. A smaller value buys more of the near-surface air, where the returning electrons
-are, and moves the new path closer to the surface; that is a maintainer decision with the
-gates of AGENTS.md section 8, not a tuning knob."""
+one voxel layer touching the body (and the one at the grid boundary) stays on the current
+stepping. Lowered from 0.5 cm by maintainer decision on 2026-10-31 for performance (wall x0.30
+to x0.48 against x0.43 to x0.65 at 1.5 T and 3 cm of margin), after the Fano and realistic
+comparisons and the mutants were rerun here. Changing it needs the gates of AGENTS.md section
+8; it is not a tuning knob."""
 
 SAFETY_GUARD_CM: float = 1.0e-3
 """Subtracted from every stored safety, in cm: the float32 margin.
@@ -249,19 +261,53 @@ class ExteriorAirMap:
         )
 
 
-def resolve_exterior_safety(
-    air: ExteriorAirMap | None, field: MagneticField | None
-) -> npt.NDArray[np.float64] | None:
-    """Return the safety array a run actually uses, or ``None`` for current stepping.
+class _Auto(enum.Enum):
+    """Type of :data:`EXTERIOR_AUTO`: an enum so it is a singleton mypy can narrow on."""
 
-    Both engines ask here, so they cannot disagree. A map is inert with no field or a zero
-    field, where there is no gyration cap to lift and the field-free path must stay byte
-    identical, and with a non-uniform map, where a long step would skip the field's
-    variation (no field-gradient limiter exists; see
-    :class:`~pyradmc.geometry.field.MagneticField`).
+    AUTO = "auto"
+
+
+EXTERIOR_AUTO = _Auto.AUTO
+"""The engines' default for ``exterior_air``: derive the map from the grid when it can run.
+
+Distinct from ``None``, which is the explicit way to the current stepping."""
+
+ExteriorAirChoice = ExteriorAirMap | None | _Auto
+"""What an engine accepts for ``exterior_air``."""
+
+EXTERIOR_AIR_CAVEAT: str = (
+    "exterior-air stepping is on, a named approximation (AGENTS.md section 8): long exact-helix "
+    "steps replace the gyration cap in air connected to the grid boundary. On air-density Fano "
+    "cavities it shifts the gap-to-wall ratio against current stepping by up to +0.75 % in the "
+    "worst case tested (0.5 MeV, 0.35 T), cause not established. Body dose agreed with current "
+    "stepping within noise on a tabulated 6 MV body in air (outer shell within 0.06 +- 0.05 %, "
+    "whole body within 0.003 +- 0.018 %). Dose in exterior air voxels is not spatially "
+    "resolved. Pass exterior_air=None for current stepping."
+)
+"""The result caveat of :func:`warn_exterior_air`; every number in it was measured."""
+
+
+def resolve_exterior_air(
+    choice: ExteriorAirChoice, grid: VoxelGrid, field: MagneticField | None
+) -> ExteriorAirMap | None:
+    """Return the map a run on ``grid`` in ``field`` actually uses, or ``None``.
+
+    Both engines ask here, so they cannot disagree. ``None`` is current stepping. The path
+    is inert with no field or a zero field, where there is no gyration cap to lift and the
+    field-free path must stay byte identical; with a non-uniform map, where a long step
+    would skip the field's variation (no field-gradient limiter exists; see
+    :class:`~pyradmc.geometry.field.MagneticField`); and where no voxel has any safety,
+    where no step could differ. In all of these no map is built and nothing is claimed.
     """
-    if air is None or field is None:
+    if choice is None or field is None:
         return None
     if field.mode != FIELD_UNIFORM or field.max_magnitude <= 0.0:
         return None
-    return air.safety
+    air = ExteriorAirMap.from_grid(grid) if choice is EXTERIOR_AUTO else choice
+    assert isinstance(air, ExteriorAirMap)
+    return air if np.any(air.safety > 0.0) else None
+
+
+def warn_exterior_air(stacklevel: int = 2) -> None:
+    """Issue the result caveat of the exterior-air path; engines call this once each."""
+    warnings.warn(EXTERIOR_AIR_CAVEAT, stacklevel=stacklevel + 1)

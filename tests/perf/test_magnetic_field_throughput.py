@@ -62,7 +62,11 @@ def _engine(grid: VoxelGrid, field: MagneticField | None):
     from pyradmc.backends.warp.engine import WarpEngine
 
     xs = AnalyticCrossSections(geometry_densities=grid.max_density_by_material())
-    return WarpEngine(grid=grid, cross_sections=xs, device="cuda:0", magnetic_field=field)
+    # Current stepping on purpose: these baselines record the field's own cost, which is
+    # the number the exterior-air path is measured against (test_exterior_air_throughput).
+    return WarpEngine(
+        grid=grid, cross_sections=xs, device="cuda:0", magnetic_field=field, exterior_air=None
+    )
 
 
 def _bench(benchmark, grid: VoxelGrid, field: MagneticField | None, source) -> float:

@@ -25,14 +25,15 @@ same kernel path. One case bores a single-voxel chimney to the boundary instead,
    on the same statistics. That proves the path is taken on Warp and that this gate sees a
    safety defect; a gate that cannot fail is not a gate. Measured with the small-step
    chord put into the long steps by a scratch copy of the package, which no test can do to a
-   compiled kernel: cavity -7 to -18 %, long-step voxels -10 to -47 %, so this gate also
+   compiled kernel: cavity -7.5 to -24 %, long-step voxels -9 to -44 %, so this gate also
    guards the chord on Warp, which the realistic comparison measurably does not.
 
 **Field against field-free is reported and deliberately not gated here.** The base file's
-gate 1 asks that of a 2 cm gap. On this 6 cm cavity the *current stepping* itself moves the
-ratio by -0.8 % at 1 MeV and -1.3 to -1.4 % at 0.5 MeV (see docs/decisions.md), so the bar
-cannot separate the two paths: the map moves it by -0.8 to -1.0 % and -1.4 %. That residual
-of the current stepping is recorded as an open finding, not explained away here.
+gate 1 asks that of a 2 cm gap, and passes on both paths there. On this 6 cm cavity the
+*current stepping* itself moves the ratio by -0.8 % at 1 MeV and -1.3 to -1.4 % at 0.5 MeV (see
+docs/decisions.md), so the bar cannot separate the two paths: the map moves it by -0.6 to -0.9 %
+and -1.3 %. That residual of the current stepping is recorded as an open finding, not explained
+away here.
 
 ECUT 0.05 MeV is the base file's test instrument, for the same variance reason.
 """
@@ -111,9 +112,19 @@ def _ratios(
     from pyradmc.backends.warp.engine import WarpEngine
 
     xs = AnalyticCrossSections(geometry_densities=grid.max_density_by_material())
-    engine = WarpEngine(
-        grid=grid, cross_sections=xs, device="cuda:0", magnetic_field=field, exterior_air=air
-    )
+    if field is None or air is None:
+        engine = WarpEngine(
+            grid=grid, cross_sections=xs, device="cuda:0", magnetic_field=field, exterior_air=None
+        )
+    else:
+        with pytest.warns(UserWarning, match="exterior-air"):
+            engine = WarpEngine(
+                grid=grid,
+                cross_sections=xs,
+                device="cuda:0",
+                magnetic_field=field,
+                exterior_air=air,
+            )
     result = engine.run(
         FanoElectronSource(grid, energy),
         n_histories=N_HISTORIES,

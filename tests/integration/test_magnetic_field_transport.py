@@ -23,6 +23,7 @@ import pytest
 
 from pyradmc.backends.ref.engine import ReferenceEngine
 from pyradmc.data.analytic import AnalyticCrossSections
+from pyradmc.geometry.exterior import EXTERIOR_AUTO
 from pyradmc.geometry.field import MagneticField
 from pyradmc.geometry.grid import VoxelGrid
 from pyradmc.geometry.source import BeamletGridSource, ParallelBeamSource
@@ -413,13 +414,30 @@ def _assert_electron_return_effect(off, on, *, lateral: bool) -> None:
     assert abs(asymmetry_off - 1.0) < 0.15, f"field-free asymmetry {asymmetry_off:.3f}"
 
 
-def test_electron_return_effect_on_reference() -> None:
+# The gap reaches the grid boundary laterally, so it is exterior air: the shipped default
+# steps through it on the long-step path. The effect is held on both paths, unchanged.
+ERE_PATHS = [None, EXTERIOR_AUTO]
+ERE_IDS = ["current", "default"]
+
+
+def _expecting_caveat(air, build):
+    if air is None:
+        return build()
+    with pytest.warns(UserWarning, match="exterior-air"):
+        return build()
+
+
+@pytest.mark.parametrize("air", ERE_PATHS, ids=ERE_IDS)
+def test_electron_return_effect_on_reference(air) -> None:
     grid = _ere_grid()
     xs = _xs(grid)
     kwargs = dict(n_histories=12_000, n_batches=8, seed=SEED)
     off = ReferenceEngine(grid=grid, cross_sections=xs, rng=HostRNG()).run(_ere_beam(), **kwargs)
-    on = ReferenceEngine(
-        grid=grid, cross_sections=xs, rng=HostRNG(), magnetic_field=TRANSVERSE
+    on = _expecting_caveat(
+        air,
+        lambda: ReferenceEngine(
+            grid=grid, cross_sections=xs, rng=HostRNG(), magnetic_field=TRANSVERSE, exterior_air=air
+        ),
     ).run(_ere_beam(), **kwargs)
     assert on.energy_emitted == off.energy_emitted
     # The lateral pin needs Warp statistics: at 12k histories the field-free column
@@ -428,14 +446,18 @@ def test_electron_return_effect_on_reference() -> None:
 
 
 @pytest.mark.warp
-def test_electron_return_effect_on_warp(device: str) -> None:
+@pytest.mark.parametrize("air", ERE_PATHS, ids=ERE_IDS)
+def test_electron_return_effect_on_warp(device: str, air) -> None:
     from pyradmc.backends.warp.engine import WarpEngine
 
     grid = _ere_grid()
     xs = _xs(grid)
     kwargs = dict(n_histories=100_000, n_batches=8, seed=SEED)
     off = WarpEngine(grid=grid, cross_sections=xs, device=device).run(_ere_beam(), **kwargs)
-    on = WarpEngine(grid=grid, cross_sections=xs, device=device, magnetic_field=TRANSVERSE).run(
-        _ere_beam(), **kwargs
-    )
+    on = _expecting_caveat(
+        air,
+        lambda: WarpEngine(
+            grid=grid, cross_sections=xs, device=device, magnetic_field=TRANSVERSE, exterior_air=air
+        ),
+    ).run(_ere_beam(), **kwargs)
     _assert_electron_return_effect(off, on, lateral=True)
