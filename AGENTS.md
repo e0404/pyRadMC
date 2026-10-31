@@ -387,27 +387,35 @@ These outlive the work that produced them. Each is a live constraint, not histor
   passed a one-off before/after byte comparison on ref, Warp CPU and CUDA; the
   separate hinge-boundary and Warp loss fixes above change historical field-free
   results, so that comparison is not a byte-identity guarantee across releases.
-- **Exterior-air stepping is a named approximation, and it is not the default.** An
-  `ExteriorAirMap` (`geometry/exterior.py`) handed to an engine under a uniform non-zero
-  field replaces the gyration cap and the voxel face, in air voxels connected to the grid
-  boundary and at least `EXTERIOR_MIN_SAFETY_CM` (0.5 cm) from anything else, with exact
-  helix chords limited by a safety distance and the energy fraction. Everything else in
-  the substep (loss, hinge, Moller, brems, ledger) is the ordinary loop's; without a map,
-  in a zero or non-uniform field, or field-free, the engines are byte-identical to running
-  without one. Approximate, and only inside such a step: the deposit is not spatially
+- **Exterior-air stepping is a named approximation, and it is the default under a uniform
+  field, by maintainer decision with a Fano shift unexplained (2026-10-31).** Under a uniform
+  non-zero field an engine derives an `ExteriorAirMap` (`geometry/exterior.py`) from its grid
+  unless told otherwise, warns once at construction (`EXTERIOR_AIR_CAVEAT`), and replaces the
+  gyration cap and the voxel face, in air voxels connected to the grid boundary and at least
+  `EXTERIOR_MIN_SAFETY_CM` (0.25 cm) from anything else, with exact helix chords limited by a
+  safety distance and the energy fraction. `exterior_air=None` is the explicit way to current
+  stepping. Everything else in the substep (loss, hinge, Moller, brems, ledger) is the
+  ordinary loop's; field-free, in a zero or non-uniform field, or with no usable exterior air
+  no map is built, nothing warns and the engines are byte-identical to `exterior_air=None`.
+  The maintainer's reasoning: no relevant dose change in the relevant regions of the body, and
+  performance here is critical; the 0.25 cm minimum was lowered from 0.5 cm for the same
+  reason. Sealed cavities, which includes the base Fano and hinge phantoms, are not exterior,
+  so those gates run current stepping by default and must force the new path by declaring a
+  region. Approximate, and only inside such a step: the deposit is not spatially
   resolved (two chord midpoints, inside exterior voxels and never in the body; dose *in
   air voxels* is therefore not comparable voxel by voxel), the whole step is charged at
   its start voxel's density and material, and the radius of each chord is held at its
   mid-energy value. `EXTERIOR_AIR_DENSITY_MAX`, `EXTERIOR_MIN_SAFETY_CM`, the safety bound
-  and the chord are accuracy-defining (section 2.8). A change to any of them, or making the
-  map the default, needs: `tests/validation/test_fano_exterior_air.py`, the three gates of
+  and the chord are accuracy-defining (section 2.8). A change to any of them needs: `tests/validation/test_fano_exterior_air.py`, the three gates of
   `test_fano_magnetic.py` and the fast-tier air-gap check, on both loops;
   `tests/validation/test_exterior_air_realistic.py`, including its power check; and
   `tests/physics/test_exterior_helix.py`, which with Fano is what guards the chord (the
-  realistic comparison measurably cannot see a wrong one). Measured: body-shell agreement within
-  0.06 +- 0.05 %, wall x0.43 to x0.65 at 3 cm of margin (docs/decisions.md). Open: under it
-  the 1 MeV / 0.35 T Fano cavity moves by a reproducible +0.25 % (cavity) and +0.47 %
-  (long-step voxels) against current stepping, toward unity, for a cause not established.
+  realistic comparison measurably cannot see a wrong one). Measured at 0.25 cm: body-shell
+  agreement within 0.06 +- 0.05 %, wall x0.30 to x0.64 at 3 cm of margin (docs/decisions.md).
+  Open: against current stepping the 1 MeV / 0.35 T Fano cavity moves by a reproducible +0.23 %
+  (cavity) and +0.39 % (long-step voxels), and up to +0.57 / +0.75 % at 0.5 MeV with a 2 cm
+  wall, toward unity, for a cause not established. The caveat states this; if the cause is
+  found or the numbers change, change the caveat too.
 - **On a large air cavity the current stepping itself misses the field-movement gate.**
   `test_fano_magnetic.py` gates a 2 cm gap at 1 %. On an 8 x 8 x 6 cm air-density cavity
   the gap-to-wall ratio moves by -0.8 % at 1 MeV and -1.3 to -1.4 % at 0.5 MeV with the

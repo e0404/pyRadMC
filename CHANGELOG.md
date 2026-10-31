@@ -17,16 +17,19 @@ without a field, so results are not byte-identical to the previous release.
 
 ### Added
 
-- **Exterior-air stepping under a uniform field, opt-in and off by default.**
-  `ExteriorAirMap.from_grid(grid)`, handed to either engine as `exterior_air=`, replaces the
-  gyration cap with exact helix chords and a safety distance in air connected to the grid
-  boundary and at least 0.5 cm from anything else. Without a map nothing moves: doses are
-  byte-identical to before on ref, Warp cpu and cuda, field or no field, and a map is inert
-  field-free, in a zero field and in a non-uniform field. With one, on a tabulated 6 MV body
-  in 3 cm of air: shell within 0.06 +- 0.05 % and body within 0.003 +- 0.018 % of the current
-  stepping, wall x0.64 to x0.65 with 1.5 or 0.35 T along the body and x0.43 at 1.5 T across
-  it, x0.50 at 6 cm. A named approximation: the deposit within a long step is not spatially
-  resolved and dose in air voxels is not comparable voxel by voxel. See AGENTS.md section 8.
+- **Exterior-air stepping under a uniform field, on by default, with a warning.** Under a
+  uniform non-zero field the engines replace the gyration cap with exact helix chords and a
+  safety distance in air connected to the grid boundary and at least 0.25 cm from anything
+  else, deriving `ExteriorAirMap.from_grid(grid)` themselves. **This moves dose** in any such
+  run compared with the previous behaviour, which `exterior_air=None` keeps: on a tabulated
+  6 MV body in 3 cm of air, shell within 0.06 +- 0.05 % and body within 0.003 +- 0.018 %, for
+  wall x0.64 at 0.35 T, x0.48 at 1.5 T along the body, x0.30 at 1.5 T across it, x0.38 to
+  x0.45 at 6 cm. On air-density Fano cavities the ratio shifts by up to +0.75 % in the worst
+  case tested, cause not established; default-on with that open is a maintainer decision
+  (docs/decisions.md). Dose in exterior air voxels is not comparable voxel by voxel, because a
+  long step's deposit is not spatially resolved. Each engine that uses the path warns once, at
+  construction. Field-free, zero-field and non-uniform-field runs build no map and are byte
+  identical to `exterior_air=None`. See AGENTS.md section 8.
 
 - **Cheaper head pre-solve setup.** The attenuation curves the collimator pre-solve
   and `CollimatedSource` read through `CrossSectionSource` are memoised per source object

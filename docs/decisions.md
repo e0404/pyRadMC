@@ -337,9 +337,38 @@ curve back.
 **What was built, and what is not decided.** `ExteriorAirMap`: the air face-connected to the
 grid boundary, with an exact box-to-box safety distance per voxel. Where it is at least
 0.5 cm a substep takes exact helix chords limited by that safety and the energy fraction,
-because path bounds displacement. Data, not a flag (AGENTS.md 2.10): the engine takes the
-map next to the grid and the field, and a run without one is the current stepping. Whether
-it becomes the default is the maintainer's call and is deliberately not made here.
+because path bounds displacement. Data, not a flag (AGENTS.md 2.10): the map is derived
+from the grid, sits next to the grid and the field, and `exterior_air=None` is the current
+stepping. The default and the 0.25 cm minimum are recorded below.
+
+**Default-on, by the maintainer, with the shift unexplained (2026-10-31).** The evaluation
+below was at a 0.5 cm minimum and recommended waiting until the 0.35 T Fano shift was
+explained and the plan itself measured. The maintainer decided otherwise: "keep it on and warn
+about the shift, since there's basically no relevant dose change within the relevant regions of
+the body", and "I'm okay for a shorter minimum. Performance here is critical." So under a
+uniform non-zero field the engines derive the map themselves and warn once per engine, at
+construction, so that an optimization loop is not flooded. The shift remains unexplained and
+the TG-119 plan's own wall and shell dose remain unmeasured on this branch. Once-at-
+construction also means an engine built and never run still warns.
+
+**At the 0.25 cm minimum.** Rerun in full, same statistics. Wall, new over old, 100 M, best of 3,
+2520 MHz: 0 T 1.01, 1.01, 0.99 at 0, 3, 6 cm (noise); 0 cm 0.99 and 0.91; 3 cm 0.64 (0.35 T),
+0.48 (1.5 T, 6.01 to 2.89 s) and 0.30 across the body (10.0 to 2.98 s); 6 cm 0.45 and 0.38.
+Absolute times in that session ran about 20 % above the 0.5 cm table at the same clocks, kernel
+unchanged and unexplained, so compare ratios. Realistic: shell -0.039 +- 0.050, -0.045 +- 0.060,
++0.015 +- 0.066, -0.058 +- 0.050 %, body within 0.003 +- 0.018 %, block p 0.10 to 0.57; 6 cm and
+noisy CT air the same within noise. Power rose: 4x inflated safety moves the shell -1.13 to
+-7.1 % (0.5 cm: -0.46 to -6.7 %), block p at most 1e-210 (0.5 cm: about 1e-6); 1.5x is still
+caught only at 0.35 T (-0.70 %). The wrong chord is still invisible in the realistic comparison
+(shell at most +0.11 +- 0.07 %).
+Fano, map against current: +0.13, +0.02, +0.18, -0.07 % (cavity) and +0.26, -0.03, +0.34, -0.07 %
+(long-step voxels), against 1.5x (-1.5 / -1.6 %), 4x (-4.0 / -11.9 %) and the wrong chord (cavity
+-7.5 to -24 %, long-step voxels -9 to -44 %). The shift: +0.23 +- 0.04 % and +0.39 +- 0.04 % over
+three seeds at 1 MeV, 0.35 T; worst tested +0.57 +- 0.22 and +0.75 +- 0.22 % at 0.5 MeV, 0.35 T with
+a 2 cm wall. Not larger than at 0.5 cm, and still not explained. The base Fano gates hold on the
+new path at unchanged tolerance when a 2 cm air gap is declared exterior.
+
+The rest of this section is the evaluation at the original 0.5 cm minimum.
 
 **Who is in the air.** Counted on the reference loop (100k histories, 6 MV 10 x 10 cm AP,
 3 cm margin, no kernel change): air is only 5 to 11 % of mean substeps. Of those at 1.5 T,

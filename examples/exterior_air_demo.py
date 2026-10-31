@@ -12,9 +12,9 @@ handed to the engine.
   overstate its uncertainty. The independent-seed comparison is in the validation tier. The
   wall time per pass of each path is in the title.
 
-The map is world data, not a default: the engine takes it next to the grid and the field,
-it is inert without a uniform non-zero field, and whether it becomes the default is a
-maintainer decision (AGENTS.md section 8). Run it from the repository root (requires the
+The exterior path is the default under a uniform field (and warns once per engine, which this
+script shows); ``exterior_air=None`` is how the current stepping is run here. A named
+approximation (AGENTS.md section 8). Run it from the repository root (requires the
 ``examples`` extra, i.e. matplotlib, and the cached EPICS libraries)::
 
     python examples/exterior_air_demo.py
