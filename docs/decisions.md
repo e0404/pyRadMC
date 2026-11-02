@@ -326,10 +326,10 @@ exit plane (the commissioning example's air-gap pattern). The head pre-solve's s
 slide of contaminant electrons and the fringe field in the head are documented
 limitations, not loop code.
 
-## Aperture gradients (prototype), 2026-10-21
+## Aperture gradients, 2026-10-21
 
-Branch `aperture-gradient-prototype`; `pyradmc/geometry/aperture_gradient.py`,
-`examples/aperture_gradient_demo.py`. The question: can a Monte Carlo gradient of the dose
+`pyradmc/geometry/aperture_gradient.py`, `examples/aperture_gradient_demo.py`. The
+question: can a Monte Carlo gradient of the dose
 with respect to a leaf tip or jaw edge, perhaps via Warp's autodiff, beat the bixel-Dij
 chain rule that direct aperture optimization uses?
 
@@ -1179,8 +1179,8 @@ per-edge route, whose own statistics are pinned in `test_fan_edge_inkernel_warp.
 reason. The CPU was saturated by another agent's jobs and the GPU shared, so absolute
 times drift: the tables give interleaved best-of-9 values, with ranges over three
 alternations. One DAO gradient step (tungsten MLC, 10 segments x 20 pairs = 400
-edges, 2 000 histories per edge, 2 batches, electrons on), the branch-point tree
-against this branch in alternating processes:
+edges, 2 000 histories per edge, 2 batches, electrons on), the tree before the change
+against the tree after it in alternating processes:
 
 | | build the edges | contraction | step |
 |---|---|---|---|
@@ -1244,8 +1244,8 @@ built). The tables still hold one proposal row per edge, as the generator requir
 
 ## DAO gradient consistency, 2026-10-22
 
-Branch `test/dao-gradient-consistency`; `tests/dij/test_dao_gradient_consistency.py`,
-`tests/integration/test_signed_weights.py`, `examples/aperture_gradient_consistency.py`.
+`tests/dij/test_dao_gradient_consistency.py`, `tests/integration/test_signed_weights.py`,
+`examples/aperture_gradient_consistency.py`.
 The question: the fan DAO computes its forward dose through `SegmentedFanSource`
 (`run_dij`, each primary weighted in-kernel by its segment's stack transmission) and its
 leaf gradient through `EdgeGradientBeamletSource` of `FanEdgeDerivativeSource` edges
@@ -1381,16 +1381,16 @@ result staying bit-identical; reference engine and Warp kernels in one commit, A
 quantizes with `int64(x + 0.5)`, which truncates a negative amount toward zero, so a
 negative-weight deposit keeps a bias of about +1 quantum (1e-9 MeV) on average, between
 0.5 and 1.5 quanta per deposit (review measurement: mean 1.0005; `_escape` already rounds
-with `floor`; the reference engine scores in float64). Correction: the commit message of
-853515d says "below one quantum"; the mean is one. `floor(x + 0.5)`
+with `floor`; the reference engine scores in float64). Correction: the revert's commit
+message said "below one quantum"; the mean is one. `floor(x + 0.5)`
 removes it and agrees with the cast for every x above -0.5 quanta, but it is not
 bit-identical for positive weights: positive-weight electron transport files a few
 negative float32 residues of its energy bookkeeping (tens of quanta; the reference
 engine's float64 loop files them too, at about 1e-16 MeV), which then round differently.
 On the golden arrays below: KERMA routes and the reference engine unchanged; with
 electrons, 1 to 85 of 2304 voxels per dose map moved, by at most 4e-9 relative, the
-energy books by at most 2e-7 MeV over 2e5 histories. Committed (417fb5d) and reverted
-(853515d): the sign-off's bit-identity condition outranks a one-quantum bias (about
+energy books by at most 2e-7 MeV over 2e5 histories. Committed and reverted on the
+research branch (neither commit is in this history): the sign-off's bit-identity condition outranks a one-quantum bias (about
 5e-8 of the dose here: the Warp mirror residual). Also considered and **not** taken (review): rounding
 conditioned on the weight's sign, `-int64(-x + 0.5)` for a negative weight, would keep
 positive-weight bit-identity and make Warp's mirror exact, at the cost of threading the
@@ -1694,7 +1694,7 @@ edge contraction per angle.
 ## Arc edge sets, 2026-10-23
 
 **The edge-gradient source takes the arc too.** After the arc source landed on develop
-(next section), `SegmentedEdgeSource` lists the edges of a `SegmentedFanSource` whose
+("Arcs in one launch", below), `SegmentedEdgeSource` lists the edges of a `SegmentedFanSource` whose
 segments carry their own fan and frame. The field-dependent columns (edge extent,
 mid-plane field, `L_r / A`, central ray) are evaluated once per distinct (fan, frame)
 pair and laid out per segment; each segment's origin and rotation come from its own
@@ -1740,7 +1740,7 @@ The VMAT demonstrator (36 angles, one arc source, 0.06 s + 0.38 s per million fo
 histories per angle per iteration on the RTX 4070 laptop) optimized at equal optimizer
 wall time, evaluations excluded; every plan scored at one common evaluation seed with
 2e6 histories per angle (an upper bound with a noise floor, comparable across rows);
-three base seeds each. Scripts and data: session scratchpad `stoch/`.
+three base seeds each. The study scripts and their data were not committed.
 
 **The step decay, not the history count, held Adam back; with a constant step the
 history count should grow.** True loss, mean (sd):
@@ -1982,8 +1982,8 @@ closed leaves ending in the soft-photon roulette); the Dij's extra cost is its d
 per-column maps, fold and finalize. The per-angle route's ~4 ms per launch is its
 fixed cost. `examples/segmented_arc_demo.py` shows the same on a conformal 36-point arc.
 
-**Not done.** The edge-gradient route (`SegmentedEdgeSource`, not on develop) needs, to
-consume per-segment frames: read `segs.origin`/`segs.rotation` at `seg * 3`/`seg * 9`
+**Not done here.** The edge-gradient route (`SegmentedEdgeSource`, then not on develop;
+since ported, see "Arc edge sets" above) needed, to consume per-segment frames: read `segs.origin`/`segs.rotation` at `seg * 3`/`seg * 9`
 (or its own per-segment arrays filled from `source.frames`) for the edge-ray chords,
 take each edge's ray from `source.fans[seg]` (focal point and aperture through
 `segs.fan[seg * FAN_STRIDE ...]`), and drop the fan scalars from its launch the same
@@ -2099,8 +2099,8 @@ x12 / x7.
 
 **Not done.** The default margin stays geometric (material-free); 0.25 cm measured
 better for tungsten at 6 MV in both regions and both setups, but on one MLC geometry.
-No adaptive `delta`. The edge-gradient route (`SegmentedEdgeSource`, not on develop)
-does not see the option.
+No adaptive `delta`. The edge-gradient route (`SegmentedEdgeSource`) does not see the
+option.
 
 ## First-order dose steps of a segmented fan, 2026-11-01
 
@@ -2125,7 +2125,7 @@ travel (`tests/dij/test_segmented_edge_steps_warp.py`; a 5 % factor error fails 
 a probe at 3-4M histories per column stays within |z| < 1.4), against the reference engine
 through `emit`, and against the Dij's own sum (no voxel lost to compaction).
 
-**On TG-119** (`studies/tg119`, RTX 4070, seed 1 of the 4 deg finish of one 8 deg start, plans
+**On TG-119** (a direct-aperture study outside this repository, RTX 4070, seed 1 of the 4 deg finish of one 8 deg start, plans
 scored on fresh 8M / 32M runs of the default engine, so that a biased carried dose cannot
 flatter them): 30 iterations re-simulating 2M per segment 5320 at a forward of 2.9 s; carried
 from an 8M start, 300k / 100k / 30k per column 5200 / 5222 / 5250 at 1.55 / 0.75 / 0.40 s. So
