@@ -79,6 +79,11 @@ _KERNEL_MODULES: dict[str, tuple[str, ...] | None] = {
         "_mlc_tip_length",
         "jaw_path_length",
         "mlc_path_length",
+        "_affine_bound_rate",
+        "jaw_edge_derivative",
+        "_mlc_tip_rate",
+        "mlc_tip_edge_derivative",
+        "mlc_leaf_path_length",
     ),
 }
 

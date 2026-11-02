@@ -326,6 +326,187 @@ exit plane (the commissioning example's air-gap pattern). The head pre-solve's s
 slide of contaminant electrons and the fringe field in the head are documented
 limitations, not loop code.
 
+## Aperture gradients (prototype), 2026-10-21
+
+Branch `aperture-gradient-prototype`; `pyradmc/geometry/aperture_gradient.py`,
+`examples/aperture_gradient_demo.py`. The question: can a Monte Carlo gradient of the dose
+with respect to a leaf tip or jaw edge, perhaps via Warp's autodiff, beat the bixel-Dij
+chain rule that direct aperture optimization uses?
+
+**Do not tape the transport.** Pathwise autodiff of the transport kernels is the wrong
+tool on three independent grounds: discrete decisions (interaction channel, voxel index,
+rejection loops) have zero derivative almost everywhere, so the gradient is silently
+biased rather than noisy; the step loop is a data-dependent `while` loop and secondaries
+move through atomic-append queues and reused buffers, none of which a tape can replay;
+and the engine compiles with `enable_backward=False` on purpose (3x compile time). Under
+attenuation-only collimation it is also unnecessary: an edge coordinate enters a history
+only through its primary weight, the transport after the stack never sees it, and the
+dose is linear in the weights, so `dD/dx = E[dT/dx K]`. Every gradient estimator is
+then an ordinary `Source` with no engine change. For fluence or transmission-mask
+parameters the Dij already *is* the Jacobian.
+
+**The tape fits only the geometry, and there it is blind to edges.** Taping the scalar
+collimation twins (`backends/warp/aperture_ad.py`) gives each ray's `d(chord)/dx` exactly
+(matches the float64 host central difference). That pathwise derivative is the whole of
+what autodiff of a fully taped run could return, and it fails twice:
+
+- A straight face hit end-on makes `T` jump, so the derivative is a point mass on the
+  edge line, which no sampled ray ever lies on: the tape returns **exactly zero** for a
+  jaw under a parallel beam (chi2/ndf 658 against the oracle). This is the boundary-term
+  failure known from differentiable rendering (Li et al. 2018, edge sampling).
+- At a rounded tip the chord grows like `sqrt(delta)` from the apex, so the per-ray
+  derivative goes like `1/sqrt(delta)` and its variance diverges logarithmically (cut
+  off only by the float32 ray position). The mean is right: the derivative mass per
+  bin across the tip matches the exact estimator to within 1.2 sigma, down to 0.1 um
+  from the apex. The estimate is not usable: the top 0.1 % of rays carry 14 % of the sum,
+  so a typical run comes out low and its batch sigma does not see what it missed.
+  Independent pathwise runs agree with each other (chi2/ndf 1.06 and 1.16) and all
+  disagree with the exact estimator (2.4 to 3.4). Efficiency is 1/1000 of it.
+
+**Sampling rays from `|dT/dx|` is exact and cheap.** For a translated edge,
+`T(q; x) = T0(q - x)` along the leaf-travel coordinate, so `|dT/dx|` is the total-variation
+measure of `T0`, of finite mass `1 - T_min`, sampled by inverting the monotone profile
+(`EdgeDerivativeSource`). A jump inverts onto the edge line, a rounded tip onto its
+penumbra, and the weight is a constant times the transmission through the rest of the
+stack. Against the common-random-number central difference (the oracle) on 1 mm voxels,
+2 MeV, real tungsten, electron transport on: chi2/ndf 1.20 (tip, ndf 113) and 1.02 (jaw,
+ndf 96), at 76x and 130x the oracle's efficiency. That oracle is already restricted to the
+slice of field its weights live on; over the whole field it is about 8x worse again.
+
+**The oracle needed its own care.** At a 0.5 mm finite-difference step the oracle was
+biased: chi2/ndf 11.7 (jaw) and 12.4 (tip) against the exact estimator, falling to 1.55
+and 1.63 at 0.25 mm and 1.00 and 0.69 at 0.1 mm, about as h^4 (a squared O(h^2) bias).
+The integrated sums agreed at every step to within 0.4 %. The per-ray response varies within
+a 1 mm voxel column, and a window of +-h averages over it. At low statistics the bias hid
+in the noise (chi2/ndf 1.3 at a tenth of the histories).
+
+**A Dij gives correct leaf gradients only with fine bixels *and* the right leaf
+model.** The DAO chain rule (`BixelChainRuleSource`, Shepard et al. 2002) spreads the
+derivative mass uniformly over the bixel holding the tip, as for a sharp leaf end; the
+true mass of a rounded tip lies in its ~6 mm penumbra on the blocked side. The
+profile-aware chain rule (`ProfileChainRuleSource`) keeps the same bixel Dij but takes
+each bixel's `dw_k/dx` from the transmission drop across it, which converges to the exact
+estimator as the pitch shrinks. Measured on the leaf gradient of the dose summed over a
+structure whose edge lies a distance from the tip (tip at 5.15 cm, ratio to exact):
+
+| chain rule | at 0 cm | at +0.5 cm | at +1 cm | voxel chi2/ndf vs oracle |
+|---|---|---|---|---|
+| DAO, 5 mm | 0.98 | 1.86 | 1.04 | 393 |
+| DAO, 2.5 mm | 0.74 | 0.57 | 0.90 | 285 |
+| DAO, 1 mm | 0.92 | 0.58 | 0.94 | 75 |
+| profile, 5 mm | 0.98 | 2.16 | 1.15 | 400 |
+| profile, 2.5 mm | 0.79 | 1.07 | 0.94 | 209 |
+| profile, 1 mm | 0.97 | 1.00 | 1.03 | 8 |
+
+At 5 mm the error is the bixel resolution and the leaf model does not matter: swept
+through one bixel, the worst structure-gradient ratio is 0.24 to 4.8 for DAO and 1.6 to
+4.9 for the profile rule. Below the penumbra width the leaf model takes over: the DAO
+rule stalls at -43 % with the structure edge 5 mm past the tip however fine the bixels,
+while the profile rule converges (within 3-6 % at 1 mm). At a straight jaw face there is
+no penumbra and the two rules coincide, both converging with pitch (chi2/ndf 3.2 and 3.5
+at 1 mm). An earlier version of this entry read the 5 mm result as a leaf-model
+effect; the 1 mm runs show it was resolution.
+
+So a Dij-based direct aperture optimization needs about 1 mm bixels along leaf travel
+near the tips plus profile-derived bixel weights to get leaf gradients right in the
+penumbra region. The edge-sampled estimator needs neither: its "columns" are the leaf
+edges themselves, and every history it spends is on the gradient.
+
+**Feasibility inside an optimizer loop (measured 2026-10-21).** An optimizer needs
+not the Jacobian but `g_e = sum_v dL/dD_v dD_v/dx_e`, one number per edge. Measured on
+400 edges (20-pair tungsten MLC, 10 step-and-shoot segments with MU weights, C-shaped
+PTV around an OAR, 46k voxels of 2.5 x 2.5 x 5 mm, 2 MeV, electrons on, quadratic
+objective at a mid-optimization iterate), all edges as beamlets of one `run_dij` and the
+columns contracted with `dL/dD` afterwards, six replicas per point against a reference
+at 2e5 histories per edge (0.15 % noise):
+
+| histories / edge | error of the gradient vector | cosine to reference |
+|---|---|---|
+| 300 | 9 % | 0.998 |
+| 1 000 | 8 % | 0.999 |
+| 3 000 | 3.5 % | 0.9998 |
+| 10 000 | 2.4 % | 0.9999 |
+| 30 000 | 0.9 % | 1.0000 |
+
+The error falls as 1/sqrt(N); correlated and independent sampling are equivalent (the
+correlated mapping gives a slightly better direction at the lowest counts). So a few
+hundred to a thousand histories per edge already point the gradient within a few
+degrees, which is the stochastic-optimizer regime. A clinical arc of ~15 000 moving
+edges then needs roughly 5e6 to 1.5e7 histories per gradient, a second or two of GPU
+transport. The relative noise grows as the gradient shrinks near the optimum, so late
+iterations will need more histories than early ones.
+
+**The host is the bottleneck, not transport.** An open beam transports 2e6 histories
+in 0.04 s on the RTX 4070 (healthy clocks), but weighting rays through the 20-pair MLC in
+NumPy costs 5.7 us each: the forward dose of the 10 segments took 100 s, and the first
+gradient reference run 470 s. Evaluating the rest-of-stack transmission on the edge's own
+leaf pair only (exact under a parallel beam, pinned bit-identical) cut the reference run
+to 40 s, of which host ray sampling is still 31 s. Below ~3 000 histories per edge a
+fixed ~0.5 s per run dominates, which a profile later showed is not Dij assembly but
+the host pre-sampling route seeding and draining the transport queues once per beamlet
+(~1.4 ms per edge); scoring the contraction instead of the Dij changed nothing at this
+grid size (0.58 s both, matched batch counts).
+
+**A Monte Carlo direct aperture optimization runs at seconds per iteration**
+(`examples/aperture_gradient_feasibility.py`, same problem): projected Adam on all 400
+tips and the 10 MU weights, each iteration a fresh forward dose (3e5 histories per
+segment) and a fresh gradient (1 000 per edge), 1.8 s per iteration on the RTX 4070
+with host ray sampling still in the loop. With a `1/sqrt(k)` step the loss fell
+monotonically from 1.61 to 0.34 in 25 iterations; at a constant 0.5 mm step it stalled
+after ~10 and drifted back up, the stochastic-gradient noise floor. Building the 400
+edge sources once per iteration costs 0.1 s, because the mu(E) tables and the inverse
+edge profiles do not depend on the leaf positions and are shared (bit-identical to a
+fresh build, pinned). The first run of this study also surfaced an engine bug: the Warp
+engine chose its built-in generators for `PencilBeamSource`, `ParallelBeamSource` and
+`BeamletGridSource` by `isinstance`, so a reweighting subclass silently transported as
+the open field (fixed: exact type, as `SpectralBeamSource` already did).
+
+**The fan beam and the GPU route (2026-10-21).** Under a divergent fan an edge move is
+not a ray translation, so `FanEdgeDerivativeSource` importance-samples: rays along the
+edge from a proposal tabulated in `s = sqrt(|q - q0|)`, each weighted by its exact
+`dT/dx` from the chord edge-derivative twins (Hadamard: an endpoint on a surface moving
+with velocity `V` moves by `(n.V)/(n.d)`), energies from the beam's own spectrum, the
+focused-jaw jump on the edge line. Two fan-specific facts carried weight. The ray tangent
+to a rounded tip crosses the mid-plane short of the apex, by `R alpha^2 / 2` (measured
+0.095 mm at 2.6 cm off axis against 0.096 predicted), and that sliver holds about a
+quarter of the derivative mass: a proposal anchored at the apex was caught as a -27 %
+bias (z = -231); the support start is now the tangent in closed form. And near that
+tangent the float32 circle test cancels (`|p - c|^2 - R^2 ~ 1e-5` against an ulp of
+8e-6) and the kernel dropped exactly the rays carrying the largest weights, a 1-2 % bias
+that source-level means over 2e5 rays flagged at 7 sigma (a transport-level chi-squared
+over three edges had not); there the ray-circle gap factorizes without cancellation and
+the chord is closed-form. Unbiased against quadrature for both tip sides, straight and
+focused jaws; agrees with the CRN oracle through transport.
+
+The device route (`backends/warp/aperture.py`) uploads a whole edge set — every
+segment's stack in one device table, mu(E) rows per material, the per-edge geometry —
+builds the proposals on the device and generates the rays in-kernel; the contraction
+(`run_beamlet_contraction`, on both engines) scores `g_j = sum_v a_v D_vj` per column
+and batch without a Dij, in a fixed reduction order. A 400-edge fan gradient (6 MV,
+electrons on, 10 segments, 1 000 histories per edge) took 0.04 s against 2.67 s on the
+host route; rebuilding the 400 edge sources after a leaf move fell from 3.94 s to 0.04 s
+with the closed-form support start and device-built tables.
+
+**A Monte Carlo direct aperture optimization on a 6 MV fan runs at 0.6 s per
+iteration, fully on the GPU** (`examples/aperture_gradient_fan_dao.py`, RTX 4070 at
+healthy clocks): per iteration a device head pre-solve in attenuation mode plus transport
+for each of the 10 segments (4e5 histories each, one primary sample shared by the
+segments: 0.52 s) and the 400-edge gradient (2 000 histories per edge: 0.09 s). The loss
+fell from 1.65 to 0.26 in 40 iterations, about 25 s in all. The forward dose is now the
+cost; the gradient no longer is.
+
+Correlated sampling, the shipped Dij default, makes the columns share their
+fluctuations, so a chi-squared across columns is inflated (AGENTS.md 8): one fan
+comparison failed for exactly that reason before any kernel existed, and an earlier
+contraction test had passed only by the luck of its seed. Cross-column comparisons
+use the independent mapping.
+
+Open, stated: the parallel-beam sources stay monoenergetic and parallel-only; the fan
+estimator needs focused leaf sides, the focal spot at the stack frame's origin and the
+aperture axes on the frame's axes (a gantry angle is the adapter's frame rotation, as
+for every source). Leaf scatter (the first-Compton pre-solve) moves photons when the
+edge moves and is not covered; the attenuation configuration is.
+
 ## Exterior air under a uniform field, 2026-10-30
 
 **The problem.** At 1.5 T with 3 cm of air kept around a TG-119 plan, about 70 % of the wall
@@ -822,6 +1003,869 @@ either a per-column history count in `run_dij` on both engines or an index-aware
 
 **Review fix (integration):** the plan view's host batch (`SegmentedPlanSource.sample_batch`) is built from the segment source's `sample_beamlet_batch`, one batch per distinct segment, not from the bare fan. A segment subclass that reweights its primaries now reaches the Warp host route exactly as it reaches the reference engine through `emit` (reproduced before the fix: the reference halved, Warp did not). Voxel doses are not exactly proportional under reweighting because the photon roulette weight cap changes a few decisions; the test pins the emitted energy exactly and the total dose loosely.
 
+## Vectorized edge sets, 2026-10-22
+
+**An aperture gradient's edges are built from the segments' arrays, not one object per
+edge.** The DAO example built 400 `FanEdgeDerivativeSource` objects per iteration
+(validation, isolated and retracted stacks and their transmission models) in about
+80 ms, then spent another 12 ms in `upload_edge_set` on per-edge records, a scalar
+mu-curve loop over 512 energies and 53 small uploads. That is against a 0.1 s
+iteration, and an arc's ~15 000 edges would have cost seconds. `SegmentedEdgeSource`
+(`geometry/segment_edges.py`) lists every tip and jaw edge of a `SegmentedFanSource`:
+segment-major, then device in stack order (or a given selection), then leaf pair,
+then side (`neg`, `pos`). It builds the device columns with array arithmetic. The
+position-free part comes from the per-edge source's own helper (`_fan_edge_geometry`,
+now shared): mid-plane field, edge extent, `L_r / A`, span, `s` grid and isolated
+slab, evaluated once per (device, pair, side) slot. It is tiled over the segments and
+memoised per (fan, template, selection, segment count), all of which `with_settings`
+keeps. The positions come straight from the settings arrays, and `q0` from vectorized
+closed forms. On a host route, beamlet `k` builds the equivalent per-edge source on
+first use and delegates to it (the oracle). The Warp engine generates the exact type
+over an exact `SegmentedFanSource` in-kernel through the existing generator; any
+subclass of either takes the host route (test-pinned with a reweighting subclass). The
+fan's type is not checked: an edge source reads only the fan's spectrum and geometry,
+on both routes.
+
+**One contract, two builders, pinned equal.** `FanEdgeColumns` is the plain-data form
+of an edge set (float64 and int32, before the device cast). `fan_edge_columns(records)`
+builds it from per-edge records, with the old `upload_edge_set` body's arithmetic
+unchanged; `SegmentedEdgeSource.device_columns()` builds it vectorized. The fixture has
+focused and straight jaws on both axes; open, nearly closed (1e-6 cm) and closed pairs;
+tips on the field limit; and tips whose support start needs the bisection. On it every
+column is `np.array_equal` in float64, every uploaded device array (the device-built
+proposal tables included) is equal, and `run_beamlet_contraction` (values, sigma,
+energy books) is bit-identical, on cpu and on cuda separately, correlated and
+independent. Two numerical points carried weight:
+
+- `np.hypot` and `math.hypot` differ by one ulp on 18 % of inputs (measured). The
+  vectorized tangent-point slab test therefore re-decides every point within 1e-12
+  (relative) of a slab face with the scalar definition. A test that places slab faces
+  exactly on the tangent point fails without that guard. `q0` itself uses only `sqrt`
+  and arithmetic, both correctly rounded, so it is bit-equal without any guard.
+- The bisection fallback is vectorized over the edges that need it, using
+  `MLC.path_lengths`' interval primitives in its expression order, so every halving
+  takes the per-edge loop's branch.
+
+**Upload.** Every column goes up in one float32 and one int32 transfer, sliced into
+the `EdgeSet` fields: a small cuda upload costs ~50 us, a view ~7 us. The mu rows come
+from the per-source curve memo (`geometry.mucache`: the same scalar queries, element
+for element). A new `s_row` index lets edges share `s` grids, one per slot instead of
+one per edge, which saves 30 MB of device memory at 15 000 edges; the per-edge route
+keeps `s_row == table`. The proposal tabulation can run its 513 chord evaluations per
+edge in a node-parallel kernel before the unchanged per-edge sums. That pays only
+while the one-thread-per-edge kernel starves the card (interleaved, same edge set):
+400 edges 1.53 -> 0.69 ms, 4 000 edges 1.23 -> 0.83 ms, even at 8 000, and worse at
+15 000 (2.29 -> 2.95 ms). So it is taken below 128 edges per SM, on cuda only, and
+both forms give the same bits (test-pinned). Before any change, a snapshot was taken
+of the per-edge route's uploaded arrays and contractions (256 arrays, cpu and cuda);
+it was bit-identical after every step.
+
+**Found and fixed: the in-kernel near-tangent chord was wrong outside its regime.**
+`_block_terms` took its closed-form near-tangent chord whenever `s^2 < 2e-3`. That
+chord is exact only where `q0` is the tangent ray and the bare disc chord lies inside
+the slab. A support start found by bisection is not a tangent ray (it is a ray
+clipping a slab corner), and a tangent point close to a slab face has its disc chord
+cut by the face. On the fixture (2 cm slab, `R` = 20 cm, off-axis field, 16 000
+histories per edge) the host and device routes disagreed on every bisected edge
+(+15 to +30 %, z up to 14) and on a closed-form tip whose tangent point is 2.5 mm
+inside a face (z = -7.4). Per ray in the near-tangent band, the chord came out 4-170x
+too long on the bisected edge, and the chord and rate up to 1.9x and 2x too large
+near the face. The per-edge device route had the same defect (the two routes are
+bit-identical). The DAO example's geometry (6 cm slab, `R` = 8 cm, tips within
+2.7 cm of the axis) was clear of it.
+
+The fix brings the device route back to its host oracle without giving up the
+branch's purpose, which is to avoid the float32 cancellation of the twin's circle test
+at a genuine tangent:
+
+- **The tangent ray, always.** Every rounded tip carries its closed-form tangent ray
+  `q_t` (defined whether or not the tangent point lies in the slab) and
+  `t_off = sign (q0 - q_t)`, both from the host in float64. `t_off` is zero when `q0`
+  is the tangent ray and is a bisected start's lead otherwise (`FanEdgeRecord.q_tangent`,
+  from both builders).
+- **The branch condition.** The closed form is taken on a ray's distance from the
+  tangent ray, `s_t^2 = s^2 + t_off < 2e-3`, with `q_t` in the gap formula. For a
+  tangent start this is the old `s^2 < 2e-3` and the old arithmetic, bit for bit.
+- **Inside the slab.** Where the bare disc chord lies inside the slab, checked per ray
+  from the tip centre's projection `t_c` on the ray, the closed form is unchanged.
+- **Cut by a face.** Where a face cuts the chord, it is clipped there in closed form.
+  A clipped end does not move with the edge; an open one moves at `cu +- dhalf/dx`.
+  Both faces may cut it, and a chord wholly outside the slab gives zero.
+- **The twin only away from the tangent ray.** Bisected starts far from it
+  (`t_off >= 2e-3`) and every ray beyond the band take the twin.
+
+A first version gated on a host flag ("`q0` is the tangent ray") and sent every
+bisected start to the twin. An independent review found the gap in it (2026-10-23):
+a tangent point just *outside* a face makes the bisected corner ray almost tangent,
+and the twin cancels exactly as at a tangent start. Integrated derivative mass,
+device against host: 0.986 (cpu) / 1.031 (cuda) at 1e-4 cm outside, about 22 000 of
+40 000 rays dropped on cpu, and a gradient jump as the flag flipped over ~0.08 mm of
+leaf travel. Gating on the distance from `q_t` closes it: across a sweep from 1e-3 cm
+inside to 1e-1 cm outside a face, and on every fixture edge, the mass ratio is within
+2.5e-4 on both devices.
+
+After the fix all 36 resolved edges agree with the host route: max |z| 2.69, on a
+straight-jaw edge the fix does not touch (2.69 before too), and mean z^2 1.49. The
+edges that were biased, before -> after (16 000 histories per edge, which cannot
+resolve the review finding's 0.2-3 % mass effects; the quadrature test below does):
+
+| edge | z before | z after |
+|---|---|---|
+| bisected, x = 3.3 | +13.97 | +0.95 |
+| bisected, x = 3.0 (closed pair) | -7.92 / +8.74 | -0.69 / -1.42 |
+| bisected, x = 3.1 / 3.9 | -8.68 / +9.67 | +0.67 / -2.42 |
+| bisected, x = 2.7 (closed pair) | -6.24 / +7.45 | +1.09 / +0.62 |
+| near-face tangent, x = 2.5 (closed pair) | -7.38 / +3.00 | -0.62 / -1.03 |
+
+The former xfail now passes, on cpu and cuda. The per-ray tests run on cpu and cuda
+against the float64 host chord and rate in the band `s^2` in [1e-4, 2e-3), each ray
+classified as the kernel classifies it:
+
+- **Closed-form rays** (whole or clipped): within the repo's float32 chord tolerance of
+  2e-3. Measured up to ~1e-3 in rate across the reviewer's geometries (4.9e-4 on the
+  near-face fixture edge).
+- **Twin rays:** within a bound derived from the twin's arithmetic. Its ray-circle
+  discriminant `D = 4 h^2` carries a rounding error of `k eps b^2` (`b ~ 2 t_c`), so
+  the rate carries `k eps t_c^2 / (2 h^2)`. A first-order worst-case count of the
+  roundings in `b^2 - 4ac` gives `k ~ 6`; the test uses 8. Measured at most 2.7; the
+  pre-fix error is at least 840x the bound.
+
+The same model predicts up to 1.9e-2 for the twin on the near-face tangent. That is
+the cancellation the closed form avoids.
+
+A deterministic quadrature test integrates `mu exp(-mu l) |dl/dx|` over the proposal
+range, kernel against float64 host on the same nodes. It runs on every smooth fixture
+edge and the face sweep, on cpu and cuda, and accepts a ratio within 1e-3 of 1:
+
+| gate | worst mass ratio | verdict |
+|---|---|---|
+| fixed | within 2.5e-4 of 1 | passes |
+| tangent-flag gate | 0.9964 (fixture), 0.986-1.031 (sweep) | fails |
+| original `s^2`-only gate | up to 1.34 | fails |
+
+Every snapshot stayed bit-identical, so no edge where the closed form held moved.
+That covers the 256-array snapshot (proposal tables and contractions, cpu and cuda)
+and the DAO example's own geometry (tungsten, 400 edges, proposal tables and
+contractions, both sampling modes, cpu and cuda), against both the pre-fix code and
+the tangent-flag gate.
+
+The same review found a cache bug, fixed with a test. The layout memo of
+`SegmentedEdgeSource` is keyed on fan, template, selection and segment count, but it
+also stored the cross-section source. A second segmented fan sharing those but with
+other cross sections would have uploaded the first one's mu rows. The cross sections
+now come from each source's own segments.
+
+**The reference check and its power.** The reference engine was run against the
+in-kernel route in the DAO regime: two segments of a focused jaw over a 6 cm two-pair
+MLC, 12 edges, KERMA, independent sampling, 8 batches. The reference ran 1 000
+histories per edge (it costs ~1.2 ms per history on this source) and Warp 16 000.
+Each compared value is an edge's whole contraction, hundreds of histories' deposits
+per batch, so the batched chi-squared sits at its null here rather than below it as
+on sparse voxels: over 10 seed pairs, 0 rejections at alpha = 0.01, median p 0.64.
+In-kernel mutants on the uploaded columns over the same pairs:
+
+| mutant | caught at alpha = 0.01 |
+|---|---|
+| one edge's sign flipped | 10/10 (chi2 870-2 400 against a null of 16) |
+| one edge +10 % | 0/10 |
+| one edge +5 % | 0/10 |
+| every edge +2 % | 0/10 |
+
+The reference's per-edge sigma (2-16 %) limits this oracle to gross errors: signs,
+mapping, a missing factor. Fine-grained equivalence rests on bit-identity with the
+per-edge route, whose own statistics are pinned in `test_fan_edge_inkernel_warp.py`.
+
+**Measured.** RTX 4070 laptop; clocks 1980-2535 MHz under load with no power-cap
+reason. The CPU was saturated by another agent's jobs and the GPU shared, so absolute
+times drift: the tables give interleaved best-of-9 values, with ranges over three
+alternations. One DAO gradient step (tungsten MLC, 10 segments x 20 pairs = 400
+edges, 2 000 histories per edge, 2 batches, electrons on), the branch-point tree
+against this branch in alternating processes:
+
+| | build the edges | contraction | step |
+|---|---|---|---|
+| per-edge objects, before | 82-102 ms | 38-41 ms | 126-151 ms |
+| `SegmentedEdgeSource` | 0.37-0.44 ms | 22.7-24.2 ms | 23.4-24.6 ms |
+
+On an idle machine before the change the per-edge step was 51 + 12 (upload) + 18 ms.
+Build plus upload of the edge set alone:
+
+| edges | host time | proposal kernels (device) |
+|---|---|---|
+| 400 | 0.2 ms build, 0.1 ms columns, 1.0-1.7 ms upload | 0.7-0.8 ms |
+| 15 000 (125 segments x 60 pairs) | 1.0 ms build, 0.9 ms columns, ~4 ms upload | 2.7 ms |
+
+At 15 000 edges the device holds about 63 MB, nearly all of it the per-edge proposal
+tables. The upload's remaining host time is Warp object overhead: ~56 slice views and
+~72 struct field assignments, 0.55 ms at 400 edges, the price of the `EdgeSet` field
+layout. The DAO example (`tip_gradient` now builds a `SegmentedEdgeSource` over a
+`with_settings` iterate) measured 0.03 s per gradient against 0.09 s recorded on
+2026-10-21.
+
+**Where a 400-edge contraction's time goes** (Warp activity timing, one call, ~24 ms
+wall; 17.4 ms of GPU activity):
+
+| activity | GPU time |
+|---|---|
+| transport kernels (electron 5.3, photon 1.9) | 7.2 ms |
+| contraction reduction (`contract_dij_batch`, 2 batches) | 3.5 ms |
+| edge generator, 4 launches | 2.4 ms |
+| memsets and fills of the dense group map (400 x 46 080 int64 per batch) | 1.8 ms |
+| proposal tables (since reduced to 0.7 ms) | 1.6 ms |
+| host-device copies | 0.5 ms |
+
+The remaining ~7 ms is host time: 69 kernel launches per call (Warp's argument
+packing of the large structs) and the drain's synchronizing readbacks. Only the
+proposals and the upload were inside this change. The next levers belong to the
+engine:
+
+- the dense per-group quanta map that the contraction route still fills, zeroes and
+  reduces (5.3 ms together). Contracting deposits directly would need a fixed-point
+  per-column accumulator to stay deterministic;
+- the launch count (69 per call).
+
+Recorded as the next engine lever, deferred: with the gradient at ~24 ms a DAO
+iteration should come to ~80 ms, under the 0.1 s target.
+
+**Not done: one upload shared by the forward pass and the gradient.** Letting the edge
+kernel read the segmented fan's `StackArrays` + `SegmentArrays` would save the
+combined stack's share of one packed transfer (tens of microseconds). It would also
+need a second chord path in the generator: the per-edge route allows any stack and
+frame per segment, which one template cannot express. Sharing the forward's
+attenuation table would not be bit-preserving either. `MuArrays` interpolates
+`log(rho mu/rho)` with `inv_dlog` taken from `np.log(geomspace)`, while the edge
+kernel interpolates `log(mu/rho)` and multiplies by the density after `exp`, so every
+edge weight would move at float32 rounding. The forward `run_dij` also re-uploads its
+`SegmentedFanUpload` per call, so there is no resident upload to share yet.
+
+**Open.** A leaf pair with no extent in the field is refused, as the per-edge source
+refuses it; an arc whose outer pairs leave the field needs a pair selection (not
+built). The tables still hold one proposal row per edge, as the generator requires.
+
+## DAO gradient consistency, 2026-10-22
+
+Branch `test/dao-gradient-consistency`; `tests/dij/test_dao_gradient_consistency.py`,
+`tests/integration/test_signed_weights.py`, `examples/aperture_gradient_consistency.py`.
+The question: the fan DAO computes its forward dose through `SegmentedFanSource`
+(`run_dij`, each primary weighted in-kernel by its segment's stack transmission) and its
+leaf gradient through `EdgeGradientBeamletSource` of `FanEdgeDerivativeSource` edges
+(in-kernel rays, `run_beamlet_contraction` with the adjoint `a = dL/dD`). The two share
+no code for the transmission derivative. Is the second the derivative of the first, at
+the demo's settings?
+
+**Answer, as first measured: on the positive side of every pair, yes; on the negative
+side, no — by a factor of 0.17 to 0.31, and the cause was transport, not the estimator.
+After the transport fix of 2026-10-23 (below), yes on both sides.** Every weight of a
+`neg`-side edge is negative (a closing edge lowers the dose), and both engines lose the
+continuous-loss deposits of negative-weight electrons: the deposit guard tests the
+*weighted* amount, `if amount <= 0.0: return` (`deposit_or_escape` in
+`transport/electron.py`, `_deposit_or_escape` in `backends/warp/kernels.py`), and the
+bremsstrahlung guard `photon_w > 0.0` drops their photons too. A 2 MeV beam of weight -0.5
+in water deposits 0.22 times what its +0.5 twin deposits on the reference engine, Warp cpu
+and Warp cuda alike; KERMA mode is exact (`tests/integration/test_signed_weights.py`, both
+pinned; the electron case was a strict xfail until the fix). Every earlier transport-level check of an edge
+estimator used `+` edges, or KERMA mode (the in-kernel route's tests), and so could not see
+it. Fixed on 2026-10-23 with the maintainer's sign-off, reference engine included
+(AGENTS.md 2.2; see "The fix" below): the guard decides on the unweighted energy, the
+photon guard on `photon_w != 0`, and the roulette cap `w < PHOTON_ROULETTE_WEIGHT_CAP`,
+which never stopped a negative weight (unbiased, a variance matter), compares `abs(w)`. A
+fourth asymmetry, `_deposit` rounding with `int64(x + 0.5)` (a negative deposit truncated
+toward zero, about one 1e-9 MeV quantum on average), was considered and rejected (below). The 400-edge
+DAO runs recorded above (loss 1.65 to 0.26) ran with half their gradient components
+under-estimated: signs right, magnitudes and therefore the gradient's direction wrong. The
+DijAssembler's `row_dose > 0.0` keep rule already drops negative Dij entries (documented:
+prefer the contraction).
+
+**Method.** The oracle is the common-random-number central difference of the forward model
+in the contracted quantity, `g_FD = a . (D(x + h) - D(x - h)) / 2h`, linear in dose, so
+noise-free in `a`. The displaced tips are columns of one `SegmentedFanSource` run with
+`run_dij(correlated=True, truncation=0, n_batches=1)`: the Warp segmented generator keys
+the stream on the within-column history index only (`key = r`), so every column replays the
+same ray and the same transport draws and differs only in its weight. The one
+weight-dependent decision is the roulette cap: after `k` soft-photon survivals a weight
+`T` has become `2^k T`, and the game is played only while that is below 4, so the two
+columns of a ray diverge whenever `T(x - h)` and `T(x + h)` straddle a threshold
+`4 * 2^-k` (for `k = 2`, `T = 1` against `T < 1`; for larger `k` any pair of
+transmissions across `1/2`, `1/4`, ...). Each column's game is fair, so this costs
+variance, not bias. Sigma from 40 independent replicate seeds (a column's batch sigma cannot see the
+covariance of the two columns). CRN pays: with `correlated=False` the per-history sigma of
+the difference is 10-13x larger at `h = 0.005` cm (variance x100-170). A closed pair, whose
+tips may not cross, takes the second-order one-sided stencil `(-3 f0 + 4 f1 - f2) / 2h` in
+the opening direction. Each edge's difference runs on the fan **narrowed** to its leaf strip
+(+0.5 mm) and blocked side and is scaled by the area ratio: under CRN every other ray gives
+bit-identical columns, so this is exact in expectation (the 0.3 cm margin against the
+tip's ~0.01 cm reach past the apex, focused sides, uniform area sampling of the fan);
+checked against the full fan on two edges (0.5,
+1.0, 0.8 and 2.0 sigma apart for the two edges and adjoints, per-history sigma equal within
+the noise). The gradient is the shipped in-kernel contraction, independent columns
+(`correlated=False`), 40 batches.
+
+Settings: the demo geometry (`examples/aperture_gradient_fan_dao.py`: water 12 x 10 x 12
+cm on 2.5 x 2.5 x 5 mm, Varian 6 MV Ali-Rogers fan from 100 cm, tungsten MLC 50-56 cm with
+focused sides and 8 cm tips, 20 pairs, EPICS 2023 tabulated data, electrons on, GS MSC,
+shipped cutoffs). Plan: the demo's initial plan (`initial_tips`, `default_rng(7)`). Adjoints:
+`real`, the demo objective's `dL/dD` at that plan (forward `run_dij` 10 x 2e6 histories,
+seed 11, Rx = 1.1 x mean PTV dose, L = 1.589), and `a = 1` (integral dose: opening raises it,
+so `+` edges are positive and `-` edges negative). Edges: 4e6 histories each, seed 424242.
+Finite differences: 40 replicates x 4e6 histories per column, seeds `100000 (e + 1) + r`,
+`h` = 0.002, 0.005, 0.02 cm at the MLC mid-plane, the table at 0.005. RTX 4070 laptop at
+2535 MHz under load (throttle 0x1), GPU shared with another agent: about 5 minutes of
+transport for the finite differences, under a minute for every edge run. Values are
+`a . dD/dx` with `D` in MeV/g per fan history and `x` in cm at the mid-plane.
+
+Before the fix (the shipped estimator on the shipped transport):
+
+| edge | g_FD (real) | g_edge (real) | z | ratio | z, a = 1 | ratio, a = 1 |
+|---|---|---|---|---|---|---|
+| open-neg (seg 0, pair 9) | -1.3257 ± 0.0028 e-7 | -3.6927 ± 0.0042 e-8 | +338 | 0.279 | +435 | 0.310 |
+| open-pos | +9.4135 ± 0.0921 e-10 | +9.4147 ± 0.0946 e-10 | +0.0 | 1.000 | -0.2 | 1.000 |
+| near-closed-neg (0.16 cm gap) | -1.3712 ± 0.0039 e-8 | -4.1253 ± 0.0190 e-9 | +223 | 0.301 | +569 | 0.303 |
+| near-closed-pos | +1.2662 ± 0.0027 e-8 | +1.2654 ± 0.0028 e-8 | -0.2 | 0.999 | +0.5 | 1.001 |
+| closed-pos (seg 0, pair 17) | +2.2193 ± 0.0345 e-9 | +2.1987 ± 0.0113 e-9 | -0.6 | 0.991 | -3.1 | 0.993 |
+| closed-outer-neg (seg 1, pair 0) | -2.9603 ± 0.1398 e-10 | -2.1854 ± 0.0510 e-10 | +5.2 | 0.738 | +222 | 0.314 |
+| closed-ptv-row-pos (seg 3, pair 6) | +1.2788 ± 0.0098 e-8 | +1.3009 ± 0.0050 e-8 | +2.0 | 1.017 | +0.2 | 1.001 |
+| limit-pos (tip at 2.65 cm) | +2.4255 ± 0.0266 e-10 | +2.3860 ± 0.0644 e-10 | -0.6 | 0.984 | +9.2 | 1.013 |
+| near-limit-neg (tip at -2.55 cm) | -2.2815 ± 0.0334 e-10 | -2.0876 ± 0.0675 e-10 | +2.6 | 0.915 | +1260 | 0.308 |
+| seg5-pos (pair 6) | +1.6419 ± 0.0161 e-9 | +1.6381 ± 0.0131 e-9 | -0.2 | 0.998 | -0.8 | 0.999 |
+| seg7-neg (pair 13) | +6.0840 ± 0.0226 e-9 | +1.0729 ± 0.0096 e-9 | -204 | 0.176 | +567 | 0.306 |
+| seg9-pos (pair 12) | +9.5822 ± 0.0941 e-10 | +9.4323 ± 0.1205 e-10 | -1.0 | 0.984 | +0.4 | 1.000 |
+| seg5-near-closed-pos (pair 3) | +7.7515 ± 0.2093 e-10 | +7.3682 ± 0.1572 e-10 | -1.5 | 0.951 | +0.9 | 1.002 |
+
+After the fix (2026-10-23, `examples/aperture_gradient_consistency.py --study`,
+the same seeds and settings; all 13 edges are one contraction there, so the `+` rows are
+a fresh, independent sample of the same estimator; the finite differences are the
+forward model's and did not move):
+
+| edge | g_FD (real) | g_edge (real) | z | ratio | z, a = 1 | ratio, a = 1 |
+|---|---|---|---|---|---|---|
+| open-neg | -1.3257 ± 0.0028 e-7 | -1.3241 ± 0.0015 e-7 | +0.5 | 0.999 | +0.2 | 1.000 |
+| open-pos | +9.4135 ± 0.0921 e-10 | +9.1981 ± 0.1300 e-10 | -1.4 | 0.977 | -0.7 | 0.999 |
+| near-closed-neg | -1.3712 ± 0.0039 e-8 | -1.3692 ± 0.0024 e-8 | +0.4 | 0.999 | +1.5 | 0.998 |
+| near-closed-pos | +1.2662 ± 0.0027 e-8 | +1.2737 ± 0.0026 e-8 | +2.0 | 1.006 | +1.2 | 1.002 |
+| closed-pos | +2.2193 ± 0.0345 e-9 | +2.2131 ± 0.0110 e-9 | -0.2 | 0.997 | -3.0 | 0.993 |
+| closed-outer-neg | -2.9603 ± 0.1398 e-10 | -2.8932 ± 0.0560 e-10 | +0.5 | 0.977 | +0.7 | 0.998 |
+| closed-ptv-row-pos | +1.2788 ± 0.0098 e-8 | +1.2919 ± 0.0053 e-8 | +1.2 | 1.010 | -0.1 | 1.000 |
+| limit-pos | +2.4255 ± 0.0266 e-10 | +2.3980 ± 0.0620 e-10 | -0.4 | 0.989 | +7.9 * | 1.012 * |
+| near-limit-neg | -2.2815 ± 0.0334 e-10 | -2.2475 ± 0.0770 e-10 | +0.4 | 0.985 | -1.2 | 1.001 |
+| seg5-pos | +1.6419 ± 0.0161 e-9 | +1.6442 ± 0.0130 e-9 | +0.1 | 1.001 | -0.8 | 0.999 |
+| seg7-neg | +6.0840 ± 0.0226 e-9 | +6.0696 ± 0.0190 e-9 | -0.5 | 0.998 | +1.5 | 0.998 |
+| seg9-pos | +9.5822 ± 0.0941 e-10 | +9.6364 ± 0.0970 e-10 | +0.4 | 1.006 | -0.5 | 0.999 |
+| seg5-near-closed-pos | +7.7515 ± 0.2093 e-10 | +7.3978 ± 0.1800 e-10 | -1.3 | 0.954 | +1.2 | 1.002 |
+
+\* The finite difference's truncation at the field limit (below); a heuristic Richardson
+extrapolation from (0.005, 0.02) gives 0.065554 against the edge's 0.065479 ± 0.000095,
+z = -0.7. Over the
+13 edges chi2 = 10.4/13 (p = 0.66, real; the five `-` edges alone 1.0/5) and, with the
+field-limit edge extrapolated, 20.2/13 (p = 0.09, a = 1; `-` alone 6.3/5, p = 0.28). The
+`closed-pos` row at a = 1 (-3.0) is the closure property below: the edge returns the
+exact derivative at closure, the difference quotient the slope beyond the 0.5-micron
+overlap. These match the sign-fold diagnosis below to within the noise, as they must:
+the fold was the fix's effect done by hand.
+
+**The fix, 2026-10-23** (maintainer sign-off, conditional on every positive-weight
+result staying bit-identical; reference engine and Warp kernels in one commit, AGENTS.md
+2.2). Three changes, each in both engines where both had it:
+
+1. The electron deposit guard (`deposit_or_escape` in `transport/electron.py`,
+   `_deposit_or_escape` in the Warp kernels, which now takes the particle's weight)
+   skips unless the *unweighted* energy is positive, read from the signs of the
+   weighted amount and the weight: `if w > 0: skip if amount <= 0; else: skip if
+   amount >= 0`. For `w > 0` that is the old test, operation for operation; a
+   zero-weight particle (`amount == 0`) is skipped as before.
+2. The bremsstrahlung photon is spawned for any nonzero weight (`photon_w != 0`).
+3. The photon roulette cap compares `abs(w)` (Compton in both photon loops, the soft
+   bremsstrahlung photon in both electron loops): a negative weight used to stay in the
+   game for ever; unbiased either way, a variance matter.
+
+**Considered and rejected: symmetric deposit rounding.** The Warp fixed-point deposit
+quantizes with `int64(x + 0.5)`, which truncates a negative amount toward zero, so a
+negative-weight deposit keeps a bias of about +1 quantum (1e-9 MeV) on average, between
+0.5 and 1.5 quanta per deposit (review measurement: mean 1.0005; `_escape` already rounds
+with `floor`; the reference engine scores in float64). Correction: the commit message of
+853515d says "below one quantum"; the mean is one. `floor(x + 0.5)`
+removes it and agrees with the cast for every x above -0.5 quanta, but it is not
+bit-identical for positive weights: positive-weight electron transport files a few
+negative float32 residues of its energy bookkeeping (tens of quanta; the reference
+engine's float64 loop files them too, at about 1e-16 MeV), which then round differently.
+On the golden arrays below: KERMA routes and the reference engine unchanged; with
+electrons, 1 to 85 of 2304 voxels per dose map moved, by at most 4e-9 relative, the
+energy books by at most 2e-7 MeV over 2e5 histories. Committed (417fb5d) and reverted
+(853515d): the sign-off's bit-identity condition outranks a one-quantum bias (about
+5e-8 of the dose here: the Warp mirror residual). Also considered and **not** taken (review): rounding
+conditioned on the weight's sign, `-int64(-x + 0.5)` for a negative weight, would keep
+positive-weight bit-identity and make Warp's mirror exact, at the cost of threading the
+weight into `_deposit` at every call site; the effect it removes is ~5e-8 relative.
+
+Other weight-sign tests found and left alone, because they are not this defect: the
+roulette game's `new_w == 0.0` kill tests (sign-symmetric); the head pre-solve's
+`weight > 0` / `weight <= 0` tests (`geometry/head.py`, `backends/warp/presolve.py`),
+which act on a physical beam's phase space, never on a signed estimator's history (none
+is ever pre-solved), and which the record above documents as dropping zero-weight
+primaries; source and spectrum validators refusing negative weights by contract; and the
+DijAssembler's `row_dose > 0` keep rule (negative Dij entries; documented, use the
+contraction).
+
+**Bit-identity.** Seeded outputs of the unchanged code were saved first (31 arrays on the
+reference engine, 54 on Warp cpu, 62 on Warp cuda; 227,883 values: dose, sigma and the
+four energy books of open-field runs, Dij index/dose/sigma arrays and contractions)
+across a 6 MeV pencil with lung- and bone-density slabs (electrons on and KERMA), a 15
+MeV pencil (pair production), electron primaries, a uniform 1.5 T field, a host-route
+custom source at weight 0.7, the spectral fan (dose to medium and to water), the
+lattice Dij, a segmented fan's Dij (correlated and independent), its contraction and
+plan view, a `+`-edge gradient contraction, a tabulated water/lung/bone/tungsten 6 MV run
+(both scoring modes) and, on cuda, two batch lanes. With the three changes every array
+compares exactly equal on all three targets (re-checked after the rounding revert:
+0 of 147 arrays differ).
+
+**Tests after the fix.** The strict xfails are gone. `test_signed_weights` pins:
+
+- the in-engine mirror (`-D(-w)` against `D(w)`, two seeds) on all three targets, with
+  electrons on and in KERMA mode;
+- the mirror on one stream at `|w|` = 0.5 and at `|w|` = 4 = `PHOTON_ROULETTE_WEIGHT_CAP`
+  (where every roulette site meets the cap; at 0.5 almost no lineage reaches it): exact
+  on the reference engine (2000 histories, so the bremsstrahlung roulette fires), and
+  on Warp cpu and cuda up to the rounding, `int64(x + 0.5) + int64(-x + 0.5)` being 0 or
+  1 quantum per deposit pair, the summed absolute residual bounded by 1000 deposits per
+  history (measured 8.2);
+- closed energy books for signed runs (emitted = deposited + escaped + unscored at the
+  project's 1e-4 balance tolerance; measured 1e-8) on all three targets;
+- a negative-weight broad beam on Warp cpu against the reference engine, scored as a
+  depth-dose curve (16 x 16 cm by 5 mm slabs, 16 batches) at **equal history counts**
+  (3200 each; see the oracle note below). Calibrated over 30 seed pairs (2 p below 0.05,
+  none below 0.01, KS p = 0.19); the old guard in Warp alone gives chi2 894 against a
+  null of 23, in the reference engine alone 995 against 23. The first version compared
+  3200 reference against 32,000 Warp histories; it was calibrated at its bin occupancy
+  (20 seed pairs: 1/20 below 0.05, KS p = 0.12), but equal counts remove the question.
+  An earlier version on 2 x 2 cm x 2 mm voxels had no power (the Warp mutant passed with
+  mean z^2 1.09: a few deposits per voxel per batch, the trap recorded under "Segmented
+  fans").
+
+Mutants (each alone, all other fixes kept): the deposit guard in Warp fails the Warp
+mirror tests and all four `-`-side DAO tests, in the reference engine both reference
+mirror tests and the ref-vs-Warp check; the Warp bremsstrahlung guard (`photon_w > 0`,
+which an independent review found passing every earlier test) fails the Warp one-stream
+mirror (4 cases) and the Warp book closure (4 cases); the roulette cap reverted to `w <
+CAP` fails, at `|w|` = 4, the reference mirror (Compton site and bremsstrahlung site) and
+the Warp mirror (scattered-photon site at both weights, bremsstrahlung site at 4). The
+Warp split-path cap site is compile-time dead code while `PHOTON_SPLIT_N = 1`. The
+`-`-side DAO gradient tests pass on cpu and cuda.
+
+**An oracle artifact, not an engine difference.** A positive-weight comparison seen on
+the way first looked like a Warp/reference disagreement: water `VoxelGrid.uniform_water(
+shape=(8, 8, 16), spacing=(0.5, 0.5, 0.5))`, analytic cross sections, a 2 MeV parallel
+beam over x, y in [1, 3] cm starting at `z = 0` (the `_SignedBeam` of
+`tests/integration/test_signed_weights.py`), electrons on, 8 batches, reference 1600
+histories against Warp cpu 16,000: chi2 773 against a null mean of 369 (seed 20260711)
+and 487 against 354 (seed 20260722). The review traced it to the oracle: the beam
+entering from vacuum at `z0 = -1` fails the same way (770.8 against 368.6); the reference
+engine at 1600 against itself at 16,000 fails on 3 of 3 seeds (737, 526, 680 against
+~360; reproduced here: 692 against 358); Warp cpu 1600 against 16,000 fails on 6 of 7;
+and the reference engine against Warp at **equal** counts (1600 / 1600 and 16,000 /
+16,000) passes on both seeds (reproduced). `assert_chi2_consistent_batched` is
+miscalibrated with ~200 histories per batch on sparse voxels set against ten times as
+many on the other side: the sparse side's batch sigma misrepresents its own voxel
+distribution. **Any test comparing unequal history counts on sparse voxels is suspect**;
+equalize the counts, or calibrate over seed pairs at the test's own bin occupancy.
+
+The negative-side ratio is not one factor: 0.31 for the integral dose, 0.17 to 0.92 for the
+demo adjoint, whose mixed signs weight the lost electron dose differently per edge, so the
+defect bends the gradient vector, not just its length.
+
+**The cause, isolated.** A probe-only copy of the edge generator that writes `-w` (every
+weight of a `-` edge is negative, so the run is all-positive) and negates the contraction
+afterwards — a sign fold, linear in exact arithmetic, never committed — brings every `-`
+edge into agreement: z = +0.5, +1.8, +0.1, +1.9, +0.0 (real) and +0.2, +1.9, +0.6, -0.8,
++1.8 (a = 1) for open, near-closed, closed-outer, near-limit and seg7. The copy without the
+fold is bit-identical to the shipped kernel on the same seed (both edge sets, both adjoints).
+The generator itself is sign-symmetric: mirroring a segment in u maps a `-` edge onto a
+`+` edge, and the device mean weights of the pairs agree to 0.02-0.04 % (within 1.3 sigma,
+2e7 rays each; the host route mirrors exactly). Over all 13 edges, `-` folded:
+chi2 = 15.2/13 (p = 0.30, real) and, with the field-limit edge Richardson-corrected
+(below), 19.6/13 (p = 0.10, a = 1).
+
+**Transport-free, every edge** (mean edge weight from the in-kernel generator, 2e7 rays,
+against the difference quotient of the mean forward transmission from the forward
+kernel's own `segment_transmission`, 4e7 rays, h = 0.005 / 0.01 / 0.02): the open, nearly
+closed and other-segment edges agree to 0.0-0.2 % (|z| <= 1.8), `open-neg` and `seg7-neg`
+at 0.3-0.4 % (z 2-3, falling with h for seg7); `limit-pos` shows the truncation discussed
+below (1.1 / 7 / 30 % at the three steps). **Closed pairs differ by 0.8-1.9 %** (z 3-8):
+the edge gives less. Not a defect, the forward model's micron structure: the tangent rays
+of two touching rounded tips cross the mid-plane short of the apex by `R alpha^2 / 2`
+(2.6e-5 cm near the axis), so the two leaves' penumbrae overlap in a 5e-5 cm band only
+while the pair is closed. 13 % of a tip's derivative mass lies within 1e-4 cm of its
+tangent (the `1 / sqrt(q - q0)` density), the opposing leaf transmits 0.954 of it there,
+and the exact derivative at closure is 1.7 % below the slope seen once the tip has moved
+more than about half a micron (`closed-pos`: edge 9.258e-3; the same weights without
+`T_rest` 9.432e-3; forward difference quotients 9.40-9.44e-3 on the device, 9.43e-3
+± 0.09 on the host in float64). The edge estimator returns the derivative, which is
+correct; any finite difference coarser than the overlap returns the secant. The
+transport-level closed rows (ratios 0.991-1.017, |z| <= 3.1) are consistent with this
+within their resolution. An optimizer stepping by tens of microns sees the secant: at a
+closed pair the exact gradient understates the first step by ~1-2 %, a property of the
+leaf model, not of the estimator.
+
+**The finite-difference step.** Paired over the replicates, `g_FD(0.02) / g_FD(0.005) - 1`
+is within 2 sigma of zero for every edge but one, at a = 1 to 0.1-0.4 % — except the tip at
+the field limit, -20.4 ± 0.04 %. There the tangent ray sits `R alpha^2 / 2` = 0.1 mm inside
+the field edge, `D(x)` has a nearby `(q_field - q0)^{3/2}` point, and the O(h^2) constant
+is ~460 /cm^2: -1.1 % at 0.005, which is the z = +9.2 above. Richardson from (0.005, 0.02),
+`(16 g(0.005) - g(0.02)) / 15`, gives 0.065553 ± 0.000041 against the edge's
+0.065534 ± 0.000084 (z = -0.2) at a = 1 and z = -1.1 for the real adjoint. The
+extrapolation is heuristic: it assumes an `h^2` law fitted from the same two steps, near
+a `(q_field - q0)^{3/2}` point that the h = 0.02 stencil straddles. An independent
+three-step check (review, 2026-10-23) predicts `g(0.002) / g(0.005) - 1` = +1.15 % from
+that law and measures +0.99 ± 0.09 % (1.8 sigma), with the h = 0.002 point itself
+contaminated by the float32 jitter below. At h = 0.002 the
+difference quotient moves by up to 1.1 % at a = 1 with 3-6 sigma significance on some edges
+(closed-pos -1.09 ± 0.19 %, closed-ptv-row-pos -0.73 ± 0.17 %, open-neg +0.25 ± 0.07 %),
+with no consistent sign and nothing at 0.02 — not truncation, but float32. The forward
+kernel's chord twin (`mlc_path_length`, float32, fast_math) keeps the near-tangent
+cancellation that the edge generator's closed form removes (`aperture._NEAR_TANGENT_S2`,
+below q - q0 = 2e-3 cm), so `D(x)` jitters on micron scales and a difference quotient
+divides that by 2h. Transport-free, on the same rays, the device's difference quotient of
+the mean transmission against the host's float64 one: `closed-pos` -1.0 % at h = 0.001 and
+0.002 (24 sigma), -0.06 % at 0.005, -0.07 % at 0.02; `open-pos` -0.08, -0.07, +0.05,
++0.02 %. It matters to the oracle, not to the gradient: h = 0.005 is the compromise
+(float32 below 0.1 %, truncation negligible), and the field-limit edge needs the
+extrapolation. Whether the optimizer's loss should see a forward model with that closed
+form too is open.
+
+**Power** (the comparison must fail when it should). Study scale, chi2 over the 8 `+` edges
+(and over all 13 with `-` folded), the real adjoint:
+
+| mutant | `+` edges | all, `-` folded |
+|---|---|---|
+| none (control) | 7.9/8, p = 0.45 | 15.2/13, p = 0.30 |
+| sign flipped | p = 0, max abs z 649 | p = 0 |
+| wrong segment (same pair, next segment's tips) | p = 0, max abs z 458 | p = 0 |
+| wrong pair (neighbouring pair) | p = 0, max abs z 594 | p = 0 |
+| support at the apex (the 2026-10-21 sliver bug) | p = 0, max abs z 84 | p = 0 |
+| mean energy in every mu | 76/8, p = 3e-13 | 90/13, p = 2e-13 |
+| float32 near-tangent chord restored | 27/8, p = 8e-4 | 183/13, p = 3e-32 |
+| T_rest dropped | 9.3/8, p = 0.32 (missed) | 16.8/13, p = 0.21 (missed) |
+| shipped `-` edges (the transport defect) | — | 2.1e5/13, p = 0 |
+
+Kernel mutants are probe-only copies of `generate_fan_edges` monkeypatched into the engine.
+With a = 1 the same mutants are caught by larger margins. The one miss is physics, not
+power: in an MLC-only stack the rest of the stack along a tip edge's rays is the opposing
+leaf, which those rays miss unless the pair is closed, and there only in the apex sliver —
+dropping `T_rest` moves `closed-pos` by 0.2 % and nothing else measurably. With a jaw in the
+stack it matters, and the fast test has one (below).
+
+**Variance and cost.** Per transported history, on the full fan at h = 0.005, the finite
+difference's variance (two columns per estimate) is 2.5e3 to 3.3e4 times the edge
+estimator's (median ~6e3, both adjoints); the edge estimator spends every history on the
+derivative, the difference on the 1/20 of the fan in one leaf strip and the few millimetres
+of it in the tip's penumbra, and its tangent-ray rays carry weights growing like h^{-1/2}.
+GPU cost per history is similar (edge runs ~1.2-2.2e-8 s, difference columns ~2e-8 s with
+read-back, shared GPU), so the efficiency ratio is of the same order. That is 30-300x more
+than the parallel-beam figure above (76-130x, where the oracle was already restricted to a
+slice).
+
+**Fast tier** (`tests/dij/test_dao_gradient_consistency.py`, 8 s on Warp cpu, 2 s on cuda):
+a 2 MeV +- 10 % fan, a focused dense-water jaw over a 2-pair dense-water MLC (the jaw's `+`
+edge cuts every `+` tip's penumbra, so `T_rest` is far from 1), two segments; edges: an open
+pair, a nearly closed pair (0.8 mm), a closed pair (one-sided), the jaw edge; electrons on;
+adjoints `a = 1` and a mixed-sign one. Per edge Welch's t with its Welch-Satterthwaite dof,
+mapped to a normal score, chi2 over the edges (calibrated at 8-16 replicates/batches, where
+the batched helper's normal approximation over 4-5 terms is not). Both sides must pass
+(the `-` side was a strict xfail until the fix); the oracle must reject a sign flip, the
+wrong pair and the wrong segment (p < 1e-6). Calibration over 20 seed sets x 2 adjoints on
+cuda: 3/40 p-values below 0.05 and 1/40 below 0.01, KS p = 0.003 (a bulk skew; the folded
+`-` side, KS 0.28); 10 sets on cpu: 2/20 below 0.05, KS 0.19. An independent 12-seed cuda
+calibration after the fix (review) finds no edge biased (per-edge mean z within ±0.42;
+all z against N(0, 1): KS p = 0.63 and 0.85 for the two adjoints) but per-edge z
+variances of 0.26 to 1.7: the bulk skew comes from per-edge sigmas that are
+conservative for some edges, not from a bias. Test-scale power (cuda / cpu):
+`T_rest` dropped p = 1e-58 / 7e-13; the transport defect p ~ 1e-110 / 1e-25; mean energy,
+near-tangent chord and apex support are not caught at this size (a 0.4 MeV wide spectrum,
+dense water instead of tungsten; apex p = 4e-3 on cuda only) — the example reproduces the
+study for those.
+
+Resolved and open, as of 2026-10-23: (1) the transport sign fix: done (above). (2) The
+float32 forward chord at small h: not now — the edge kernel's own closed-form near-tangent
+branch is being corrected first for bisection-fallback edges, separately; the forward
+kernel keeps the twin. (3) At touching leaves the estimator keeps the exact derivative;
+the 1.7 % gap to the secant a finite step sees is a property of the rounded-tip leaf
+model, recorded above, not a defect. (4) The fast-tier oracle's mild bulk skew on cuda
+(KS p = 0.003): diagnosed as conservative per-edge sigmas, not bias (above); seeds are
+deliberately not tuned for it. (5) Open: leaf-scatter (first-Compton) collimation is not
+covered by either path, as stated above. (6) Resolved: the apparent ref/Warp
+disagreement for a beam starting on the phantom surface is the batched oracle at
+unequal history counts (above). (7) Rejected: symmetric deposit rounding, and its
+weight-conditioned variant (above). (8) Open: `run_dij` and `DijAssembler` drop
+negative-weight Dij entries silently (the `row_dose > 0` keep rule); a warning when a
+beamlet column holds negative dose would make that visible. Not now.
+
+## DAO iteration at 0.1 s, 2026-10-23
+
+**One Monte Carlo DAO iteration of the 6 MV fan example (10 segments x 20 leaf pairs, 400
+edges, tungsten MLC, electrons on) now takes 68 ms on a laptop RTX 4070**, against 0.6 s on
+2026-10-21 and 178 ms after the base engine items merged. Measured on the idle GPU at 2.5
+GHz, best of 9 (median 69 ms), 400k histories per segment forward and 2000 per edge:
+
+| part | ms |
+|---|---|
+| forward: one segmented `run_dij` (correlated columns) | 43 |
+| edge contraction over a `SegmentedEdgeSource` | 20 |
+| dense columns, plan dose, objective, weight gradient | 2 |
+| `with_settings` + edge-source build | 0.4 |
+
+The weight gradient needs no engine call: it is the adjoint's dot product with the forward
+pass's Dij columns. The example now runs this route (`examples/aperture_gradient_fan_dao.py`,
+100 iterations by default). It is also the first optimization on corrected gradients: before
+the negative-weight transport fix (see "DAO gradient consistency"), every neg-side edge
+gradient was 3-6x too small. On the corrected gradients the loss falls from 2.15 to 0.24 in
+100 iterations (seed 7), with the OAR's dose clearly reduced against the PTV's. The earlier
+2026-10-21 run (1.65 -> 0.26 in 40 iterations) used the defective gradients and is
+superseded.
+
+Next engine levers, deferred (not needed for the target): the dense per-group map in the
+contraction route (5.3 ms) and the launch count per call (69); the forward pass is now the
+larger share.
+
+**History budget (measured 2026-10-23).** 100 iterations from the same initial plan, 4
+forward x 4 per-edge history levels x 3 MC seeds; each final plan re-scored with 4e6
+histories per segment, because the in-loop loss carries the forward noise (its quadratic
+terms add the voxel variance, so the demo's printed 0.24 is a true 0.13). Initial true
+loss 1.528.
+
+| forward / segment | per edge 500 | 1000 | 2000 | 4000 | ms per iteration |
+|---|---|---|---|---|---|
+| 50k | 0.1886 | 0.1870 | 0.1851 | 0.1860 | 35-51 |
+| 100k | 0.1651 | 0.1652 | 0.1637 | 0.1629 | 43-53 |
+| 200k | 0.1448 | 0.1452 | 0.1432 | 0.1424 | 56-61 |
+| 400k | 0.1309 | 0.1268 | 0.1260 | 0.1276 | 67-77 |
+
+Seed-to-seed sd 0.0004-0.0041. Three readings:
+
+- The edge-gradient histories do not limit the plan: 500 per edge is as good as 4000 at
+  every forward level, and the contraction's cost barely depends on them (it is mostly
+  fixed per call).
+- The forward histories do, and the gain has not saturated at 400k: the true loss keeps
+  falling with forward statistics. The likely mechanism (not isolated) is the one-sided
+  OAR and normal-tissue terms: max(0, D + noise - limit) is biased upward by noise, so the
+  optimizer converges to the optimum of a noise-inflated objective. A schedule that grows
+  the forward histories as the optimizer converges, or a forward estimate averaged over
+  iterations, are the natural next experiments.
+- About 30 ms per iteration is fixed (two launches, drains, dense Dij columns), so cutting
+  histories cannot reach far below that; at the quality end, forward cost is the trade.
+
+The demo keeps 400k forward and 2000 per edge.
+
+**The re-scored loss still carries a noise floor.** The loss is quadratic in the dose,
+so any finite-statistics estimate of it is inflated by the voxel variance. Re-scoring
+the demo's 500-iteration plan at 2e6 and at 1e7 histories per segment gives 0.092 and
+0.077 for the final plan (1.588 and 1.475 for the initial one). Losses re-scored at
+equal statistics compare fairly across configurations, as in the table above, but in
+absolute terms they are upper bounds. An unbiased estimate needs two independent
+forward runs multiplied term by term, (D1 - Rx)(D2 - Rx), which is exact for the PTV
+term though not for the one-sided terms; not built.
+
+## VMAT arc demonstrator, 2026-10-23
+
+`examples/vmat_arc_dao.py` optimizes a coplanar arc with one aperture per gantry angle
+(default 36 angles at 10 degrees, 10 leaf pairs, 720 edges) on a TG-119-like C-shaped
+PTV around a cylindrical OAR, with the same projected Adam as the fan example. It uses
+only public API: each angle is its own `SegmentedFanSource` (one segment) whose fan and
+beam frame are rotated about the gantry axis, so an iteration is one plan `run` and one
+edge contraction per angle.
+
+- **Cost:** 72 launches per iteration, 0.29 s on a laptop RTX 4070 (forward 0.16 s,
+  gradient 0.13 s), about 4 ms per launch at 100k forward histories per angle and 500
+  per edge. Per-launch overhead, not transport, sets it. One launch for all control
+  points (a source holding several fans, each with its own frame; the edge kernel
+  already takes per-segment frames) is the engine lever that would remove it; not
+  built.
+- **Initialization decides the result (DAO is non-convex).** The plain conformal
+  projection covers the OAR from every angle around a C, and it is a local minimum for
+  the tips: closing a leaf towards the OAR first underdoses the PTV. Gradient descent
+  from it only scaled every MU down (re-scored loss 0.50 -> 0.16, PTV and OAR on the
+  same DVH). Cutting the OAR's projection out of each row and alternating sides between
+  neighbouring angles where the OAR splits a row gives 0.037 -> 0.0067 (2e6 histories
+  per angle), with the OAR traded up from ~0.1 to 0.2-0.5 Rx (unpenalized below 0.5)
+  for PTV homogeneity.
+- One full run showed a sudden 4x slowdown of both forward and gradient from iteration
+  97 on; two later runs with a GPU clock logger did not reproduce it (steady 2.0-2.2
+  GHz, no throttle flag). Treated as an external clock event, not a code effect.
+- Not modelled: leaf-speed and MU-rate constraints between control points, couch and
+  collimator rotation, more than one aperture per angle.
+
+## Arc edge sets, 2026-10-23
+
+**The edge-gradient source takes the arc too.** After the arc source landed on develop
+(next section), `SegmentedEdgeSource` lists the edges of a `SegmentedFanSource` whose
+segments carry their own fan and frame. The field-dependent columns (edge extent,
+mid-plane field, `L_r / A`, central ray) are evaluated once per distinct (fan, frame)
+pair and laid out per segment; each segment's origin and rotation come from its own
+frame; the layout cache is keyed on every fan and frame. The in-kernel generator was
+unchanged: it already read a per-segment origin and rotation, previously filled by
+tiling the template frame.
+
+- **Exact against the per-edge route** on an arc with a turned collimator, a
+  non-coplanar beam and per-fan off-axis fields: every host column equal in float64,
+  every uploaded device array and the contraction (values, sigma, energy books)
+  bit-identical on cpu and cuda, correlated and independent. The single-fan path is
+  unchanged (its existing pins pass).
+- **Statistical oracle: the host sampler, not the reference engine.** Device against
+  the reference engine at 800 histories per edge failed an unmutated run on 2 of 3
+  seeds while 0.25 and 0.5 degree frame tilts passed: edge-derivative weights are
+  heavy-tailed, and 100 histories per batch give skewed batch means. The test instead
+  compares the in-kernel rays with a subclass's Warp host route (each edge's
+  `FanEdgeDerivativeSource` sampling, which the reference engine also emits; same
+  transport), 8000 histories per edge on each side, cpu, about 1 s. Calibration 3/3
+  seed pairs pass on cpu and cuda (chi2/k 0.96-1.76); every frame mutant fails:
+
+  | mutant (in-kernel columns only) | chi2/k, cpu 8k | chi2/k, cuda 40k |
+  |---|---|---|
+  | none (3 seed pairs) | 0.96-1.76, pass | 1.16-1.69, pass |
+  | segment 0's frame everywhere (the pre-port behaviour) | 74.8 | 426 |
+  | frames of segments 1 and 2 swapped | 113 | 613 |
+  | segment 2 tilted 0.5 deg | 10.6 | 51.8 |
+  | segment 2 tilted 0.25 deg | 3.59 | 13.6 |
+  | segment 1 tilted 0.5 deg | 21.0 | 62.7 |
+  | segment 1 focal spot moved 2 mm in y | 6.76 | 12.2 |
+
+- **The VMAT demonstrator now runs one arc source:** forward one `run_dij` (the angles
+  as columns), gradient one edge contraction, so two launches per iteration instead of
+  72. At the defaults, GPU at 2535 MHz without throttle: 0.10 s per iteration (forward
+  0.08 s, gradient 0.02 s) against 0.29 s; re-scored loss 0.0370 -> 0.0066 (2e6
+  histories per angle), as with per-angle sources (0.037 -> 0.0067). The forward is
+  now correlated across angles (same uniforms through each angle's fan), which is
+  unbiased; the evaluation doses are too.
+
+## Stochastic optimization of the arc: history schedules and ipax, 2026-10-24
+
+The VMAT demonstrator (36 angles, one arc source, 0.06 s + 0.38 s per million forward
+histories per angle per iteration on the RTX 4070 laptop) optimized at equal optimizer
+wall time, evaluations excluded; every plan scored at one common evaluation seed with
+2e6 histories per angle (an upper bound with a noise floor, comparable across rows);
+three base seeds each. Scripts and data: session scratchpad `stoch/`.
+
+**The step decay, not the history count, held Adam back; with a constant step the
+history count should grow.** True loss, mean (sd):
+
+| projected Adam | 15 s | 30 s | 60 s |
+|---|---|---|---|
+| step 1/sqrt(k), 100k histories (the example) | 0.00719 | 0.00672 | 0.00657 (0.00009) |
+| step 1/sqrt(k), 1M | 0.00727 | 0.00662 | 0.00590 |
+| step 1/sqrt(k), geometric 100k -> 2M (x1.03 per iteration) | 0.00667 | 0.00642 | 0.00604 |
+| step 1/sqrt(k), adaptive norm test (Byrd et al. 2012, theta 0.5) | 0.00731 | 0.00703 | 0.00652 |
+| constant step, 100k | 0.00616 | 0.00597 | 0.00581 |
+| constant step, 1M | 0.00523 | 0.00404 | 0.00370 |
+| constant step, N ~ 100k sqrt(k) (Smith et al. 2018) | 0.00414 | 0.00376 | 0.00347 |
+| **constant step, geometric 100k -> 2M** | **0.00398** | **0.00364** | **0.00346 (0.00008)** |
+
+- With the decaying step every history schedule plateaus at 0.0058-0.0066: the step
+  shrinks before the noise matters. The norm test grows the sample to its 2M cap
+  within ~40 iterations (the forward noise is large against the gradient), so it
+  spends its time on few, expensive iterations.
+- With a constant step, a constant 100k sample stalls in its noise ball (0.0058,
+  no better at 60 s than at 30 s); growing the sample shrinks the ball. Geometric
+  growth leads at every time; the spread over seeds is small (sd 1e-5 at 30 s).
+- Against the example's default this is -47 % true loss at equal time.
+
+**ipax (interior point, L-BFGS, Breedveld line search and mu) on a fixed sample is
+second.** 1M histories per angle: 0.00470 (0.00006) in 31 s; run to convergence
+(about 62 iterations) 0.00452 (0.00012) in 44 s; 2M: 0.00461 (0.00017) in 67 s. More
+histories do not help, because the limit is not the sample. On ipax's own 1M sample,
+Adam's 60 s plan scores 0.00443 against ipax's converged 0.00492, and ipax restarted
+from Adam's plan lowers the sample loss to 0.00399 while the true loss rises from
+0.00336 to 0.00375. ipax converges to the nearest local minimum of a non-convex
+problem; Adam's noisy, momentum-carried steps find a better one; and fitting one
+sample costs ~0.0004 of true loss.
+
+**Retrospective approximation with ipax (Pasupathy 2010) is negative as built.**
+Stages of 15 iterations at 250k, 500k, 1M, 2M, each on a new fixed sample, warm-started
+from the previous stage: 0.00817 (0.00078); x-only warm start 0.00830; initial barrier
+1e-3 or 1e-5 on restart 0.0085-0.0091 (one seed 0.0061); longer stages 0.00585 at
+151 s. Every restart costs the solver its L-BFGS curvature and recentres the barrier:
+the first iterates of a stage jump (true loss 0.0084 -> 0.12 at the 2M switch). A
+warm-startable quasi-Newton memory, or switching samples inside one solve, would be
+needed; not pursued.
+
+**Leaf-speed limits as linear inequalities work in ipax, given a feasible start and a
+small initial barrier.** |tip(a+1) - tip(a)| <= delta per pair and side between
+neighbouring control points (no wrap), 700 rows besides the 360 non-crossing rows:
+
+| limit per 10 deg, at the isocentre | none | 2.0 cm | 1.0 cm | 0.5 cm |
+|---|---|---|---|---|
+| true loss, mean (sd) | 0.00504 (0.00025) | 0.00504 (0.00022) | 0.00521 (0.00004) | 0.00581 (0.00020) |
+
+- Feasible to 0 cm in every run, at the same ~30 s.
+- The example's OAR-avoiding start alternates the open side between neighbouring
+  angles; no leaf-speed limit allows that. Its nearest feasible point (a QP solved by
+  ipax in 0.4-0.7 s, no Monte Carlo) straddles the OAR from every angle (true loss
+  4.6 at 2 cm, OAR mean 2 Rx), and the optimizer then stays in that minimum (0.12).
+  Started infeasibly, the restoration phase ends in the same place (0.13). A start
+  that keeps one side for every angle is as good unconstrained (0.0374: the opposed
+  beams cover the other side) and nearly feasible (0.0367 projected even at 0.5 cm);
+  the rows above start from it.
+- With the default initial barrier (0.1, against an objective scaled to 1 at the
+  start) the projected start, on many constraint faces, was pushed inward and the
+  line search stalled (0.071, 527 forward runs in 27 iterations). mu_init = 1e-3 fixes
+  it; so does projecting onto 0.9 delta (strictly interior), at 1.5x the forward runs.
+- Realistic limits are looser: 2.5 cm/s leaves at 6 deg/s gantry allow ~4 cm per 10
+  degrees. The tight rows stand in for finer control-point spacing.
+
+**Projected Adam takes the same constraints, and beats ipax at every limit.** The
+constraints decouple per leaf pair (72 variables: two tip trajectories along the arc),
+so the projection after every Adam step is ten small QPs, solved together by a batched
+ADMM in numpy (variables scaled by sqrt(D), OSQP-style residual balancing of rho):
+15-40 ms in the Euclidean metric (exact to 1e-8 cm against ipax), 30-130 ms in Adam's
+metric D = sqrt(v_hat) (within 1e-3 cm of ipax's solution there; that reference is
+itself ill-conditioned), always feasible to 1e-7 cm. Run with the best schedule
+(constant step, geometric 100k -> 2M) from the same projected one-sided start, the
+projection's ~1-2 s per run counted:
+
+| limit per 10 deg | none | 2.0 cm | 1.0 cm | 0.5 cm | 0.5 cm, Euclidean projection |
+|---|---|---|---|---|---|
+| projected Adam, 30 s | 0.00390 | 0.00392 | 0.00407 | 0.00465 | 0.00477 |
+| projected Adam, 60 s | 0.00359 (0.00012) | 0.00353 (0.00010) | 0.00385 (0.00005) | 0.00437 (0.00007) | 0.00445 (0.00014) |
+| ipax, fixed 1M sample, ~30 s | 0.00504 | 0.00504 | 0.00521 | 0.00581 | |
+
+At equal time projected Adam is 20-23 % below ipax, and the constraint costs it about as
+much in relative terms (+7 % at 1 cm, +22 % at 0.5 cm by 60 s). Projecting in Adam's
+metric is slightly better than Euclidean (0.00437 vs 0.00445), within the spread.
+
+**Optimality gap: the DAO plans are at about twice a fluence-map lower bound.** Beamlets
+at every angle: each leaf row x 0.5 cm bixels along the leaf travel (6480 at 36 angles),
+each a fan clipped to its bixel with the MLC retracted, so the free non-negative fluence
+on them contains every one-aperture-per-angle plan up to the bixel discretization (a tip
+inside a bixel), the hardened leakage spectrum and the rounded tips. All beamlets are
+segments of one arc source with one fan and frame each: one untruncated, independent
+`run_dij` of 6480 x 100k histories takes 9 s (121 M non-zeros). Area-weighted, one
+angle's bixels reproduce its open field to 0.999 in the high-dose region and 1.000 in
+total. The fluence optimum (L-BFGS-B, convex, 2500 iterations, 7 min on the CPU) on the
+same objective and prescription:
+
+| | true loss |
+|---|---|
+| FMO, in-sample on Dij A / on (A+B)/2 (fits the Dij noise: biased low) | 0.00127 / 0.00129 |
+| FMO fluence scored on independent Dij B, C, (B+C)/2, extrapolated in 1/N | 0.00142 |
+| DAO, projected Adam unconstrained, 60 s (3 seeds) | 0.00260 (sd 0.00020) |
+| DAO, projected Adam, 2 cm per 10 deg, 60 s (3 seeds) | 0.00253 (sd 0.00003) |
+
+The DAO values are extrapolated the same way, from fresh seeds at 2M and 8M histories
+per angle: (4 L_8M - L_2M) / 3. The losses quoted so far at 2M per angle (0.0035-0.0037)
+carry a noise floor of ~0.001, about 30 % of the number: the loss is quadratic in a noisy
+dose. The bound has converged with statistics (0.00127 -> 0.00129 at twice the
+histories), so the gap of ~0.0012 (DAO ~1.8-2.0x the bound) is real.
+
+**A second aperture per angle closes about a third of it.** K apertures per angle as K
+sub-arcs over the same 36 angles (one arc source of 36 K segments; sub-arc k starts
+opening side k of the OAR, MU 1/K each; each sub-arc speed-limited and projected on its
+own), projected Adam with the growing sample, 120 s, extrapolated true loss:
+
+| | 1 aperture | 2 apertures | 2 apertures, 2 cm per 10 deg |
+|---|---|---|---|
+| true loss (sd), 3 seeds | 0.00240 (0.00020) | 0.00199 (0.00002) | 0.00192 (0.00003) |
+
+The gap to the bound (0.0013) shrinks from ~0.0011 to ~0.0007; the leaf-speed limit
+costs nothing here either. The rest is unattributed: more apertures, or a better
+optimum for the same apertures (the starting point, the optimizer), or both; two
+apertures ran fewer iterations (~135 against ~195) in the same time.
+
 ## Arcs in one launch, 2026-10-23
 
 **A VMAT arc's control points are the segments of one source.** The arc demonstrator
@@ -1057,3 +2101,36 @@ x12 / x7.
 better for tungsten at 6 MV in both regions and both setups, but on one MLC geometry.
 No adaptive `delta`. The edge-gradient route (`SegmentedEdgeSource`, not on develop)
 does not see the option.
+
+## First-order dose steps of a segmented fan, 2026-11-01
+
+`SegmentedEdgeStepSource` (`geometry/segment_edge_steps.py`) estimates
+`D_s(x + d) - D_s(x) = sum_e d_e dD_s/dx_e`, the derivative taken at the step's midpoint, from
+the edge estimators of `SegmentedEdgeSource`: a history picks an edge with probability
+`|d_e| / sum |d_e|` and carries the edge's ray times `sum |d_e|`. Histories then follow the
+area the edges swept, not the aperture's. An optimizer keeps its segment doses and adds the
+step, instead of re-simulating the plan each iteration.
+
+**Two columns per segment.** Opening edges in `2 s`, closing ones in `2 s + 1`, each signed so
+that its weights are non-negative, because the Dij's compaction keeps positive voxels only
+(AGENTS 2.8 stays untouched). The step is the difference of the two columns.
+
+**Batches.** The kernel stratifies the edge choice over a batch's histories of the column, not
+over the column's: stratifying over the column gave each batch a slice of the edges and
+inflated the batch sigma 30-fold on the test fixture, with the mean intact. `emit` draws
+independently; both are unbiased.
+
+**Validation.** Column contractions against the sum of the edges' own contractions times their
+travel (`tests/dij/test_segmented_edge_steps_warp.py`; a 5 % factor error fails the oracle, and
+a probe at 3-4M histories per column stays within |z| < 1.4), against the reference engine
+through `emit`, and against the Dij's own sum (no voxel lost to compaction).
+
+**On TG-119** (`studies/tg119`, RTX 4070, seed 1 of the 4 deg finish of one 8 deg start, plans
+scored on fresh 8M / 32M runs of the default engine, so that a biased carried dose cannot
+flatter them): 30 iterations re-simulating 2M per segment 5320 at a forward of 2.9 s; carried
+from an 8M start, 300k / 100k / 30k per column 5200 / 5222 / 5250 at 1.55 / 0.75 / 0.40 s. So
+the noise of the start, frozen for the whole run, costs more than the steps' does: a 2M
+start with 100k steps gives 6009. A full re-run half way adds nothing (5401).
+
+**Not done.** Moves of jaws are not in the step (a jaw that tracks the leaves clears them by a
+margin, so its effect is attenuation only); no refresh policy.

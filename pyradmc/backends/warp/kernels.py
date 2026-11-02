@@ -908,6 +908,64 @@ def accumulate_dij_batch(
 
 
 @wp.kernel
+def contract_dij_batch(
+    edep: wp.array(dtype=wp.int64),
+    voxel_mass: wp.array(dtype=wp.float64),
+    weights: wp.array(dtype=wp.float64),
+    n_voxels: int,
+    n_chunks: int,
+    chunk: int,
+    nhist: wp.float64,
+    quantum: wp.float64,
+    partial: wp.array(dtype=wp.float64),
+    total_quanta: wp.array(dtype=wp.int64),
+):
+    """Contract one batch of a beamlet group with the voxel weights, per chunk.
+
+    The contraction counterpart of :func:`accumulate_dij_batch` (see
+    ``ContractionScorer``): ``partial[(local, chunk)] = sum_v a_v dose_v`` over one
+    chunk of one column. One thread per ``(column, chunk)`` summing sequentially,
+    so the float64 reduction order is fixed by the layout (a float atomic would make
+    the result run-to-run nondeterministic, against AGENTS.md 2.3);
+    :func:`close_contraction_batch` then sums the chunks in order. Consumes the
+    quanta map like the Dij fold, and books the group's deposited quanta with an
+    integer atomic, which is order-independent.
+    """
+    tid = wp.tid()
+    local = tid // n_chunks
+    start = (tid - local * n_chunks) * chunk
+    stop = min(start + chunk, n_voxels)
+    base = local * n_voxels
+    acc = wp.float64(0.0)
+    quanta = wp.int64(0)
+    for v in range(start, stop):
+        q = edep[base + v]
+        if q != wp.int64(0):
+            edep[base + v] = wp.int64(0)
+            acc = acc + weights[v] * _batch_dose(q, voxel_mass[v], nhist, quantum)
+            quanta = quanta + q
+    partial[tid] = acc
+    if quanta != wp.int64(0):
+        wp.atomic_add(total_quanta, 0, quanta)
+
+
+@wp.kernel
+def close_contraction_batch(
+    partial: wp.array(dtype=wp.float64),
+    n_chunks: int,
+    g1: wp.array(dtype=wp.float64),
+    g2: wp.array(dtype=wp.float64),
+):
+    """Sum one batch's chunk partials per column, in order, into the running sums."""
+    local = wp.tid()
+    s = wp.float64(0.0)
+    for c in range(n_chunks):
+        s = s + partial[local * n_chunks + c]
+    g1[local] = g1[local] + s
+    g2[local] = g2[local] + s * s
+
+
+@wp.kernel
 def accumulate_run_batch(
     edep: wp.array(dtype=wp.int64),
     voxel_mass: wp.array(dtype=wp.float64),

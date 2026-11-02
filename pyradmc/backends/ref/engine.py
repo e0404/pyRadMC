@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from functools import partial
+from typing import Protocol
 
 import numpy as np
 import numpy.typing as npt
@@ -39,6 +40,7 @@ from pyradmc.geometry.grid import VoxelGrid
 from pyradmc.geometry.source import BeamletSource, Source
 from pyradmc.progress import ProgressCallback, ProgressEmitter
 from pyradmc.rng.interface import RNG
+from pyradmc.scoring.contraction import ContractionResult, ContractionScorer
 from pyradmc.scoring.dij import BatchedBeamletScorer, DijAssembler, DijResult
 from pyradmc.scoring.dose import BatchedDoseScorer, ScoringGeometry
 from pyradmc.scoring.dose_to_water import validate_scoring_mode, water_spr
@@ -54,6 +56,25 @@ from pyradmc.transport.particles import (
 )
 
 __all__ = ["ReferenceEngine", "TransportResult"]
+
+
+class _BeamletScorer(Protocol):
+    """What the shared beamlet loop needs of a scorer (Dij columns or a contraction)."""
+
+    def deposit_at(
+        self,
+        beamlet: int,
+        x: float,
+        y: float,
+        z: float,
+        energy: float,
+        scored: float | None = None,
+    ) -> None:
+        """Book one deposit of ``beamlet``'s current batch."""
+
+    def end_batch(self, n_histories: int) -> None:
+        """Close a batch of ``n_histories`` histories per beamlet."""
+
 
 # Maps a Primary's per-particle kind name to a transport particle constant. A
 # phase-space source sets ``kind`` per record; beam sources leave it None and the
@@ -453,13 +474,148 @@ class ReferenceEngine:
             scoring_mode, self.cross_sections, ecut, transport_electrons
         )
         n_beamlets = source.n_beamlets
-        per_batch = n_histories_per_beamlet // n_batches
         scoring = scoring_grid if scoring_grid is not None else ScoringGrid.for_grid(self.grid)
         scorer = BatchedBeamletScorer(scoring, n_batches, n_beamlets)
+        energy_emitted, energy_escaped = self._transport_beamlets(
+            source,
+            scorer,
+            n_histories_per_beamlet,
+            n_batches,
+            seed,
+            correlated,
+            pcut,
+            ecut,
+            transport_electrons,
+            deposit_weight,
+            step_energy_fraction,
+            deposit_resolution_cm,
+            msc_model,
+            ProgressEmitter(progress, n_beamlets * n_histories_per_beamlet),
+        )
+
+        block = scorer.finalize()
+        assembler = DijAssembler(
+            grid_shape=scoring.shape,
+            n_beamlets=n_beamlets,
+            n_histories_per_beamlet=n_histories_per_beamlet,
+            n_batches=n_batches,
+            truncation=truncation,
+            correlated=correlated,
+            scoring_mode=scoring_mode,
+            provenance=self._provenance(
+                seed, pcut, ecut, msc_model, step_energy_fraction, deposit_resolution_cm
+            ),
+        )
+        assembler.add_block(0, block.dose, block.sigma)
+        return assembler.finalize(
+            energy_emitted=energy_emitted,
+            energy_deposited=block.energy_deposited,
+            energy_escaped=energy_escaped,
+            energy_unscored=block.energy_unscored,
+        )
+
+    def run_beamlet_contraction(
+        self,
+        source: BeamletSource,
+        voxel_weights: np.ndarray,
+        n_histories_per_beamlet: int,
+        n_batches: int,
+        seed: int,
+        pcut: float = PCUT_MEV,
+        ecut: float = ECUT_MEV,
+        transport_electrons: bool = True,
+        correlated: bool = True,
+        scoring_grid: ScoringGrid | None = None,
+        scoring_mode: str = "dose_to_medium",
+        step_energy_fraction: float | None = None,
+        deposit_resolution_cm: float | None = None,
+        msc_model: str = "gs",
+        progress: ProgressCallback | None = None,
+    ) -> ContractionResult:
+        """Score ``g_j = sum_v a_v D_vj`` per beamlet without assembling the Dij.
+
+        ``voxel_weights`` (``a``) has the scoring grid's shape — typically ``dL/dD``
+        of a plan objective, so ``g`` is the objective's gradient with respect to
+        the column weights or, with aperture-edge columns, the leaf positions. The
+        histories, their mapping and every other parameter are those of
+        :meth:`run_dij`, so ``values`` equals the untruncated Dij columns contracted
+        with ``a``; the per-batch contraction carries its own sigma. See
+        :mod:`pyradmc.scoring.contraction`.
+        """
+        if n_histories_per_beamlet < 1:
+            raise ValueError(
+                f"need at least one history per beamlet, got {n_histories_per_beamlet}"
+            )
+        if n_histories_per_beamlet % n_batches != 0:
+            raise ValueError(
+                f"n_histories_per_beamlet={n_histories_per_beamlet} not divisible by "
+                f"n_batches={n_batches}; unequal batches would weight batch means inconsistently"
+            )
+        deposit_weight = _deposit_weight_for(
+            scoring_mode, self.cross_sections, ecut, transport_electrons
+        )
+        n_beamlets = source.n_beamlets
+        scoring = scoring_grid if scoring_grid is not None else ScoringGrid.for_grid(self.grid)
+        scorer = ContractionScorer(scoring, n_batches, n_beamlets, voxel_weights)
+        energy_emitted, energy_escaped = self._transport_beamlets(
+            source,
+            scorer,
+            n_histories_per_beamlet,
+            n_batches,
+            seed,
+            correlated,
+            pcut,
+            ecut,
+            transport_electrons,
+            deposit_weight,
+            step_energy_fraction,
+            deposit_resolution_cm,
+            msc_model,
+            ProgressEmitter(progress, n_beamlets * n_histories_per_beamlet),
+        )
+        values, sigma, deposited, unscored = scorer.finalize()
+        return ContractionResult(
+            values=values,
+            sigma=sigma,
+            n_histories_per_beamlet=n_histories_per_beamlet,
+            n_batches=n_batches,
+            correlated=correlated,
+            energy_emitted=energy_emitted,
+            energy_deposited=deposited,
+            energy_escaped=energy_escaped,
+            energy_unscored=unscored,
+            provenance=self._provenance(
+                seed, pcut, ecut, msc_model, step_energy_fraction, deposit_resolution_cm
+            ),
+        )
+
+    def _transport_beamlets(
+        self,
+        source: BeamletSource,
+        scorer: _BeamletScorer,
+        n_histories_per_beamlet: int,
+        n_batches: int,
+        seed: int,
+        correlated: bool,
+        pcut: float,
+        ecut: float,
+        transport_electrons: bool,
+        deposit_weight: DepositWeightFn,
+        step_energy_fraction: float | None,
+        deposit_resolution_cm: float | None,
+        msc_model: str,
+        emitter: ProgressEmitter,
+    ) -> tuple[float, float]:
+        """Transport every beamlet's histories into ``scorer``; return the energy books.
+
+        The one batch-outer, beamlet-inner loop and history mapping shared by
+        :meth:`run_dij` and :meth:`run_beamlet_contraction` (the convention is
+        documented on :meth:`run_dij`), so the two transport the same histories.
+        """
+        n_beamlets = source.n_beamlets
+        per_batch = n_histories_per_beamlet // n_batches
         energy_emitted = 0.0
         energy_escaped = 0.0
-        emitter = ProgressEmitter(progress, n_beamlets * n_histories_per_beamlet)
-
         for batch in range(n_batches):
             for beamlet in range(n_beamlets):
                 deposit = partial(scorer.deposit_at, beamlet)
@@ -495,24 +651,4 @@ class ReferenceEngine:
                     )
             scorer.end_batch(per_batch)
             emitter.tick(n_beamlets * per_batch)
-
-        block = scorer.finalize()
-        assembler = DijAssembler(
-            grid_shape=scoring.shape,
-            n_beamlets=n_beamlets,
-            n_histories_per_beamlet=n_histories_per_beamlet,
-            n_batches=n_batches,
-            truncation=truncation,
-            correlated=correlated,
-            scoring_mode=scoring_mode,
-            provenance=self._provenance(
-                seed, pcut, ecut, msc_model, step_energy_fraction, deposit_resolution_cm
-            ),
-        )
-        assembler.add_block(0, block.dose, block.sigma)
-        return assembler.finalize(
-            energy_emitted=energy_emitted,
-            energy_deposited=block.energy_deposited,
-            energy_escaped=energy_escaped,
-            energy_unscored=block.energy_unscored,
-        )
+        return energy_emitted, energy_escaped
