@@ -128,6 +128,26 @@ reference engine computes on the host and has no device to leave a result on.
 `examples/device_dij_demo.py` forms a plan dose `D w` from the device arrays with a
 ten-line Warp kernel and shows the host time the route saves.
 
+### Gradients without the matrix
+
+An optimizer's gradient needs the Dij only through `D^T a`, with `a = dL/dD` the
+objective's derivative per voxel. `run_beamlet_contraction` scores that product per
+beamlet directly, from the same histories `run_dij` would transport, with a batch sigma
+per component and no dense map, truncation or compaction:
+
+```python
+g = engine.run_beamlet_contraction(source, a, n_histories_per_beamlet=200_000,
+                                   n_batches=10, seed=20260726)
+g.values, g.sigma    # one number per beamlet
+```
+
+Both engines have it; on Warp, `a` may also be a `wp.float64` array already on the
+device. With leaf-edge beamlets — a `SegmentedEdgeSource` lists every leaf tip and jaw
+edge of a segmented fan or arc (`pyradmc.geometry.segment_edges`) — the components are
+the objective's derivatives with respect to the edge positions, which is what a Monte
+Carlo direct aperture optimization steps on. The estimators, their oracle and their
+stated limits are in `pyradmc.geometry.aperture_gradient`; leaf scatter is not covered.
+
 ## Pencil-beam kernels
 
 A mono-energetic pencil-beam kernel is the dose an infinitely narrow beam deposits in a
@@ -272,6 +292,16 @@ measured wall), `virtual_source_demo.py`
 `custom_source_demo.py`, `pencil_kernel_demo.py` and `pencil_kernel_database.py`
 (see [pencil-beam kernels](#pencil-beam-kernels)), and `noise_bias_study.py`
 (the correlated-sampling decision study).
+
+The aperture-gradient scripts are heavier: they want a CUDA device, take about a minute
+or more, and all but the first need the EPICS libraries. `aperture_gradient_demo.py`
+(leaf-tip and jaw-edge dose gradients of a parallel beam: four estimators against a
+finite-difference oracle), `aperture_gradient_consistency.py` (the fan leaf gradient
+against the forward model's finite difference, edge by edge), `aperture_gradient_fan_dao.py`
+(a Monte Carlo direct aperture optimization of a 6 MV fan, forward and gradient on the
+GPU), `vmat_arc_dao.py` (the same for a 36-angle arc under a leaf-speed limit) and the
+study `aperture_gradient_feasibility.py` (gradient precision against histories per
+edge, about four minutes).
 
 ### The commissioning example
 
