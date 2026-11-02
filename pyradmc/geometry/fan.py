@@ -15,6 +15,14 @@ kernel.
 - :func:`select_by_cdf` draws a discrete index from cumulative shares: the first
   ``i`` with ``cdf[i] > u`` (``searchsorted`` ``side="right"``), so an index of
   zero probability is never returned, even for ``u`` on a share boundary.
+- :func:`fan_primary_aperture` is the fan photon under **aperture importance
+  sampling** (:class:`~pyradmc.geometry.segments.SegmentedFanSource`'s
+  ``aperture_sampling``): the in-aperture point is drawn from a per-segment
+  defensive mixture instead of uniformly, and the importance weight that keeps the
+  estimate unbiased is returned with the ray. Five uniforms. Its table layout is
+  documented there (``aperture_table``); :func:`aperture_contains`
+  is its region test and :func:`upper_bound_at` / :func:`select_by_cdf_at` are the
+  offset forms of the CDF searches (a kernel cannot slice an array).
 
 Integer loop variables are declared with ``int(0)`` and floats with ``float(0.0)``
 because Warp needs the cast to declare a variable mutated inside a dynamic loop.
@@ -27,7 +35,26 @@ import math
 from pyradmc.data.handles import Table1D
 from pyradmc.rng import RNGState, uniform
 
-__all__ = ["cdf_lower_bound", "fan_primary", "select_by_cdf"]
+__all__ = [
+    "aperture_contains",
+    "cdf_lower_bound",
+    "fan_primary",
+    "fan_primary_aperture",
+    "select_by_cdf",
+    "select_by_cdf_at",
+    "upper_bound_at",
+]
+
+# The per-segment aperture table read by fan_primary_aperture and aperture_contains
+# (offsets written out as literals below: Warp compiles these bodies from source).
+# With ``n`` bands, a segment's ``4 n + 4`` floats starting at ``base`` hold
+#   base + 0                       the weight outside the region, 1 / delta
+#   base + 1                       the weight inside it, 1 / (delta + (1 - delta) |F| / |A|)
+#   base + 2 .. base + 2 + n       the n + 1 cumulative component shares (entry 0: delta)
+#   base + 3 + n .. base + 3 + 2n  the n + 1 band edges along v (non-decreasing)
+#   base + 4 + 2n .. base + 3 + 3n the n band lower u bounds
+#   base + 4 + 3n .. base + 3 + 4n the n band upper u bounds
+# Built by pyradmc.geometry.segments.SegmentedFanSource (its aperture_table).
 
 
 def cdf_lower_bound(cdf: Table1D, n: int, u: float) -> int:
@@ -106,3 +133,125 @@ def fan_primary(
     dz = az + du * uza + dv * vza - fz
     inv_norm = 1.0 / math.sqrt(dx * dx + dy * dy + dz * dz)
     return energy, dx * inv_norm, dy * inv_norm, dz * inv_norm
+
+
+def upper_bound_at(table: Table1D, offset: int, n: int, x: float) -> int:
+    """Return the first ``i < n`` with ``table[offset + i] > x``, or ``n`` if there is none.
+
+    ``numpy.searchsorted(table[offset:offset + n], x, side="right")`` over a
+    non-decreasing run of ``table``; the offset form, since a kernel cannot slice.
+    """
+    lo = int(0)  # noqa: UP018, RUF046 - Warp dynamic loop var
+    hi = int(n)  # a fresh loop-mutated var for Warp, not the argument
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if table[offset + mid] <= x:
+            lo = mid + 1
+        else:
+            hi = mid
+    return lo
+
+
+def select_by_cdf_at(table: Table1D, offset: int, n: int, u: float) -> int:
+    """:func:`select_by_cdf` over the ``n`` shares stored at ``table[offset:]``."""
+    return min(upper_bound_at(table, offset, n, u), n - 1)
+
+
+def aperture_contains(table: Table1D, base: int, n_bands: int, du: float, dv: float) -> int:
+    """Return 1 if the aperture offset ``(du, dv)`` lies in a segment's region, else 0.
+
+    The region is a stack of ``n_bands`` bands along ``v``: band ``b`` is
+    ``v_edges[b] <= dv < v_edges[b + 1]`` and holds the half-open interval
+    ``u_lo[b] <= du < u_hi[b]`` (empty when ``u_lo == u_hi``). Table layout at
+    ``base``: the module comment above.
+    """
+    i = upper_bound_at(table, base + 3 + n_bands, n_bands + 1, dv)  # first edge above dv
+    inside = int(0)  # noqa: UP018, RUF046 - Warp var assigned in a branch
+    if i >= 1 and i <= n_bands:
+        b = i - 1
+        if du >= table[base + 4 + 2 * n_bands + b] and du < table[base + 4 + 3 * n_bands + b]:
+            inside = 1
+    return inside
+
+
+def fan_primary_aperture(
+    rng_state: RNGState,
+    edges: Table1D,
+    cdf: Table1D,
+    n_bins: int,
+    fx: float,
+    fy: float,
+    fz: float,
+    ax: float,
+    ay: float,
+    az: float,
+    uxa: float,
+    uya: float,
+    uza: float,
+    vxa: float,
+    vya: float,
+    vza: float,
+    width_u: float,
+    width_v: float,
+    table: Table1D,
+    base: int,
+    n_bands: int,
+) -> tuple[float, float, float, float, float]:
+    """Sample one fan photon by aperture importance sampling; consumes exactly five uniforms.
+
+    Returns ``(energy, ux, uy, uz, factor)``. The fan is :func:`fan_primary`'s (same
+    energy inversion, same ray from ``f`` through ``a + du * u_axis + dv *
+    v_axis``); only the in-aperture point ``(du, dv)`` is drawn differently. Its
+    target density is uniform on the ``width_u x width_v`` field ``F``,
+    ``p = 1 / |F|``; it is drawn instead from the defensive mixture (Hesterberg,
+    Technometrics 37, 185 (1995), doi:10.1080/00401706.1995.10484303)
+
+        q(x) = delta / |F| + (1 - delta) 1_A(x) / |A|,
+
+    uniform on ``F`` with probability ``delta`` and uniform on the region ``A`` (the
+    table's bands) otherwise, and the returned ``factor`` is the likelihood ratio
+
+        p(x) / q(x) = 1 / (delta + (1 - delta) |F| / |A| 1_A(x)),
+
+    so ``E_q[factor * g(x)] = E_p[g(x)]`` for every ``g``: multiplying a history's
+    weight by ``factor`` leaves every expectation — a Dij column, a plan dose —
+    unchanged, whatever ``A`` is, as long as ``A`` lies inside ``F``. The weight
+    is bounded by ``1 / delta``. A table with ``factor_out = factor_in = 1`` and
+    ``cdf = (1, ..., 1)`` is plain uniform sampling (the empty-region fallback).
+
+    Stream contract — five uniforms in this order, whatever component is drawn:
+    the spectrum bin, the position within the bin, the component (``select_by_cdf``
+    over the ``n_bands + 1`` cumulative shares: index 0 is the whole field, index
+    ``b + 1`` band ``b``, chosen in proportion to its area), then the ``u`` and
+    ``v`` positions inside the chosen rectangle. Under correlated sampling every
+    segment therefore replays the same five uniforms through its own table. Table
+    layout at ``base``: the module comment above, built by
+    :attr:`~pyradmc.geometry.segments.SegmentedFanSource.aperture_table`.
+    """
+    u_bin = uniform(rng_state)
+    u_within = uniform(rng_state)
+    u_pick = uniform(rng_state)
+    u_a = uniform(rng_state)
+    u_b = uniform(rng_state)
+    k = select_by_cdf_at(table, base + 2, n_bands + 1, u_pick)
+    du = (u_a - 0.5) * width_u
+    dv = (u_b - 0.5) * width_v
+    factor = table[base + 1]
+    if k > 0:
+        b = k - 1
+        v_lo = table[base + 3 + n_bands + b]
+        v_hi = table[base + 4 + n_bands + b]
+        u_lo = table[base + 4 + 2 * n_bands + b]
+        u_hi = table[base + 4 + 3 * n_bands + b]
+        du = u_lo + (u_hi - u_lo) * u_a
+        dv = v_lo + (v_hi - v_lo) * u_b
+    elif aperture_contains(table, base, n_bands, du, dv) == 0:
+        factor = table[base]
+    j = min(cdf_lower_bound(cdf, n_bins, u_bin), n_bins - 1)
+    lo = edges[j]
+    energy = lo + (edges[j + 1] - lo) * u_within
+    dx = ax + du * uxa + dv * vxa - fx
+    dy = ay + du * uya + dv * vya - fy
+    dz = az + du * uza + dv * vza - fz
+    inv_norm = 1.0 / math.sqrt(dx * dx + dy * dy + dz * dz)
+    return energy, dx * inv_norm, dy * inv_norm, dz * inv_norm, factor

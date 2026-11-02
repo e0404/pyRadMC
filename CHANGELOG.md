@@ -17,6 +17,15 @@ without a field, so results are not byte-identical to the previous release.
 
 ### Added
 
+- **A device-resident Dij on the Warp engine.** `WarpEngine.run_dij_device` takes
+  `run_dij`'s arguments and returns a `DeviceDijResult` (`pyradmc.backends.warp.dij`) whose
+  CSC arrays stay on the computing device as Warp arrays: no readback of the compacted
+  blocks and no host assembly, for a consumer that keeps the matrix on the GPU. Its
+  `to_host()` is bit-identical to `run_dij` on the same device (test-pinned: lattice and
+  segmented fan, with and without truncation, correlated and independent, cpu and cuda).
+  One device only; Warp-only, since the reference engine has no device.
+  `examples/device_dij_demo.py`. Does not move any dose.
+
 - **Exterior-air stepping under a uniform field, on by default, with a warning.** Under a
   uniform non-zero field the engines replace the gyration cap with exact helix chords and a
   safety distance in air connected to the grid boundary and at least 0.25 cm from anything
@@ -74,6 +83,30 @@ without a field, so results are not byte-identical to the previous release.
   kernels take the fan from `SegmentArrays` (new `origin`, `rotation`, `fan` fields)
   instead of scalar arguments.
 
+- **Aperture importance sampling of segments (opt-in).**
+  `SegmentedFanSource(..., aperture_sampling=delta, aperture_margin=m)` (also
+  `from_stacks`, kept by `with_settings`) draws each segment's in-aperture point from
+  the defensive mixture `delta * uniform(field) + (1 - delta) * uniform(opening)` and
+  multiplies the weight by the likelihood ratio, so every Dij column and the plan view
+  are unchanged in expectation while their noise drops (untruncated: a truncated Dij's
+  low-dose tail moves with the noise, about 1 % below 2 % of the maximum at the default
+  threshold). The opening is each leaf row's
+  tips widened by `m` (default: the rounded tip's partial-chord band
+  `R - sqrt(R^2 - (H/2)^2)`; closed pairs included), cut by the jaws. One scalar
+  sampler, `pyradmc.geometry.fan.fan_primary_aperture` (five uniforms), serves `emit`,
+  the plan view and both Warp generators; the host batch is its pinned NumPy twin. The default (`None`) is
+  bit-identical to before on host, reference, Warp cpu and cuda (164 saved seeded
+  outputs). Measured on 6 MV through tungsten, equal histories, laptop RTX 4070:
+  efficiency gain 27 / 12 / 3.6 for 1 x 1 / 2 x 2 / 5 x 5 cm segments of a 10 x 10 cm
+  fan with tracking jaws, 5.1 / 4.2 / 2.5 without jaws; wall time per history
+  unchanged. New accessors `aperture_sampling`, `aperture_margins`, `aperture_table`,
+  `aperture_bands`, `aperture_fraction`, `aperture_region()`, `proposal_density()`.
+  Requires exact `SpectralBeamSource` fans aligned with their frames, and `delta` in
+  `[2**-10, 1)`: a smaller share raises `ValueError`, since the Warp generators draw
+  the component with a 24-bit uniform and would realize it only to within `2**-24`,
+  biasing the blocked region's dose (weighted `1 / delta`). Demonstrated by
+  `examples/aperture_sampling_demo.py`; record in docs/decisions.md.
+
 - Charged-particle transport in a **static magnetic field** (MR-linac dose).
   `pyradmc.MagneticField` — uniform, one vector per transport voxel, or a trilinear
   vector map on its own rectilinear grid, in tesla and the engine frame — is handed to
@@ -118,6 +151,13 @@ without a field, so results are not byte-identical to the previous release.
   photon roulette cap compares `abs(w)`. Every positive-weight result is bit-identical
   (147 seeded arrays on ref, Warp cpu and Warp cuda); only runs with negative weights,
   such as derivative estimators, move.
+- **Warp Dij batches past 2^31 histories no longer misattribute dose.** One batch's
+  block of a beamlet group, `group * n_histories_per_beamlet / n_batches`, indexed its
+  histories with an int32 and wrapped silently past 2^31 - 1, scoring late histories
+  into other beamlets: total dose conserved, distribution wrong (the high-dose region
+  1-3 % high on a 143-segment plan at 32M histories per segment). `run_dij` now caps
+  the group so one block fits, which changes no result below the limit (grouping is
+  bit-inert), and refuses a beamlet whose own histories exceed it.
 - Magnetic field samples are copied into read-only storage, preventing caller-array
   mutations from changing validated fields or invalidating device-map provenance.
   Infinite sample spacing is rejected, and uniform-field provenance retains the full
