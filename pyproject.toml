@@ -103,7 +103,12 @@ markers = [
     "warp: requires the warp-lang optional dependency",
     "ct: requires the SimpleITK optional dependency",
 ]
-filterwarnings = ["error"]
+filterwarnings = [
+    "error",
+    # Warp >= 1.19 announces, once at runtime init, that it drops Python 3.10 in 1.20.
+    # Supported until then; whether pyRadMC drops 3.10 too is a separate decision.
+    "ignore:Support for Python 3.10 is deprecated:FutureWarning",
+]
 
 # ---------------------------------------------------------------------------
 # Typing. Warp kernels are exempt; see AGENTS.md 5.
