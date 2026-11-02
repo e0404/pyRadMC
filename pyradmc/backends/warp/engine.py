@@ -53,6 +53,7 @@ from pyradmc import (
 )
 from pyradmc.backends.results import RunProvenance, TransportResult
 from pyradmc.backends.warp import kernels
+from pyradmc.backends.warp.dij import DeviceDijResult
 from pyradmc.backends.warp.kernels import ENERGY_QUANTUM_MEV, GridInfo, Queue, Tables
 from pyradmc.data.interface import CrossSectionSource
 from pyradmc.geometry.collimation import TransmissionMaskSource
@@ -84,7 +85,7 @@ from pyradmc.scoring.grid import ScoringGrid
 from pyradmc.transport.electron import default_step_energy_fraction
 from pyradmc.transport.particles import ELECTRON, PHOTON, POSITRON
 
-__all__ = ["WarpEngine"]
+__all__ = ["DeviceDijResult", "WarpEngine"]
 
 _E_MAX_MARGIN = 1.0 + 1.0e-6  # table upper edge strictly above the primary energy
 
@@ -339,17 +340,38 @@ class _DijShard:
     """One device's share of a Dij: its sparse blocks and its energy books.
 
     The books stay in exact int64 quanta so the caller can sum shards without the
-    total depending on which device finished first.
+    total depending on which device finished first. A block is ``(counts, indices,
+    dose, sigma)`` with ``counts`` always on the host (it was read back to size the
+    compaction) and the other three host copies, or — for ``run_dij_device`` — the
+    compaction's own device arrays.
     """
 
-    blocks: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = field(
-        default_factory=dict
-    )
+    blocks: dict[int, tuple[np.ndarray, object, object, object]] = field(default_factory=dict)
     deposited_quanta: int = 0
     escaped_quanta: int = 0
     unscored_quanta: int = 0
     emitted_quanta: int = 0
     emitted_energy: float = 0.0
+
+
+@dataclass
+class _DijRun:
+    """Every shard's blocks merged by group start, plus the closed energy books (MeV).
+
+    What ``run_dij`` and ``run_dij_device`` share before they part ways on where
+    the matrix is assembled. ``group_starts`` is the ascending order the blocks
+    concatenate in; ``devices`` the de-duplicated device list that ran them.
+    """
+
+    blocks: dict[int, tuple[np.ndarray, object, object, object]]
+    group_starts: list[int]
+    devices: list[str]
+    grid_shape: tuple[int, int, int]
+    provenance: RunProvenance
+    energy_emitted: float
+    energy_deposited: float
+    energy_escaped: float
+    energy_unscored: float
 
 
 @dataclass
@@ -1656,7 +1678,228 @@ class WarpEngine:
             ticks): the emitter's own lock serializes ticks arriving from
             multiple device threads, so the callback is thread-safe without any
             extra care on the caller's part.
+
+        See Also
+        --------
+        run_dij_device
+            The same computation with the matrix left on the device (Warp only).
         """
+        run = self._compute_dij(
+            source,
+            n_histories_per_beamlet=n_histories_per_beamlet,
+            n_batches=n_batches,
+            seed=seed,
+            pcut=pcut,
+            ecut=ecut,
+            transport_electrons=transport_electrons,
+            truncation=truncation,
+            correlated=correlated,
+            beamlet_group_size=beamlet_group_size,
+            scoring_grid=scoring_grid,
+            scoring_mode=scoring_mode,
+            step_energy_fraction=step_energy_fraction,
+            deposit_resolution_cm=deposit_resolution_cm,
+            msc_model=msc_model,
+            devices=devices,
+            concurrent_batches=concurrent_batches,
+            progress=progress,
+            device_blocks=False,
+        )
+        assembler = DijAssembler(
+            grid_shape=run.grid_shape,
+            n_beamlets=source.n_beamlets,
+            n_histories_per_beamlet=n_histories_per_beamlet,
+            n_batches=n_batches,
+            truncation=truncation,
+            correlated=correlated,
+            scoring_mode=scoring_mode,
+            provenance=run.provenance,
+        )
+        # The assembler takes blocks in ascending, gap-free beamlet order; shards
+        # finish in whatever order the devices happen to, so feed it from the merged
+        # map rather than as the blocks arrive.
+        for group_start in run.group_starts:
+            counts, indices, dose, sigma = run.blocks[group_start]
+            assembler.add_sparse_block(group_start, counts, indices, dose, sigma)
+        return assembler.finalize(
+            energy_emitted=run.energy_emitted,
+            energy_deposited=run.energy_deposited,
+            energy_escaped=run.energy_escaped,
+            energy_unscored=run.energy_unscored,
+        )
+
+    def run_dij_device(
+        self,
+        source: BeamletSource,
+        n_histories_per_beamlet: int,
+        n_batches: int,
+        seed: int,
+        pcut: float = PCUT_MEV,
+        ecut: float = ECUT_MEV,
+        transport_electrons: bool = True,
+        truncation: float = DIJ_TRUNCATION_RELATIVE,
+        correlated: bool = True,
+        beamlet_group_size: int | None = None,
+        scoring_grid: ScoringGrid | None = None,
+        scoring_mode: str = "dose_to_medium",
+        step_energy_fraction: float | None = None,
+        deposit_resolution_cm: float | None = None,
+        msc_model: str = "gs",
+        devices: Sequence[str] | None = None,
+        concurrent_batches: int = 1,
+        progress: ProgressCallback | None = None,
+    ) -> DeviceDijResult:
+        """Compute the Dij exactly as :meth:`run_dij` does, and leave it on the device.
+
+        Same parameters, same computation, same result:
+        ``run_dij_device(...).to_host()`` equals ``run_dij(...)`` with the same
+        arguments, field for field and bit for bit, on the same device
+        (test-pinned for the in-kernel lattice and segmented-fan routes, with and
+        without truncation, correlated and independent, on ``cpu`` and ``cuda``).
+        Only the end differs: each beamlet group's truncated, compacted CSC block
+        stays in the device buffers the compaction kernel wrote, and the groups are
+        concatenated there (one preallocation once the total entry count is known,
+        one ``wp.copy`` per group and array; a single group is handed over without
+        a copy). Nothing beyond what ``run_dij`` already reads back crosses to the
+        host — the per-group, per-chunk entry counts that size the compaction — and
+        there is no host assembly. The engine synchronizes the device once before
+        returning, so the arrays are complete on any stream.
+
+        This is for a consumer that keeps the dose matrix on the same device (an
+        optimizer recomputing the Dij every iteration), for which the readback and
+        the host concatenation are pure overhead. It is a separate method rather
+        than a keyword on :meth:`run_dij` because that method's signature is
+        deliberately identical to the reference engine's, and the reference engine
+        computes on the host: it has no device to leave a result on.
+
+        Every parameter but ``devices`` is :meth:`run_dij`'s, with the same
+        semantics (``correlated=False`` remains a test instrument, AGENTS.md 2.10).
+
+        Parameters
+        ----------
+        devices
+            ``None`` (the engine's own device) or a single device. The matrix is
+            assembled on one device, so a multi-device shard set is refused with a
+            ``ValueError``; shard with :meth:`run_dij` and copy if you need that.
+
+        Returns
+        -------
+        DeviceDijResult
+            ``indptr`` (``wp.int64``), ``indices`` (``wp.int64``), ``dose`` and
+            ``sigma`` (``wp.float64``) on the computing device, plus the metadata,
+            energy books and provenance a :class:`~pyradmc.scoring.dij.DijResult`
+            carries.
+        """
+        if devices is not None:
+            distinct = list(dict.fromkeys(devices))
+            if len(distinct) > 1:
+                raise ValueError(
+                    "run_dij_device assembles the matrix on one device; got "
+                    f"devices={distinct}. Use run_dij to shard over several."
+                )
+        run = self._compute_dij(
+            source,
+            n_histories_per_beamlet=n_histories_per_beamlet,
+            n_batches=n_batches,
+            seed=seed,
+            pcut=pcut,
+            ecut=ecut,
+            transport_electrons=transport_electrons,
+            truncation=truncation,
+            correlated=correlated,
+            beamlet_group_size=beamlet_group_size,
+            scoring_grid=scoring_grid,
+            scoring_mode=scoring_mode,
+            step_energy_fraction=step_energy_fraction,
+            deposit_resolution_cm=deposit_resolution_cm,
+            msc_model=msc_model,
+            devices=devices,
+            concurrent_batches=concurrent_batches,
+            progress=progress,
+            device_blocks=True,
+        )
+        device = run.devices[0]
+        n_beamlets = source.n_beamlets
+        # Column counts are host arrays already (the compaction was sized from
+        # them), so indptr is a host cumsum — the same int64 cumsum the host
+        # assembler's finalize computes — and one small upload.
+        counts = [run.blocks[gs][0] for gs in run.group_starts]
+        indptr_host = np.zeros(n_beamlets + 1, dtype=np.int64)
+        if counts:
+            np.cumsum(np.concatenate(counts).astype(np.int64), out=indptr_host[1:])
+        nnz = int(indptr_host[-1])
+        if len(run.group_starts) == 1:
+            _, indices, dose, sigma = run.blocks.pop(run.group_starts[0])
+        else:
+            indices = wp.empty(nnz, dtype=wp.int64, device=device)
+            dose = wp.empty(nnz, dtype=wp.float64, device=device)
+            sigma = wp.empty(nnz, dtype=wp.float64, device=device)
+            offset = 0
+            for gs in run.group_starts:
+                # Popped, so each group's buffers are released once copied: the
+                # peak is the assembled matrix plus the blocks not yet copied.
+                _, b_indices, b_dose, b_sigma = run.blocks.pop(gs)
+                n = int(b_indices.shape[0])
+                if n:
+                    wp.copy(indices, b_indices, dest_offset=offset, count=n)
+                    wp.copy(dose, b_dose, dest_offset=offset, count=n)
+                    wp.copy(sigma, b_sigma, dest_offset=offset, count=n)
+                offset += n
+        indptr = wp.array(indptr_host, dtype=wp.int64, device=device)
+        wp.synchronize_device(device)
+        return DeviceDijResult(
+            device=wp.get_device(device),
+            grid_shape=run.grid_shape,
+            n_beamlets=n_beamlets,
+            n_histories_per_beamlet=n_histories_per_beamlet,
+            n_batches=n_batches,
+            truncation=truncation,
+            indptr=indptr,
+            indices=indices,
+            dose=dose,
+            sigma=sigma,
+            energy_emitted=run.energy_emitted,
+            energy_deposited=run.energy_deposited,
+            energy_escaped=run.energy_escaped,
+            energy_unscored=run.energy_unscored,
+            correlated=correlated,
+            scoring_mode=scoring_mode,
+            provenance=run.provenance,
+        )
+
+    def _compute_dij(
+        self,
+        source: BeamletSource,
+        *,
+        n_histories_per_beamlet: int,
+        n_batches: int,
+        seed: int,
+        pcut: float,
+        ecut: float,
+        transport_electrons: bool,
+        truncation: float,
+        correlated: bool,
+        beamlet_group_size: int | None,
+        scoring_grid: ScoringGrid | None,
+        scoring_mode: str,
+        step_energy_fraction: float | None,
+        deposit_resolution_cm: float | None,
+        msc_model: str,
+        devices: Sequence[str] | None,
+        concurrent_batches: int,
+        progress: ProgressCallback | None,
+        device_blocks: bool,
+    ) -> _DijRun:
+        """Validate, schedule and run every beamlet group; merge shards and books.
+
+        Everything :meth:`run_dij` and :meth:`run_dij_device` share: the two differ
+        only in where the per-group blocks end up (``device_blocks``) and how they
+        are concatenated.
+        """
+        if truncation < 0.0:
+            # The host assembler's own check, made before any transport so the
+            # device path (which has no assembler) refuses it equally early.
+            raise ValueError(f"negative truncation {truncation}")
         if n_histories_per_beamlet < 1:
             raise ValueError(
                 f"need at least one history per beamlet, got {n_histories_per_beamlet}"
@@ -1746,23 +1989,14 @@ class WarpEngine:
             with pending_lock:
                 return pending.popleft() if pending else None
 
-        assembler = DijAssembler(
-            grid_shape=scoring.shape,
-            n_beamlets=n_beamlets,
-            n_histories_per_beamlet=n_histories_per_beamlet,
-            n_batches=n_batches,
-            truncation=truncation,
-            correlated=correlated,
-            scoring_mode=scoring_mode,
-            provenance=self._provenance(
-                seed,
-                pcut,
-                ecut,
-                msc_model,
-                step_energy_fraction,
-                deposit_resolution_cm,
-                devices=device_list,
-            ),
+        provenance = self._provenance(
+            seed,
+            pcut,
+            ecut,
+            msc_model,
+            step_energy_fraction,
+            deposit_resolution_cm,
+            devices=device_list,
         )
 
         emitter = ProgressEmitter(progress, n_beamlets * n_histories_per_beamlet)
@@ -1785,6 +2019,7 @@ class WarpEngine:
             dose_to_water=dose_to_water,
             concurrent_batches=concurrent_batches,
             emitter=emitter,
+            device_blocks=device_blocks,
         )
         # Kernel modules are loaded up front whenever any host thread beyond this
         # one will launch (device workers or batch lanes): warp's module loading is
@@ -1821,20 +2056,17 @@ class WarpEngine:
         emitted_quanta = sum(r.emitted_quanta for r in shard_results)
         emitted_energy = sum(r.emitted_energy for r in shard_results)
 
-        # The assembler takes blocks in ascending, gap-free beamlet order; shards
-        # finish in whatever order the devices happen to, so feed it from the merged
-        # map rather than as the blocks arrive.
-        blocks = {gs: block for r in shard_results for gs, block in r.blocks.items()}
-        for group_start in group_starts:
-            counts, indices, dose, sigma = blocks[group_start]
-            assembler.add_sparse_block(group_start, counts, indices, dose, sigma)
-
         use_lattice = type(source) is BeamletGridSource  # exact type: see run()
         if use_lattice:
             emitted_energy = n_beamlets * n_histories_per_beamlet * source.max_energy
         elif emitted_quanta:
             emitted_energy = float(emitted_quanta) * ENERGY_QUANTUM_MEV
-        return assembler.finalize(
+        return _DijRun(
+            blocks={gs: block for r in shard_results for gs, block in r.blocks.items()},
+            group_starts=group_starts,
+            devices=device_list,
+            grid_shape=scoring.shape,
+            provenance=provenance,
             energy_emitted=emitted_energy,
             energy_deposited=deposited_quanta * ENERGY_QUANTUM_MEV,
             energy_escaped=escaped_quanta * ENERGY_QUANTUM_MEV,
@@ -1864,6 +2096,7 @@ class WarpEngine:
         dose_to_water: int,
         concurrent_batches: int,
         emitter: ProgressEmitter,
+        device_blocks: bool = False,
     ) -> _DijShard:
         """Pull beamlet groups from the shared queue and run them on one device.
 
@@ -1871,7 +2104,9 @@ class WarpEngine:
         energy counters), so shards on different devices share nothing and may run
         concurrently on their own host threads. Returns the shard's sparse blocks
         keyed by group start, plus its energy books in exact quanta for the caller
-        to merge in a device-order-independent way.
+        to merge in a device-order-independent way. ``device_blocks`` leaves each
+        block's indices/dose/sigma on the device (``run_dij_device``); the
+        computation is the same either way, only the final copy differs.
 
         ``concurrent_batches`` > 1 transports that many batches of the current group
         concurrently, each lane on its own CUDA stream with its own queues, RNG
@@ -2162,23 +2397,31 @@ class WarpEngine:
                 ],
                 device=device,
             )
-            # Copy, do not alias: on a cpu device ``numpy()`` is a *view* of the warp
-            # array, and these blocks outlive both the reused ``counts_dev`` and this
-            # group's compaction buffers. (The blocks are the sparse result itself, so
-            # owning them costs nothing beyond what the DijResult holds anyway.)
-            shard.blocks[group_start] = (
-                counts.copy(),
-                out_indices.numpy().copy(),
-                out_dose.numpy().copy(),
-                out_sigma.numpy().copy(),
-            )
+            if device_blocks:
+                # run_dij_device: the compaction buffers are fresh per group, so they
+                # are the block itself — handed over without a readback or a copy.
+                shard.blocks[group_start] = (counts, out_indices, out_dose, out_sigma)
+            else:
+                # Copy, do not alias: on a cpu device ``numpy()`` is a *view* of the
+                # warp array, and these blocks outlive both the reused ``counts_dev``
+                # and this group's compaction buffers. (The blocks are the sparse
+                # result itself, so owning them costs nothing beyond what the
+                # DijResult holds anyway.)
+                shard.blocks[group_start] = (
+                    counts.copy(),
+                    out_indices.numpy().copy(),
+                    out_dose.numpy().copy(),
+                    out_sigma.numpy().copy(),
+                )
             # Tick only now, with the group *complete*. Ticking right after transport
             # instead charged each group's reduction, truncation and readback to its
             # successor's interval: the first group then reported a rate no later one
             # could reach, and the final group's share landed after the last tick as
             # silence at 100 percent. The readback above is part of the group's cost,
             # so the tick follows it; ``numpy()`` has already synchronized, so this
-            # still lands on an existing hard sync and adds none.
+            # still lands on an existing hard sync and adds none. On the device path
+            # the last sync is the per-chunk counts readback, so the tick lands with
+            # only the (small) compaction launch still in flight.
             emitter.tick(group * n_histories_per_beamlet)
 
         shard.deposited_quanta = deposited_quanta

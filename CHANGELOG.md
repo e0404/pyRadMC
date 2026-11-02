@@ -17,6 +17,15 @@ without a field, so results are not byte-identical to the previous release.
 
 ### Added
 
+- **A device-resident Dij on the Warp engine.** `WarpEngine.run_dij_device` takes
+  `run_dij`'s arguments and returns a `DeviceDijResult` (`pyradmc.backends.warp.dij`) whose
+  CSC arrays stay on the computing device as Warp arrays: no readback of the compacted
+  blocks and no host assembly, for a consumer that keeps the matrix on the GPU. Its
+  `to_host()` is bit-identical to `run_dij` on the same device (test-pinned: lattice and
+  segmented fan, with and without truncation, correlated and independent, cpu and cuda).
+  One device only; Warp-only, since the reference engine has no device.
+  `examples/device_dij_demo.py`. Does not move any dose.
+
 - **Exterior-air stepping under a uniform field, on by default, with a warning.** Under a
   uniform non-zero field the engines replace the gyration cap with exact helix chords and a
   safety distance in air connected to the grid boundary and at least 0.25 cm from anything
