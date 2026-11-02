@@ -653,6 +653,7 @@ def _deposit_or_escape(
     y: float,
     z: float,
     amount: float,
+    weight: float,
     factor: float,
     dose_to_water: int,
 ):
@@ -662,8 +663,17 @@ def _deposit_or_escape(
     vacuum); a deposit inside it then routes by position into the scoring grid
     ``si`` or the unscored bucket, exactly as on the reference backend. The
     escaped ledger books the physical amount; ``factor`` weights the tally only.
+
+    ``amount`` is the weighted energy ``weight * E``. Nothing is filed unless the
+    *unweighted* energy ``E`` is positive, decided from the signs of ``amount``
+    and ``weight``: for ``weight > 0`` exactly the former ``amount <= 0`` skip, a
+    zero-weight particle (``amount == 0``) is skipped as before, and a
+    negative-weight particle files its negative amount instead of losing it.
     """
-    if amount <= 0.0:
+    if weight > 0.0:
+        if amount <= 0.0:
+            return
+    elif amount >= 0.0:
         return
     if point_inside(x, y, z, gi.x_lo, gi.y_lo, gi.z_lo, gi.x_hi, gi.y_hi, gi.z_hi):
         _deposit(edep, deposited, unscored, si, base, x, y, z, amount, factor, dose_to_water)
@@ -688,6 +698,7 @@ def _deposit_spread(
     uz: float,
     length: float,
     amount: float,
+    weight: float,
     factor: float,
     dose_to_water: int,
     resolution: float,
@@ -722,6 +733,7 @@ def _deposit_spread(
             y + uy * t,
             z + uz * t,
             share,
+            weight,
             factor,
             dose_to_water,
         )
@@ -1435,7 +1447,10 @@ def photon_kernel(
                     else:
                         copy_w = split_w
                         keep = True
-                        if e_scatter < PHOTON_ROULETTE_MEV and copy_w < PHOTON_ROULETTE_WEIGHT_CAP:
+                        if (
+                            e_scatter < PHOTON_ROULETTE_MEV
+                            and wp.abs(copy_w) < PHOTON_ROULETTE_WEIGHT_CAP
+                        ):
                             new_w = roulette_weight(copy_w, PHOTON_ROULETTE_SURVIVAL, state)
                             _escape(escaped, (copy_w - new_w) * e_scatter)
                             if new_w == 0.0:
@@ -1502,7 +1517,7 @@ def photon_kernel(
                     dose_to_water,
                 )
                 return
-            if e < PHOTON_ROULETTE_MEV and w < PHOTON_ROULETTE_WEIGHT_CAP:
+            if e < PHOTON_ROULETTE_MEV and wp.abs(w) < PHOTON_ROULETTE_WEIGHT_CAP:
                 # Basic VR, mirror of the reference loop: roulette the softened
                 # scattered photon; the signed ledger entry keeps the balance exact.
                 new_w = roulette_weight(w, PHOTON_ROULETTE_SURVIVAL, state)
@@ -1984,6 +1999,7 @@ def electron_kernel(
             cz,
             s1,
             w * d1,
+            w,
             substep_factor,
             dose_to_water,
             deposit_resolution,
@@ -2052,12 +2068,12 @@ def electron_kernel(
             k = min(k, e - d2)
             if k > pcut:
                 photon_w = w
-                if k < PHOTON_ROULETTE_MEV and w < PHOTON_ROULETTE_WEIGHT_CAP:
+                if k < PHOTON_ROULETTE_MEV and wp.abs(w) < PHOTON_ROULETTE_WEIGHT_CAP:
                     # Basic VR, mirror of the reference loop: roulette the soft
                     # bremsstrahlung photon at birth; signed ledger keeps balance.
                     photon_w = roulette_weight(w, PHOTON_ROULETTE_SURVIVAL, state)
                     _escape(escaped, (w - photon_w) * k)
-                if photon_w > 0.0:
+                if photon_w != 0.0:
                     _queue_push(
                         q_photon,
                         PHOTON,
@@ -2085,6 +2101,7 @@ def electron_kernel(
                     y,
                     z,
                     w * k,
+                    w,
                     _spr_factor(tab, dose_to_water, k, mat, ecut),
                     dose_to_water,
                 )
@@ -2171,6 +2188,7 @@ def electron_kernel(
             cz,
             s2,
             w * d2,
+            w,
             substep_factor,
             dose_to_water,
             deposit_resolution,

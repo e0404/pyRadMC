@@ -143,6 +143,14 @@ without a field, so results are not byte-identical to the previous release.
 
 ### Fixed
 
+- **Negative-weight histories keep their electron dose.** Both engines skipped a
+  continuous-loss deposit when the *weighted* energy was not positive, and spawned
+  bremsstrahlung only for a positive photon weight, so a primary of weight -w
+  deposited 0.22 of what +w does at 2 MeV with electrons on (KERMA was exact). The
+  guards now decide on the unweighted energy and on a nonzero photon weight, and the
+  photon roulette cap compares `abs(w)`. Every positive-weight result is bit-identical
+  (147 seeded arrays on ref, Warp cpu and Warp cuda); only runs with negative weights,
+  such as derivative estimators, move.
 - **Warp Dij batches past 2^31 histories no longer misattribute dose.** One batch's
   block of a beamlet group, `group * n_histories_per_beamlet / n_batches`, indexed its
   histories with an int32 and wrapped silently past 2^31 - 1, scoring late histories
