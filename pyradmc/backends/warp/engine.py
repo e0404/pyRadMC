@@ -1756,15 +1756,15 @@ class WarpEngine:
         deliberately identical to the reference engine's, and the reference engine
         computes on the host: it has no device to leave a result on.
 
+        Every parameter but ``devices`` is :meth:`run_dij`'s, with the same
+        semantics (``correlated=False`` remains a test instrument, AGENTS.md 2.10).
+
         Parameters
         ----------
         devices
             ``None`` (the engine's own device) or a single device. The matrix is
             assembled on one device, so a multi-device shard set is refused with a
             ``ValueError``; shard with :meth:`run_dij` and copy if you need that.
-
-        All other parameters are those of :meth:`run_dij`, with the same semantics
-        (``correlated=False`` remains a test instrument, AGENTS.md 2.10).
 
         Returns
         -------

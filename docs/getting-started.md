@@ -107,6 +107,27 @@ plan_dose = matrix @ weights # the loop an optimizer runs thousands of times
     sigma is invalid. `dij.variance_csc()` exports per-column variance and warns about
     exactly this. A per-batch plan-dose sigma is a known gap.
 
+### Keeping the matrix on the GPU
+
+An optimizer that recomputes the Dij every iteration and keeps its own dose matrix on
+the device does not need the engine to copy every column to the host and assemble a
+SciPy matrix there. `WarpEngine.run_dij_device` takes `run_dij`'s arguments, runs the
+same computation, and returns a `DeviceDijResult` whose `indptr`, `indices` (`wp.int64`),
+`dose` and `sigma` (`wp.float64`) are Warp arrays on the computing device:
+
+```python
+ddij = engine.run_dij_device(source, n_histories_per_beamlet=200_000, n_batches=10,
+                             seed=20260726)
+ddij.indptr, ddij.indices, ddij.dose   # CSC on ddij.device, no host copy
+dij = ddij.to_host()                   # == engine.run_dij(...) with the same arguments
+```
+
+`to_host()` is bit-identical to `run_dij` on the same device (test-pinned). The method
+is Warp-only and computes on one device (`devices=None` or a single device): the
+reference engine computes on the host and has no device to leave a result on.
+`examples/device_dij_demo.py` forms a plan dose `D w` from the device arrays with a
+ten-line Warp kernel and shows the host time the route saves.
+
 ## Pencil-beam kernels
 
 A mono-energetic pencil-beam kernel is the dose an infinitely narrow beam deposits in a
@@ -232,7 +253,8 @@ figure beside itself that a physicist can sanity-check at a glance. They need th
 `electron_transport_demo.py` (buildup vs the KERMA approximation, R50 tracking the CSDA
 range), `warp_backend_demo.py` (one physics source compiled three ways),
 `dij_demo.py` (a beamlet column, the fluence-sum identity, a wedge plan as
-`Dij @ weights`), `dij_plan_sigma_demo.py` (plan-dose sigma from the column variances:
+`Dij @ weights`), `device_dij_demo.py` (the Dij kept on the GPU and a plan dose formed
+there, against the host route), `dij_plan_sigma_demo.py` (plan-dose sigma from the column variances:
 exact for independent columns, a lower bound for correlated ones, against a direct
 forward run), `tabulated_demo.py` (EPDL/EEDL cross-sections), `materials_demo.py`
 (bone/lung heterogeneity), `ct_demo.py` (dose on a CT), `dose_grid_demo.py` (decoupled
