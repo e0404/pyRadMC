@@ -398,8 +398,18 @@ def electron_steps(
         The scoring callback receives the position, not a voxel index: routing
         into the (possibly decoupled) scoring grid is the scorer's job.
         ``factor`` is the caller's deposit weight; escape stays physical.
+
+        ``amount`` is the weighted energy ``w * E``. Nothing is filed unless the
+        *unweighted* energy ``E`` is positive, decided from the signs of
+        ``amount`` and ``w``: for ``w > 0`` exactly the former ``amount <= 0``
+        skip, a zero-weight particle (``amount == 0``) is skipped as before, and
+        a negative-weight particle (a derivative estimator's signed history)
+        files its negative amount instead of losing it.
         """
-        if amount <= 0.0:
+        if w > 0.0:
+            if amount <= 0.0:
+                return 0.0
+        elif amount >= 0.0:
             return 0.0
         if grid.contains(px, py, pz):
             deposit(px, py, pz, amount, factor * amount)
@@ -658,12 +668,12 @@ def electron_steps(
             k = min(k, e - d2)
             if k > pcut:
                 photon_w = w
-                if k < PHOTON_ROULETTE_MEV and w < PHOTON_ROULETTE_WEIGHT_CAP:
+                if k < PHOTON_ROULETTE_MEV and abs(w) < PHOTON_ROULETTE_WEIGHT_CAP:
                     # Basic VR: roulette the soft bremsstrahlung photon at birth;
                     # the ledger entry keeps the run's energy balance exact.
                     photon_w = roulette_weight(w, PHOTON_ROULETTE_SURVIVAL, rng_state)
                     escaped += (w - photon_w) * k
-                if photon_w > 0.0:
+                if photon_w != 0.0:
                     spawn((PHOTON, k, photon_w, x, y, z, ux, uy, uz))  # forward
             else:
                 escaped += deposit_or_escape(x, y, z, w * k, deposit_weight(k, material))

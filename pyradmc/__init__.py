@@ -50,10 +50,12 @@ PHOTON_ROULETTE_SURVIVAL: float = 0.5
 """Survival probability per game; a survivor's weight is boosted by its inverse."""
 
 PHOTON_ROULETTE_WEIGHT_CAP: float = 4.0
-"""No roulette at or above this weight (the weight-window ceiling).
+"""No roulette at or above this weight *magnitude* (the weight-window ceiling).
 
 Caps the boost cascade at two consecutive survivals (1 -> 2 -> 4), bounding the
-graininess a single high-weight deposit can leave in the low-dose tail.
+graininess a single high-weight deposit can leave in the low-dose tail. Compared
+with ``abs(w)``, so a negative-weight history (a derivative estimator's signed
+weight) stops at -4 exactly as a positive one stops at 4.
 """
 
 PHOTON_SPLIT_N: int = 1

@@ -147,6 +147,14 @@ without a field, so results are not byte-identical to the previous release.
   1-3 % high on a 143-segment plan at 32M histories per segment). `run_dij` now caps
   the group so one block fits, which changes no result below the limit (grouping is
   bit-inert), and refuses a beamlet whose own histories exceed it.
+- **Negative-weight histories keep their electron dose.** Both engines skipped a
+  continuous-loss deposit when the *weighted* energy was not positive, and spawned
+  bremsstrahlung only for a positive photon weight, so a primary of weight -w
+  deposited 0.22 of what +w does at 2 MeV with electrons on (KERMA was exact). The
+  guards now decide on the unweighted energy and on a nonzero photon weight, and the
+  photon roulette cap compares `abs(w)`. Every positive-weight result is bit-identical
+  (147 seeded arrays on ref, Warp cpu and Warp cuda); only runs with negative weights,
+  such as derivative estimators, move.
 - Magnetic field samples are copied into read-only storage, preventing caller-array
   mutations from changing validated fields or invalidating device-map provenance.
   Infinite sample spacing is rejected, and uniform-field provenance retains the full
