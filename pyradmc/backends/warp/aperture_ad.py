@@ -1,4 +1,4 @@
-"""Warp-taped chord gradients: the pathwise half of the aperture-gradient prototype.
+"""Warp-taped chord gradients: the geometry of the pathwise aperture-gradient estimator.
 
 The one module that differentiates with Warp's tape. It compiles the **same**
 scalar collimation twins the device pre-solve uses

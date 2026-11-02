@@ -10,9 +10,9 @@ Jacobian. Every edge of every segment becomes a beamlet of one ``run_dij``
 closing edge is carried outside, since Dij truncation is relative to a positive column
 maximum), and the columns are contracted with ``dL/dD`` afterwards.
 
-Setup (the prototype's limits: parallel beam, 2 MeV, unfocused devices): water
-12 x 10 x 12 cm on 2.5 x 2.5 x 5 mm voxels; a 20-pair tungsten MLC with 5 mm leaves and
-8 cm tip radius; 10 step-and-shoot segments with MU weights, i.e. 400 leaf edges; a
+Setup (the parallel-beam estimator's limits: parallel beam, 2 MeV, unfocused devices):
+water 12 x 10 x 12 cm on 2.5 x 2.5 x 5 mm voxels; a 20-pair tungsten MLC with 5 mm
+leaves and 8 cm tip radius; 10 step-and-shoot segments with MU weights, i.e. 400 leaf edges; a
 C-shaped PTV around a cylindrical OAR, 3-9 cm deep; a quadratic objective with a
 one-sided OAR and normal-tissue penalty.
 

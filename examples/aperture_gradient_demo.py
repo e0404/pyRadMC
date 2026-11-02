@@ -33,8 +33,9 @@ chi-squared against the oracle, its efficiency (1 / (relative variance x seconds
 over the gradient region, and, as the tip moves through one 5 mm bixel, each 5 mm
 chain rule's worst structure-gradient error.
 
-Prototype restrictions (refused by the sources where they bite): parallel beam,
-monoenergetic, unfocused parameter devices. With the EPICS libraries available
+The parallel-beam estimators' restrictions (refused by the sources where they bite):
+parallel beam, monoenergetic, unfocused parameter devices; the divergent-fan
+estimator is demonstrated by ``aperture_gradient_fan_dao.py``. With the EPICS libraries available
 (cached or downloadable) the devices are real tungsten; ``--devices surrogate``
 uses water at 16.6 g/cm3, close to tungsten's attenuation at 2 MeV. Run from the
 repository root (requires the ``examples`` extra, i.e. matplotlib)::

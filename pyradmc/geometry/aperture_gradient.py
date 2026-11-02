@@ -1,9 +1,19 @@
 """Aperture gradients: derivatives of the dose with respect to a leaf tip or jaw edge.
 
-**Prototype** (branch ``aperture-gradient-prototype``): parallel beams, unfocused
-parameter devices, monoenergetic sources. It exists to measure whether a Monte
-Carlo leaf-position gradient differs from the bixel-Dij chain rule that direct
-aperture optimization uses, before anything is built on it.
+Two families of estimators share the identity below. The **parallel-beam**
+sources — the exact :class:`EdgeDerivativeSource` and the two chain rules
+:class:`BixelChainRuleSource` and :class:`ProfileChainRuleSource` — take a
+monoenergetic :class:`ParallelBeamSource` through unfocused devices; with the
+finite-difference oracle :class:`RayFiniteDifferenceSource` and the pathwise
+:class:`PathwiseDerivativeSource` they measure how a Monte Carlo leaf-position
+gradient differs from the bixel-Dij chain rule that direct aperture optimization
+uses (docs/decisions.md, "Aperture gradients"). The **fan** estimator,
+:class:`FanEdgeDerivativeSource`, is the one an optimizer uses: a divergent
+:class:`SpectralBeamSource` through focused leaf sides and straight or focused jaws.
+Many edges become the beamlets of one run through :class:`EdgeGradientBeamletSource`
+or :class:`~pyradmc.geometry.segment_edges.SegmentedEdgeSource`, which the Warp
+engine generates in-kernel (:mod:`pyradmc.backends.warp.aperture`) and an
+optimizer contracts with ``dL/dD`` (``run_beamlet_contraction``).
 
 **The identity.** Under attenuation-only collimation (:class:`CollimatedSource`) an
 edge coordinate ``x`` — one MLC leaf tip, one jaw edge — enters a history only
@@ -17,8 +27,10 @@ so with ``K(ray)`` the dose response per unit primary weight,
 where ``phi`` is the source's ray density. Every estimator below is therefore an
 ordinary :class:`~pyradmc.geometry.source.Source` — one engine run, one dose map,
 with batch sigma — that differs only in how it samples rays for ``dT/dx`` and
-weights them. No engine, kernel or transport change is involved, and the gradient
-tally can never become a sampling routine inside a backend.
+weights them. The transport is not involved: the Warp engine's in-kernel route
+only generates the same rays on the device. Leaf scatter (the head pre-solve's
+first-Compton configuration) moves photons when an edge moves and is **not**
+covered; the attenuation configuration is.
 
 **Why sampling, not differentiation.** ``dT/dx`` is a measure, not always a
 function: a straight edge face makes ``T`` jump, and the derivative there is a
@@ -36,12 +48,13 @@ inverting the monotone ``T0``. A jump inverts to the edge line; a smooth tip to 
 penumbra. The weight is then a constant times the transmission through the rest
 of the stack.
 
-Stated prototype approximations, each refused at construction where it bites:
+Stated approximations of the parallel-beam sources, each refused at construction
+where it bites (the fan estimator's contract is on :class:`FanEdgeDerivativeSource`):
 
 - **Parallel beam along the frame ``w`` axis, identity frame axes.** Translating
   the edge is then exactly a translation of the rays. A divergent fan breaks the
-  equality (an off-axis ray crosses the slab obliquely); a fan version needs
-  ``dT/dx`` per ray direction, not one profile.
+  equality (an off-axis ray crosses the slab obliquely), which is why the fan
+  estimator takes ``dT/dx`` per ray instead of one profile.
 - **Unfocused parameter device** (straight jaw faces, parallel-sided leaves): a
   focused face rotates about the focal spot when its edge moves.
 - **Monoenergetic beam**: one transmission profile; a spectrum needs one per energy.
@@ -302,12 +315,12 @@ def _require_parallel_geometry(
 ) -> JawPair | MLC:
     """Refuse configurations where edge translation is not ray translation."""
     if not isinstance(beam, ParallelBeamSource):
-        raise ValueError("the prototype supports ParallelBeamSource beams only")
+        raise ValueError("this estimator supports ParallelBeamSource beams only")
     frame = stack.frame
     identity = ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
     axes = (frame.u_axis, frame.v_axis, frame.w_axis)
     if not np.allclose(axes, identity, atol=_AXIS_TOLERANCE):
-        raise ValueError("the prototype needs identity beam-frame axes (w along +z)")
+        raise ValueError("this estimator needs identity beam-frame axes (w along +z)")
     device = _resolve(stack, parameter)
     if isinstance(device, JawPair) and device.focused:
         raise ValueError("a focused jaw face rotates when its edge moves; use focused=False")
@@ -474,7 +487,7 @@ class EdgeDerivativeSource(_EdgeSampledSource):
     boundary term pathwise differentiation omits. The profile is inverted once at
     construction by bisection on the exact chord geometry and tabulated on
     ``n_table`` nodes in ``t``. Module docstring: the identity and the stated
-    prototype restrictions.
+    parallel-beam restrictions.
     """
 
     def __init__(
