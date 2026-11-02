@@ -104,6 +104,80 @@ without a field, so results are not byte-identical to the previous release.
   Requires exact `SpectralBeamSource` fans aligned with their frames. Demonstrated by
   `examples/aperture_sampling_demo.py`; record in docs/decisions.md.
 
+- **Monte Carlo dose gradients with respect to leaf tips and jaw edges.**
+  `pyradmc.geometry.aperture_gradient`. Under attenuation-only collimation an edge
+  coordinate enters a history only through its primary's weight, so
+  `dD/dx = E[dT/dx K]` and every estimator is an ordinary `Source`: no transport change.
+  `FanEdgeDerivativeSource` is the one an optimizer uses: a divergent
+  `SpectralBeamSource` fan through focused leaf sides and straight or focused jaws, rays
+  importance-sampled along the edge and weighted by their exact per-ray `dT/dx`. Against
+  the common-random-number finite difference of the segmented-fan forward model (6 MV,
+  tungsten, electrons on, 13 edges of both signs, the demo objective's adjoint) chi2
+  10.4/13 (p = 0.66). The parallel-beam `EdgeDerivativeSource` (monoenergetic,
+  unfocused devices only) samples rays from `|dT/dx|` itself: against the oracle at
+  2 MeV through tungsten, chi2/ndf 1.20 (tip) and 1.02 (jaw), at 76x and 130x the
+  oracle's efficiency. Shipped beside it as
+  measurement instruments: the oracle (`RayFiniteDifferenceSource`), the Warp-taped
+  pathwise derivative (`PathwiseDerivativeSource`, `pyradmc.backends.warp.aperture_ad`),
+  which returns exactly zero at a straight jaw face (chi2/ndf 658), and the bixel and
+  profile-aware chain rules (`BixelChainRuleSource`, `ProfileChainRuleSource`): a
+  Dij-based aperture optimization gets leaf gradients right in the penumbra only with
+  about 1 mm bixels *and* profile-derived bixel weights. Chord edge derivatives
+  `jaw_edge_derivative` and `mlc_tip_edge_derivative`, and `mlc_leaf_path_length`, are
+  new in `pyradmc.geometry.collimation`. Not covered: leaf scatter (the first-Compton
+  pre-solve). Demonstrated by `examples/aperture_gradient_demo.py` and
+  `examples/aperture_gradient_consistency.py`; docs/decisions.md, "Aperture gradients"
+  and "DAO gradient consistency". Does not move any dose.
+
+- **Beamlet contraction without a Dij.** `run_beamlet_contraction(source, voxel_weights,
+  ...)` on both engines returns `g_j = sum_v a_v D_vj` per beamlet with a batch sigma
+  (`ContractionResult`, `pyradmc.scoring.contraction`): an optimizer's `D^T a` with
+  `a = dL/dD`, from exactly `run_dij`'s histories and mapping but with no dense dose
+  map, truncation or compaction, so signed columns (a closing edge) are summed as they
+  are. Warp reduces in a fixed float64 order, bit-reproducible on a device, and also
+  takes `voxel_weights` as a `wp.float64` array already on a device
+  (`pyradmc.backends.warp.dij.device_voxel_weights`), validated there and bit-identical
+  to passing the same values from NumPy (test-pinned). Does not move any dose.
+
+- **Every leaf and jaw edge of a segmented fan or arc as one gradient source.**
+  `pyradmc.geometry.segment_edges.SegmentedEdgeSource` lists every edge of a
+  `SegmentedFanSource` — one fan, or the control points of an arc with a fan and frame
+  each — as beamlets, segment-major, and builds their device columns with array
+  arithmetic instead of one object per edge. The columns are equal in float64 to the
+  per-edge `FanEdgeDerivativeSource` records, and the contraction is bit-identical
+  either way on cpu and cuda (test-pinned). The Warp engine generates the exact types
+  in-kernel (`pyradmc.backends.warp.aperture`); a subclass keeps the host route.
+  Measured on a laptop RTX 4070, 400 edges at 2 000 histories each: building the edges
+  82-102 ms -> 0.37-0.44 ms, one gradient step 126-151 ms -> 23.4-24.6 ms; 15 000 edges
+  build and upload in about 6 ms of host time. `SegmentedFanSource` gains a `cross_sections`
+  accessor. Edges ignore `aperture_sampling`. docs/decisions.md, "Vectorized edge
+  sets" and "Arc edge sets". Does not move any dose.
+
+- **First-order dose steps of a segmented fan.**
+  `pyradmc.geometry.segment_edge_steps.SegmentedEdgeStepSource` estimates
+  `D_s(x + d) - D_s(x)` for a small move `d` of the edges from their edge estimators,
+  so an optimizer can carry its segment doses instead of re-simulating the plan each
+  iteration; its histories follow the area the edges swept. Two non-negative columns
+  per segment (opening and closing edges), so the Dij's compaction loses nothing.
+  Generated in-kernel on Warp. Jaw moves are not in the step, and there is no refresh
+  policy. On a TG-119 direct-aperture study, carried steps at 300k / 100k / 30k
+  histories per column scored 5200 / 5222 / 5250 at 1.55 / 0.75 / 0.40 s per forward,
+  against 5320 re-simulating at 2.9 s; docs/decisions.md, "First-order dose steps of a
+  segmented fan". Does not move any dose.
+
+- **Monte Carlo direct aperture optimization examples.**
+  `examples/aperture_gradient_fan_dao.py`: projected Adam on the 400 leaf tips and 10 MU
+  weights of a 6 MV fan, forward and gradient both on the GPU, 68 ms per iteration on a
+  laptop RTX 4070 (forward 43 ms, edge contraction 20 ms). `examples/vmat_arc_dao.py`: a
+  36-angle arc, one aperture per angle, two engine launches per iteration, a leaf-speed
+  projection and a growing history schedule (47 % lower true loss at equal wall time
+  than a 1/sqrt(k) step at a fixed 100k histories per angle).
+  `examples/aperture_gradient_feasibility.py`: how many histories per edge a gradient
+  needs on the parallel-beam estimator (300 per edge already give a cosine of 0.998 to a
+  high-statistics reference). docs/decisions.md, "DAO iteration at 0.1 s", "VMAT arc
+  demonstrator" and "Stochastic optimization of the arc". These three need a CUDA
+  device and the EPICS libraries.
+
 - Charged-particle transport in a **static magnetic field** (MR-linac dose).
   `pyradmc.MagneticField` — uniform, one vector per transport voxel, or a trilinear
   vector map on its own rectilinear grid, in tesla and the engine frame — is handed to
