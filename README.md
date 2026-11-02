@@ -22,7 +22,9 @@ The primary product is a **beamlet-resolved dose influence matrix (Dij)** for ph
 planning: sparse CSC columns with a per-entry statistical uncertainty, computed on CPU and CUDA
 from a single physics source by tagging every history's whole secondary family with its beamlet
 of origin. Scheduling — grouping, chunking, batch merging, which GPU gets which column — cannot
-change the matrix by one bit (test-pinned). Measured end to end on a laptop RTX 4070 at
+change the matrix by one bit (test-pinned). The Warp engine can also hand the matrix over as
+device arrays (`run_dij_device`), for an optimizer that keeps it on the GPU. Measured end to
+end on a laptop RTX 4070 at
 planning statistics: **~1.1e7 histories/s**, i.e. a 100-beamlet 6 MeV field at 2–3 %
 per-beamlet sigma in single-digit seconds.
 

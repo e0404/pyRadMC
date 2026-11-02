@@ -26,6 +26,8 @@ installed; touching it then raises an error naming the extra to install.
 
 ::: pyradmc.scoring.dij.DijResult
 
+::: pyradmc.backends.warp.dij.DeviceDijResult
+
 ## Geometry and scoring
 
 ::: pyradmc.geometry.grid.VoxelGrid
