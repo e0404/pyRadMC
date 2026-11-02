@@ -110,6 +110,13 @@ without a field, so results are not byte-identical to the previous release.
 
 ### Fixed
 
+- **Warp Dij batches past 2^31 histories no longer misattribute dose.** One batch's
+  block of a beamlet group, `group * n_histories_per_beamlet / n_batches`, indexed its
+  histories with an int32 and wrapped silently past 2^31 - 1, scoring late histories
+  into other beamlets: total dose conserved, distribution wrong (the high-dose region
+  1-3 % high on a 143-segment plan at 32M histories per segment). `run_dij` now caps
+  the group so one block fits, which changes no result below the limit (grouping is
+  bit-inert), and refuses a beamlet whose own histories exceed it.
 - Magnetic field samples are copied into read-only storage, preventing caller-array
   mutations from changing validated fields or invalidating device-map provenance.
   Infinite sample spacing is rejected, and uniform-field provenance retains the full
