@@ -1,10 +1,9 @@
 """A primary of weight -w deposits, in expectation, exactly minus the dose of +w.
 
 Transport is linear in the statistical weight: no physics decision may depend on its
-sign. Signed weights are not exotic here — every derivative estimator of
-:mod:`pyradmc.geometry.aperture_gradient` emits them (a closing leaf edge is a
-negative derivative), and the edge gradients of a direct aperture optimization are
-contracted from exactly such runs. Pinned per engine on a 2 MeV, 2 x 2 cm parallel
+sign. Signed weights are not exotic — a derivative estimator emits them (the
+derivative of the dose with respect to a closing leaf edge is negative), and so does
+any difference or control-variate source. Pinned per engine on a 2 MeV, 2 x 2 cm parallel
 beam in water, two independent seeds, batched chi-squared over the dose region.
 
 Before the fix of 2026-10-23 both engines dropped a negative-weight electron's
@@ -12,8 +11,7 @@ continuous-loss deposits (the deposit guard tested the *weighted* amount, ``amou
 <= 0``) and its bremsstrahlung photons (``photon_w > 0``), so ``-D(-w)`` came out at
 0.22 ``D(w)``; the guards now decide on the unweighted energy and on a nonzero
 photon weight, and the photon roulette cap compares ``abs(w)``. Positive-weight
-results are bit-identical to before on ref, Warp cpu and Warp cuda
-(docs/decisions.md, "DAO gradient consistency"). Pinned here:
+results are bit-identical to before on ref, Warp cpu and Warp cuda. Pinned here:
 
 - the mirror within each engine, statistically on two seeds;
 - the mirror on one stream, where no decision may read the weight's sign: exact on the
