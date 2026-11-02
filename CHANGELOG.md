@@ -92,7 +92,10 @@ without a field, so results are not byte-identical to the previous release.
   fan with tracking jaws, 5.1 / 4.2 / 2.5 without jaws; wall time per history
   unchanged. New accessors `aperture_sampling`, `aperture_margins`, `aperture_table`,
   `aperture_bands`, `aperture_fraction`, `aperture_region()`, `proposal_density()`.
-  Requires exact `SpectralBeamSource` fans aligned with their frames. Demonstrated by
+  Requires exact `SpectralBeamSource` fans aligned with their frames, and `delta` in
+  `[2**-10, 1)`: a smaller share raises `ValueError`, since the Warp generators draw
+  the component with a 24-bit uniform and would realize it only to within `2**-24`,
+  biasing the blocked region's dose (weighted `1 / delta`). Demonstrated by
   `examples/aperture_sampling_demo.py`; record in docs/decisions.md.
 
 - Charged-particle transport in a **static magnetic field** (MR-linac dose).

@@ -548,6 +548,49 @@ def test_a_defensive_share_outside_the_unit_interval_is_refused(delta: float) ->
         _source(delta=delta)
 
 
+@pytest.mark.parametrize(
+    "delta", [1e-17, 2.0**-54, 1e-12, 1e-8, 2.0**-24, 1e-6, math.nextafter(2.0**-10, 0.0)]
+)
+def test_a_defensive_share_too_small_to_realize_is_refused(delta: float) -> None:
+    """Below ``2**-10`` the share is refused instead of silently biasing the dose.
+
+    At ``1e-17`` the float64 table stores a share ``1 - (1 - delta) = 0`` and a weight
+    ``1 / 0``: the whole field is never drawn and the blocked region's transmission
+    is lost. At ``1e-8`` the float64 table is fine, but the Warp generators pick the
+    component with a 24-bit uniform, which lands below the float32 share with
+    probability ``2**-24``, not ``1e-8``, at weight ``1e8``: the blocked region's
+    contribution comes out 6x too large.
+    """
+    with pytest.raises(ValueError, match=r"aperture_sampling.*2\*\*-10"):
+        _source(delta=delta)
+
+
+def _realized_share(table32: np.ndarray) -> float:
+    """The whole field's share as a 24-bit uniform realizes it: ``P(u < cdf32[0])``."""
+    return math.ceil(float(table32[2]) * 2**24) / 2**24
+
+
+@pytest.mark.parametrize("delta", [2.0**-10, 1e-3, 0.05, 0.2, 0.5, 1.0 - 2.0**-10])
+def test_an_accepted_share_keeps_the_expectation_in_float32(delta: float) -> None:
+    """Every accepted share survives both tables: the weight times the drawn share is 1.
+
+    Host (float64 uniforms): ``factor_out * cdf[0] = 1`` to rounding. Device (the
+    float32 cast the Warp upload makes, 24-bit uniforms): the share realized by the
+    component draw times the float32 ``factor_out`` is 1 within ``2**-24 / delta <=
+    2**-14``, the bound the refusal guarantees.
+    """
+    source = _source(delta=delta)
+    table = source.aperture_table
+    table32 = table.astype(np.float32)
+    for s in range(source.n_segments):
+        if source.aperture_fraction[s] == 0.0:
+            continue
+        assert np.all(np.isfinite(table[s])) and np.all(np.isfinite(table32[s]))
+        assert table[s, 0] * table[s, 2] == pytest.approx(1.0, rel=1e-15)
+        realized = _realized_share(table32[s]) * float(table32[s, 0])
+        assert abs(realized - 1.0) <= 2.0**-24 / delta + 1e-7
+
+
 @pytest.mark.parametrize("margin", [-0.1, float("inf"), float("nan")])
 def test_a_bad_margin_is_refused(margin: float) -> None:
     with pytest.raises(ValueError, match="aperture_margin"):
