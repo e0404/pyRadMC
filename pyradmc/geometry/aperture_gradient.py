@@ -86,8 +86,18 @@ from pyradmc.geometry.collimation import (
     _length,
     _slab_interval,
     _StackTransmission,
-    jaw_edge_derivative,
-    mlc_tip_edge_derivative,
+)
+from pyradmc.geometry.edge_rays import (
+    defensive_mass,
+    edge_chord_rate,
+    edge_core,
+    edge_in_field,
+    edge_node_density,
+    edge_q,
+    edge_ray_crossing,
+    edge_ray_point,
+    edge_weight,
+    proposal_cell_mass,
 )
 from pyradmc.geometry.source import (
     BeamletSource,
@@ -127,6 +137,11 @@ _F64 = NDArray[np.float64]
 # grid, yet small enough that path lengths stay well-conditioned in float64.
 _RETRACT_CM = 1.0e4
 _BISECTION_STEPS = 64
+# The floor of the proposal's 2 s in float64 (edge_rays.edge_proposal_point); a jump
+# edge, which has no proposal, hands the ray point this table and reads none of it.
+_DENSITY_FLOOR = 1.0e-300
+_NO_TABLE = np.zeros(1)
+_NO_TABLE.setflags(write=False)
 _AXIS_TOLERANCE = 1.0e-12
 # The transmission tables match CollimatedSource's defaults, so a gradient source and
 # the forward source it differentiates evaluate the same mu(E).
@@ -1148,8 +1163,10 @@ class FanEdgeRecord:
     consistent proposal is unbiased. ``q_tangent`` is a rounded tip's tangent focal
     ray (``_tip_tangent_ray``; ``None`` for a jaw): ``q0`` itself when the tangent
     point lies in the slab, short of a bisected ``q0`` otherwise. A generator may use
-    a tangent-ray closed form near it. The remaining fields are those of
-    :class:`FanEdgeDerivativeSource`, whose ``_rays`` the generator mirrors.
+    a tangent-ray closed form near it (:func:`~pyradmc.geometry.edge_rays.edge_block_terms`).
+    The remaining fields are those of :class:`FanEdgeDerivativeSource`, whose ``_rays``
+    and the generator draw and weight a ray through the same scalar functions
+    (:mod:`pyradmc.geometry.edge_rays`).
     """
 
     stack: BeamLimitingStack
@@ -1418,8 +1435,12 @@ class FanEdgeDerivativeSource(Source):
     frame's ``u`` and ``v`` axes (aperture plane normal to ``w``); an MLC parameter
     has focused sides, so a focal ray stays inside its strip through the slab (which
     also makes the strip-restricted rest of stack exact). Four uniforms per history:
-    two for the energy, one along the edge, one across it. The host batch route
-    evaluates the chord derivative with a per-ray Python loop: correct, not fast.
+    two for the energy, one along the edge, one across it. Both host routes go ray by
+    ray through the single-source scalar functions of :mod:`pyradmc.geometry.edge_rays`
+    that the Warp engine's in-kernel generator compiles (crossing, direction, field
+    test, chord rate, weight, the proposal's densities), with this route's own
+    transmissions of the isolated block and the retracted rest of the stack: correct,
+    not fast.
     """
 
     def __init__(
@@ -1460,6 +1481,21 @@ class FanEdgeDerivativeSource(Source):
             rest = _strip_restricted(rest, parameter)
         self._other = _transmission_for(rest, cross_sections, beam.max_energy)
         self._jump = isinstance(device, JawPair) and device.focused
+        block = self._block
+        # edge_rays' edge kinds and the isolated block's twin arguments, as the
+        # in-kernel generator reads them from FanEdgeColumns.
+        if isinstance(block, MLC):
+            self._kind = 0
+            self._twin_args: tuple[float, float, float, float, float, int] = (
+                block.z_top, block.z_bottom, block.tip_radius,
+                block.leaf_edges_v[0], block.leaf_edges_v[1], 0,
+            )  # fmt: skip
+        else:
+            self._kind = 2 if self._jump else 1
+            self._twin_args = (
+                block.z_top, block.z_bottom, 0.0, block.edge_neg, block.edge_pos,
+                1 if block.focused else 0,
+            )  # fmt: skip
         self._span = geometry.span
         self._r_c = geometry.r_c
         self._n_table = n_table
@@ -1498,17 +1534,27 @@ class FanEdgeDerivativeSource(Source):
             n = self._n_table
             s_max = math.sqrt(self._span)
             s = np.linspace(0.0, s_max, n)
-            q = self._q0 + self._sign * s**2
+            q = np.array([edge_q(self._q0, self._sign, sk) for sk in s])
             e_ref = np.full(n, self._beam.spectrum.mean_energy)
-            density = np.abs(self._derivative(q, np.full(n, self._r_c), e_ref))
-            f = 2.0 * s * density
-            mass = 0.5 * (f[:-1] + f[1:]) * np.diff(s)
-            uniform_share = np.diff(s) / s_max
-            if mass.sum() > 0.0:
-                mass = (1.0 - self._defensive) * mass / mass.sum() + self._defensive * uniform_share
+            mu, transmission, rates = self._derivative_terms(q, np.full(n, self._r_c), e_ref)
+            f = [edge_node_density(*node) for node in zip(s, mu, transmission, rates, strict=True)]
+            mass = np.array(
+                [proposal_cell_mass(f[c], f[c + 1], s[c], s[c + 1]) for c in range(n - 1)]
+            )
+            width = np.diff(s)
+            # NumPy's pairwise total; the device sums sequentially and does not
+            # renormalize (edge_rays.edge_proposal_tables): equal to rounding, pinned.
+            total = mass.sum()
+            if total > 0.0:
+                mass = np.array(
+                    [
+                        defensive_mass(m, total, self._defensive, w, s_max)
+                        for m, w in zip(mass, width, strict=True)
+                    ]
+                )
             else:
-                mass = uniform_share
-            self._tables = (s, np.cumsum(mass) / mass.sum(), mass / mass.sum() / np.diff(s))
+                mass = width / s_max
+            self._tables = (s, np.cumsum(mass) / mass.sum(), mass / mass.sum() / width)
         return self._tables
 
     @property
@@ -1518,18 +1564,11 @@ class FanEdgeDerivativeSource(Source):
 
     def device_record(self) -> FanEdgeRecord:
         """Everything an in-kernel generator needs for this edge, as plain data."""
-        block = self._block
-        if self._jump:
-            kind = 2
-        elif isinstance(block, MLC):
-            kind = 0
-        else:
-            kind = 1
         return FanEdgeRecord(
             stack=self._stack,
             device=self._device_index,
-            block=block,
-            kind=kind,
+            block=self._block,
+            kind=self._kind,
             sign=self._sign,
             x=self._x,
             q0=self._q0,
@@ -1549,11 +1588,28 @@ class FanEdgeDerivativeSource(Source):
             q_tangent=self._q_tangent,
         )
 
+    def _local_rays(self, q: _F64, r: _F64) -> tuple[_F64, NDArray[np.bool_]]:
+        """Local unit directions and field flags of the focal rays through (q, r).
+
+        Ray by ray through :func:`~pyradmc.geometry.edge_rays.edge_ray_crossing` and
+        :func:`~pyradmc.geometry.edge_rays.edge_in_field`, the in-kernel generator's
+        own functions; the direction divides by the norm (the kernel multiplies by its
+        reciprocal: ``edge_ray_direction``).
+        """
+        n = len(q)
+        local = np.empty((n, 3), dtype=np.float64)
+        inside = np.empty(n, dtype=np.bool_)
+        (u_lo, u_hi), (v_lo, v_hi) = self._field
+        z_mid = self._z_mid
+        for k in range(n):
+            lu, lv, norm = edge_ray_crossing(q[k], r[k], self._q_axis, z_mid)
+            local[k] = lu / norm, lv / norm, z_mid / norm
+            inside[k] = edge_in_field(lu, lv, u_lo, u_hi, v_lo, v_hi) != 0
+        return local, inside
+
     def _directions(self, q: _F64, r: _F64) -> tuple[_F64, _F64]:
         """Local and engine-frame unit directions of the focal rays through (q, r)."""
-        u, v = (q, r) if self._q_axis == 0 else (r, q)
-        local = np.stack([u, v, np.full_like(u, self._z_mid)], axis=1)
-        local /= np.linalg.norm(local, axis=1, keepdims=True)
+        local, _ = self._local_rays(q, r)
         return local, local @ self._axes
 
     def _block_chords(self, q: _F64, r: _F64) -> _F64:
@@ -1562,68 +1618,75 @@ class FanEdgeDerivativeSource(Source):
         return np.asarray(self._block.path_lengths(np.zeros_like(local), local), dtype=np.float64)
 
     def _chord_rates(self, local: _F64) -> _F64:
-        """Evaluate the block chord's pathwise edge derivative per local ray (scalar twins)."""
-        block = self._block
-        pos = 1 if self._sign > 0.0 else 0
+        """Evaluate the block chord's pathwise edge derivative per local ray (scalar twins).
+
+        Through :func:`~pyradmc.geometry.edge_rays.edge_chord_rate`, the dispatch the
+        in-kernel generator takes away from a tip's tangent ray.
+        """
+        z_top, z_bottom, radius, lo, hi, focused = self._twin_args
         out = np.empty(len(local))
         for k, (du, dv, dw) in enumerate(local):
-            if isinstance(block, MLC):
-                out[k] = mlc_tip_edge_derivative(
-                    0.0, 0.0, 0.0, du, dv, dw, block.z_top, block.z_bottom, block.tip_radius,
-                    block.leaf_edges_v[0], block.leaf_edges_v[1], self._x, 1, pos,
-                )  # fmt: skip
-            else:
-                d_q = du if block.axis == "u" else dv
-                out[k] = jaw_edge_derivative(
-                    0.0, d_q, 0.0, dw, block.z_top, block.z_bottom, block.edge_neg,
-                    block.edge_pos, 1 if block.focused else 0, pos,
-                )  # fmt: skip
+            out[k] = edge_chord_rate(
+                self._kind, self._sign, self._x, z_top, z_bottom, radius, lo, hi, focused,
+                self._q_axis, du, dv, dw,
+            )  # fmt: skip
         return out
+
+    def _derivative_terms(self, q: _F64, r: _F64, energies: _F64) -> tuple[_F64, _F64, _F64]:
+        """``(mu(E), T_block, dl/dx)`` per focal ray through the isolated block."""
+        local, engine = self._directions(q, r)
+        return self._block_terms(local, engine, energies)
+
+    def _block_terms(self, local: _F64, engine: _F64, energies: _F64) -> tuple[_F64, _F64, _F64]:
+        """:meth:`_derivative_terms` of rays given by their local and engine directions."""
+        origins = np.tile(self._origin, (len(local), 1))
+        mu = self._block_t.linear_attenuation(energies)[:, 0]
+        transmission = self._block_t.factors(energies, origins, engine)
+        return mu, transmission, self._chord_rates(local)
 
     def _derivative(self, q: _F64, r: _F64, energies: _F64) -> _F64:
         """``dT_block/dx`` per focal ray: ``-mu(E) T_block dl/dx``."""
-        local, engine = self._directions(q, r)
-        origins = np.tile(self._origin, (len(q), 1))
-        mu = self._block_t.linear_attenuation(energies)[:, 0]
-        transmission = self._block_t.factors(energies, origins, engine)
-        return np.asarray(-mu * transmission * self._chord_rates(local), dtype=np.float64)
+        mu, transmission, rates = self._derivative_terms(q, r, energies)
+        return np.asarray(-mu * transmission * rates, dtype=np.float64)
 
     def _rays(self, energies: _F64, u_r: _F64, u_q: _F64) -> tuple[_F64, _F64]:
         """Engine-frame directions and weights for one batch of draws.
 
-        The single arithmetic behind :meth:`emit` and :meth:`sample_batch`.
+        The single arithmetic behind :meth:`emit` and :meth:`sample_batch`, and the
+        in-kernel generator's: the crossing, the ray, the field test, the chord rate
+        and the weight go ray by ray through :mod:`pyradmc.geometry.edge_rays`. Only
+        the transmissions are this route's own, evaluated on the isolated block and
+        the retracted rest of the stack (the device subtracts the block's optical
+        depth from the stack's instead).
         """
         n = len(energies)
-        r = self._r_range[0] + (self._r_range[1] - self._r_range[0]) * u_r
         origins = np.tile(self._origin, (n, 1))
+        s_grid, cdf, cell_density = (_NO_TABLE,) * 3 if self._jump else self._proposal()
+        s = np.empty(n)
+        q = np.empty(n)
+        r = np.empty(n)
+        density = np.empty(n)
+        (r_lo, r_hi), kind = self._r_range, self._kind
+        for k in range(n):
+            s[k], q[k], r[k], density[k] = edge_ray_point(
+                kind, self._x, self._q0, self._sign, r_lo, r_hi, cdf, cell_density, s_grid,
+                0, 0, cdf.size, _DENSITY_FLOOR, u_r[k], u_q[k],
+            )  # fmt: skip
+        local, inside = self._local_rays(q, r)
+        engine = local @ self._axes
         if self._jump:
-            q = np.full(n, self._x)
-            _, engine = self._directions(q, r)
             # Just inside the block, where the ray sees the full slant thickness.
-            _, inside = self._directions(q + self._sign * 1.0e-7, r)
-            full = self._block_t.factors(energies, origins, inside)
-            core = self._sign * (1.0 - full)
+            _, nudged = self._directions(q + self._sign * 1.0e-7, r)
+            t_block = self._block_t.factors(energies, origins, nudged)
+            mu = rates = np.zeros(n)
         else:
-            s_grid, cdf, cell_density = self._proposal()
-            k = np.minimum(np.searchsorted(cdf, u_q, side="right"), cdf.size - 1)
-            lower = np.where(k > 0, cdf[np.maximum(k - 1, 0)], 0.0)
-            residual = np.clip((u_q - lower) / (cdf[k] - lower), 0.0, 1.0)
-            s = s_grid[k] + (s_grid[k + 1] - s_grid[k]) * residual
-            q = self._q0 + self._sign * s**2
-            _, engine = self._directions(q, r)
-            # Proposal density in q: the cell's density in s over |dq/ds| = 2 s.
-            density = cell_density[k] / np.maximum(2.0 * s, 1.0e-300)
-            core = np.where(s > 0.0, self._derivative(q, r, energies) / density, 0.0)
-        local_u, local_v = (q, r) if self._q_axis == 0 else (r, q)
-        inside_field = (
-            (local_u >= self._field[0][0])
-            & (local_u <= self._field[0][1])
-            & (local_v >= self._field[1][0])
-            & (local_v <= self._field[1][1])
-        )
+            mu, t_block, rates = self._block_terms(local, engine, energies)
         other = self._other.factors(energies, origins, engine)
-        weights = np.where(inside_field, self._scale * core * other, 0.0)
-        return engine, np.asarray(weights, dtype=np.float64)
+        weights = np.empty(n)
+        for k in range(n):
+            core = edge_core(kind, self._sign, s[k], mu[k], t_block[k], rates[k], density[k])
+            weights[k] = edge_weight(int(inside[k]), 1.0, self._scale, core, other[k])
+        return engine, weights
 
     def emit(self, rng_state: RNGState) -> Primary:
         """Emit one focal ray along the edge; consumes exactly four uniforms."""

@@ -101,7 +101,10 @@ without a field, so results are not byte-identical to the previous release.
   fan with tracking jaws, 5.1 / 4.2 / 2.5 without jaws; wall time per history
   unchanged. New accessors `aperture_sampling`, `aperture_margins`, `aperture_table`,
   `aperture_bands`, `aperture_fraction`, `aperture_region()`, `proposal_density()`.
-  Requires exact `SpectralBeamSource` fans aligned with their frames. Demonstrated by
+  Requires exact `SpectralBeamSource` fans aligned with their frames, and `delta` in
+  `[2**-10, 1)`: a smaller share raises `ValueError`, since the Warp generators draw
+  the component with a 24-bit uniform and would realize it only to within `2**-24`,
+  biasing the blocked region's dose (weighted `1 / delta`). Demonstrated by
   `examples/aperture_sampling_demo.py`; record in docs/decisions.md.
 
 - **Monte Carlo dose gradients with respect to leaf tips and jaw edges.**
@@ -214,13 +217,6 @@ without a field, so results are not byte-identical to the previous release.
 
 ### Fixed
 
-- **Warp Dij batches past 2^31 histories no longer misattribute dose.** One batch's
-  block of a beamlet group, `group * n_histories_per_beamlet / n_batches`, indexed its
-  histories with an int32 and wrapped silently past 2^31 - 1, scoring late histories
-  into other beamlets: total dose conserved, distribution wrong (the high-dose region
-  1-3 % high on a 143-segment plan at 32M histories per segment). `run_dij` now caps
-  the group so one block fits, which changes no result below the limit (grouping is
-  bit-inert), and refuses a beamlet whose own histories exceed it.
 - **Negative-weight histories keep their electron dose.** Both engines skipped a
   continuous-loss deposit when the *weighted* energy was not positive, and spawned
   bremsstrahlung only for a positive photon weight, so a primary of weight -w
@@ -229,6 +225,13 @@ without a field, so results are not byte-identical to the previous release.
   photon roulette cap compares `abs(w)`. Every positive-weight result is bit-identical
   (147 seeded arrays on ref, Warp cpu and Warp cuda); only runs with negative weights,
   such as derivative estimators, move.
+- **Warp Dij batches past 2^31 histories no longer misattribute dose.** One batch's
+  block of a beamlet group, `group * n_histories_per_beamlet / n_batches`, indexed its
+  histories with an int32 and wrapped silently past 2^31 - 1, scoring late histories
+  into other beamlets: total dose conserved, distribution wrong (the high-dose region
+  1-3 % high on a 143-segment plan at 32M histories per segment). `run_dij` now caps
+  the group so one block fits, which changes no result below the limit (grouping is
+  bit-inert), and refuses a beamlet whose own histories exceed it.
 - Magnetic field samples are copied into read-only storage, preventing caller-array
   mutations from changing validated fields or invalidating device-map provenance.
   Infinite sample spacing is rejected, and uniform-field provenance retains the full

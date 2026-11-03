@@ -310,3 +310,20 @@ def test_the_upload_carries_no_table_when_off() -> None:
         _source().aperture_table.reshape(-1).astype(np.float32),
     )
     assert on.segments.aperture_bands == _source().aperture_bands
+
+
+def test_the_smallest_accepted_share_survives_the_upload() -> None:
+    """At ``delta = 2**-10`` the device table's weights are finite and the share it
+    realizes (``P(randf < cdf[0])`` over 24-bit uniforms) is ``delta`` exactly."""
+    from pyradmc.backends.warp.segments import upload_segmented_fan
+
+    source = _source(delta=2.0**-10)
+    stride = source.aperture_table.shape[1]
+    table = upload_segmented_fan(source, "cpu").segments.aperture_table.numpy()
+    for s in range(source.n_segments):
+        row = table[s * stride : (s + 1) * stride]
+        assert np.all(np.isfinite(row))
+        if source.aperture_fraction[s] > 0.0:
+            realized = np.ceil(np.float64(row[2]) * 2**24) / 2**24
+            assert realized == 2.0**-10
+            assert realized * np.float64(row[0]) == 1.0

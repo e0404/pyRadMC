@@ -9,16 +9,27 @@ RTX 4070, measured 2026-10-21). This module uploads a whole edge set once — an
 :class:`~pyradmc.geometry.segment_edges.SegmentedEdgeSource`, both reduced to the
 same host :class:`~pyradmc.geometry.aperture_gradient.FanEdgeColumns` (pinned equal)
 and packed into one float32 and one int32 transfer — and generates their rays
-in-kernel, mirroring the host ``_rays`` arithmetic in float32:
+in-kernel. The arithmetic is not here: the generators call the single-source scalar
+functions of :mod:`pyradmc.geometry.edge_rays` (and
+:func:`~pyradmc.geometry.fan.spectrum_energy`), compiled by the physics loader, which
+the host route of :class:`~pyradmc.geometry.aperture_gradient.FanEdgeDerivativeSource`
+runs too:
 
 - energy by spectrum CDF inversion (the spectral beamlet route's draws), then the
   position along the edge, then the proposal draw ``q = q0 + sign s^2`` from the
-  edge's tabulated CDF (a jump edge sits on ``q = x``);
-- the focal ray through ``(q, r)`` on the parameter device's mid-plane;
+  edge's tabulated CDF (a jump edge sits on ``q = x``): ``edge_ray_point``;
+- the focal ray through ``(q, r)`` on the parameter device's mid-plane and its field
+  test: ``edge_ray_direction``, ``edge_in_field``;
 - the weight ``scale * (-mu T_block dl/dx) / p(q) * T_rest`` from the compiled chord
-  twins and their edge derivatives, or ``scale * sign (1 - T_full) * T_rest`` on a
-  jump, where ``T_rest = exp(-(tau_stack - mu l_block))``: the parameter block's
-  optical depth enters the stack's additively, so no retracted stack is needed.
+  twins and their edge derivatives (``edge_block_terms``, with its near-tangent
+  closed form), or ``scale * sign (1 - T_full) * T_rest`` on a jump, where
+  ``T_rest = exp(-(tau_stack - mu l_block))``: the parameter block's optical depth
+  enters the stack's additively, so no retracted stack is needed (``edge_core``,
+  ``edge_weight``, ``rest_transmission``).
+
+What stays here is the device side: the uploads, the proposal and generator
+launches, the thread-to-history mapping and RNG keying, the loop over a segment's
+stack devices (the pre-solve's chord dispatcher) and the queue writes.
 
 Every segment's stack (one per control point, each with its own frame) is
 concatenated into one device table, addressed per segment by a device range and
@@ -65,21 +76,37 @@ __all__ = [
 wp.set_module_options({"enable_backward": False})
 
 _p = warp_physics()
-jaw_path_length = _p.jaw_path_length
-jaw_edge_derivative = _p.jaw_edge_derivative
-mlc_leaf_path_length = _p.mlc_leaf_path_length
-mlc_tip_edge_derivative = _p.mlc_tip_edge_derivative
+edge_block_terms = _p.edge_block_terms
+edge_core = _p.edge_core
+edge_in_field = _p.edge_in_field
+edge_node_density = _p.edge_node_density
+edge_proposal_tables = _p.edge_proposal_tables
+edge_q = _p.edge_q
+edge_ray_direction = _p.edge_ray_direction
+edge_ray_point = _p.edge_ray_point
+edge_weight = _p.edge_weight
+focused_slab_chord = _p.focused_slab_chord
+frame_direction = _p.frame_direction
+lookup_loglinear_2d = _p.lookup_loglinear_2d
+proposal_cell_mass = _p.proposal_cell_mass
+rest_transmission = _p.rest_transmission
+select_by_cdf_at = _p.select_by_cdf_at
+spectrum_energy = _p.spectrum_energy
+stratified_position = _p.stratified_position
 
 # The host transmission tables' grid (collimation._StackTransmission via the
 # aperture-gradient sources): same nodes, same interpolation.
 _E_MIN = 0.010
 _N_MU = 512
 # Below this distance from a rounded tip's tangent ray (s_t^2 = |q - q_t|, cm) the
-# chord takes the closed-form near-tangent path (_block_terms: the disc chord, clipped
-# where a slab face cuts it). Above it the twin answers: just past 2e-3 in the DAO
-# regime its float32 error is 3-7e-3 relative in the rate and up to 2.5e-3 cm in the
-# chord, unbiased (derivative-mass ratio 0.9998, measured 2026-10-23).
+# chord takes the closed-form near-tangent path (edge_rays.edge_block_terms: the disc
+# chord, clipped where a slab face cuts it). Above it the twin answers: just past 2e-3
+# in the DAO regime its float32 error is 3-7e-3 relative in the rate and up to
+# 2.5e-3 cm in the chord, unbiased (derivative-mass ratio 0.9998, measured
+# 2026-10-23). A float32 choice, so it lives with the float32 target.
 _NEAR_TANGENT_S2 = wp.constant(2.0e-3)
+# The floor of the proposal's 2 s in float32 (edge_rays.edge_proposal_point).
+_DENSITY_FLOOR = wp.constant(1.0e-30)
 
 
 @wp.struct
@@ -312,126 +339,30 @@ def _tabulate_proposals(es, smooth: wp.array, n_smooth: int, n_table: int, devic
 
 @wp.func
 def _mu(es: EdgeSet, row: int, energy: float) -> float:
-    """Macroscopic mu (1/cm) of global device ``row``: the host np.interp in log E."""
-    t = (wp.log(energy) - es.log_e_min) * es.inv_dlog
-    t = wp.min(wp.max(t, 0.0), float(es.n_mu - 1))
-    i = wp.min(int(t), es.n_mu - 2)
-    f = t - float(i)
-    return wp.exp(es.log_mu[row, i] * (1.0 - f) + es.log_mu[row, i + 1] * f) * es.stack.density[row]
+    """Macroscopic mu (1/cm) of global device ``row``: the host np.interp in log E.
+
+    ``log(mu/rho)`` interpolated linearly in log E on the row (the data layer's
+    clamped lookup), then times the device's density.
+    """
+    log_mu = lookup_loglinear_2d(es.log_mu, row, es.log_e_min, es.inv_dlog, es.n_mu, energy)
+    return wp.exp(log_mu) * es.stack.density[row]
 
 
 @wp.func
 def _block_terms(es: EdgeSet, j: int, qq: float, s: float, du: float, dv: float, dw: float):
     """Return ``(l_block, rate, l_rest)`` of edge ``j``'s block along one focal ray.
 
-    ``l_block``/``rate`` are the chord and its edge derivative that the weight uses;
-    ``l_rest`` is the twin's chord, which the stack's optical depth also contains,
-    so ``tau_stack - mu l_rest`` is the rest of the stack exactly. Near a rounded
-    tip's tangent ray ``q_t`` the twin's float32 circle test cancels
-    (``|p - c|^2 - R^2 ~ 1e-5`` against an ulp of 8e-6 at ``R = 8`` cm) and loses
-    the rays carrying the largest weights. There the gap between ray and circle
-    factorizes without cancellation, in the ray's distance from the tangent ray
-    ``s_t^2 = |q - q_t| = s^2 + t_off`` (``t_off = sign (q0 - q_t)``, float64 on the
-    host: zero when ``q0`` is the tangent ray, the lead of a bisected start whose
-    tangent point lies outside the slab),
-
-        g = s_t^2 (z + sign R (q + q_t) / (A + A_t)) / A,   A = sqrt(q^2 + z^2),
-
-    and the chord is the disc chord, so chord and rate are closed-form: exact, not an
-    expansion. The branch is taken for ``s_t^2 < _NEAR_TANGENT_S2`` on every rounded
-    tip, whether its support start is the tangent ray or a bisected one: a tangent
-    point just outside a face makes the corner ray nearly tangent, and the twin would
-    cancel there exactly as at a tangent start (0.4-3 % of the derivative mass,
-    measured, 2026-10-23 review). Then:
-
-    - the bare disc chord lies inside the slab, checked per ray: both chord ends
-      ``(t_c -+ half) cw`` within ``[z_top, z_bottom]``, with ``t_c`` the projection
-      of the tip centre on the ray in the ``(u, w)`` plane. Where a face cuts it, the
-      chord is clipped there in closed form too: a clipped end does not move with
-      the edge, an open one moves at ``dt_c/dx +- dhalf/dx`` (``dt_c/dx = cu``), so a
-      genuine tangent near a face keeps the cancellation-free form. The bare chord
-      and its rate were up to 1.9x and 2x too large there (measured).
-
-    Until 2026-10-22 the branch was taken on ``s^2`` alone with ``q0`` as the tangent
-    ray, which biased bisected starts and face-cut chords by 15-30 % (z up to 14
-    against the host route; decisions.md, "Vectorized edge sets"). Where ``q0`` is
-    the tangent ray and the chord lies in the slab, the closed form is unchanged, bit
-    for bit (``t_off`` is zero and ``q_t`` is ``q0``).
+    :func:`~pyradmc.geometry.edge_rays.edge_block_terms` on edge ``j``'s columns, with
+    the float32 near-tangent threshold ``_NEAR_TANGENT_S2``: the twins' chord and
+    rate, or within ``s^2 + t_off < 2e-3`` of a rounded tip's tangent ray the
+    cancellation-free closed form (whole, or clipped where a slab face cuts it).
+    ``t_off`` and ``q_t`` come from the host in float64.
     """
-    kind = es.kind[j]
-    sign = es.sign[j]
-    zm = es.z_mid[j]
-    above = int(0)  # noqa: UP018, RUF046 -- Warp needs the constructor to declare a mutated var
-    if sign > 0.0:
-        above = 1
-    l_block = float(0.0)  # noqa: UP018 -- Warp needs the constructor to declare a mutated var
-    rate = float(0.0)  # noqa: UP018 -- Warp needs the constructor to declare a mutated var
-    l_rest = float(0.0)  # noqa: UP018 -- Warp needs the constructor to declare a mutated var
-    if kind == 0:
-        l_block = mlc_leaf_path_length(
-            0.0, 0.0, 0.0, du, dv, dw, es.b_z_top[j], es.b_z_bottom[j], es.b_radius[j],
-            es.b_lo[j], es.b_hi[j], es.x[j], 1, above,
-        )  # fmt: skip
-        # The stack's optical depth below holds the twin's chord of this very leaf:
-        # subtracting the same float32 value keeps T_rest exact either way.
-        l_rest = l_block
-        closed = int(0)  # noqa: UP018, RUF046 -- Warp needs the constructor to declare a mutated var
-        s_t2 = s * s + es.t_off[j]  # the ray's distance from the tangent ray, squared s
-        if s_t2 < _NEAR_TANGENT_S2:
-            # The closed-form near-tangent chord (see the docstring).
-            radius = es.b_radius[j]
-            q_t = es.q_t[j]
-            a_q = wp.sqrt(qq * qq + zm * zm)
-            a_0 = wp.sqrt(q_t * q_t + zm * zm)
-            gap = s_t2 * (zm + sign * radius * (qq + q_t) / (a_q + a_0)) / a_q
-            gap = wp.max(gap, 0.0)
-            half = wp.sqrt(gap * (2.0 * radius - gap))
-            to_3d = 1.0 / wp.sqrt(du * du + dw * dw)
-            # Both ends of the bare disc chord inside the slab, along the (u, w) ray.
-            cw = dw * to_3d
-            t_c = (es.x[j] + sign * radius) * du * to_3d + zm * cw
-            closed = 1
-            if (t_c - half) * cw >= es.b_z_top[j] and (t_c + half) * cw <= es.b_z_bottom[j]:
-                l_block = 2.0 * half * to_3d
-                rate = 0.0
-                if half > 0.0:
-                    rate = to_3d * 2.0 * (radius - gap) / half * (-sign * zm / a_q)
-            else:
-                # A slab face cuts the chord: clip it there; a clipped end stays put
-                # when the edge moves, an open one moves at dt_c/dx +- dhalf/dx.
-                t_top = es.b_z_top[j] / cw
-                t_bottom = es.b_z_bottom[j] / cw
-                t_lo = wp.max(t_c - half, t_top)
-                t_hi = wp.min(t_c + half, t_bottom)
-                l_block = wp.max(t_hi - t_lo, 0.0) * to_3d
-                rate = 0.0
-                if half > 0.0 and t_hi > t_lo:
-                    d_half = (radius - gap) / half * (-sign * zm / a_q)
-                    d_c = du * to_3d
-                    if t_c + half <= t_bottom:
-                        rate += d_c + d_half
-                    if t_c - half >= t_top:
-                        rate -= d_c - d_half
-                    rate = rate * to_3d
-        if closed == 0:
-            rate = mlc_tip_edge_derivative(
-                0.0, 0.0, 0.0, du, dv, dw, es.b_z_top[j], es.b_z_bottom[j], es.b_radius[j],
-                es.b_lo[j], es.b_hi[j], es.x[j], 1, above,
-            )  # fmt: skip
-    else:
-        d_q = du
-        if es.q_axis[j] == 1:
-            d_q = dv
-        l_block = jaw_path_length(
-            0.0, d_q, 0.0, dw, es.b_z_top[j], es.b_z_bottom[j], es.b_lo[j], es.b_hi[j],
-            es.b_focused[j], 0,
-        )  # fmt: skip
-        l_rest = l_block
-        rate = jaw_edge_derivative(
-            0.0, d_q, 0.0, dw, es.b_z_top[j], es.b_z_bottom[j], es.b_lo[j], es.b_hi[j],
-            es.b_focused[j], above,
-        )  # fmt: skip
-
+    l_block, rate, l_rest = edge_block_terms(
+        es.kind[j], es.sign[j], es.x[j], es.z_mid[j], es.b_z_top[j], es.b_z_bottom[j],
+        es.b_radius[j], es.b_lo[j], es.b_hi[j], es.b_focused[j], es.q_axis[j], es.q_t[j],
+        es.t_off[j], _NEAR_TANGENT_S2, qq, s, du, dv, dw,
+    )  # fmt: skip
     return l_block, rate, l_rest
 
 
@@ -440,23 +371,12 @@ def _node_density(es: EdgeSet, j: int, sk: float, mu_block: float) -> float:
     """``f = 2 s |dT/dx|`` of edge ``j`` at proposal node ``s = sk``.
 
     Along the edge's central ray ``r_c`` at the reference energy (``mu_block``), at
-    ``q = q0 + sign s^2``: the derivative density in ``s``, finite at a tip's
-    tangent ray, zero at ``s = 0``.
+    ``q = q0 + sign s^2``: :func:`~pyradmc.geometry.edge_rays.edge_node_density`.
     """
-    zm = es.z_mid[j]
-    rr = es.r_c[j]
-    qq = es.q0[j] + es.sign[j] * sk * sk
-    lu = qq
-    lv = rr
-    if es.q_axis[j] == 1:
-        lu = rr
-        lv = qq
-    inv = 1.0 / wp.sqrt(lu * lu + lv * lv + zm * zm)
-    l_block, rate, _l_rest = _block_terms(es, j, qq, sk, lu * inv, lv * inv, zm * inv)
-    f_k = 2.0 * sk * wp.abs(mu_block * wp.exp(-mu_block * l_block) * rate)
-    if sk == 0.0:
-        f_k = 0.0
-    return f_k
+    qq = edge_q(es.q0[j], es.sign[j], sk)
+    _lu, _lv, du, dv, dw = edge_ray_direction(qq, es.r_c[j], es.q_axis[j], es.z_mid[j])
+    l_block, rate, _l_rest = _block_terms(es, j, qq, sk, du, dv, dw)
+    return edge_node_density(sk, mu_block, wp.exp(-mu_block * l_block), rate)
 
 
 @wp.kernel
@@ -480,24 +400,24 @@ def build_proposals(
     f: wp.array(dtype=float),
     precomputed: int,
 ):
-    """Tabulate one smooth edge's proposal: the host ``_proposal``, on the device.
+    """Tabulate one smooth edge's proposal on the device, one thread per edge.
 
     The node densities (``_node_density``: read from ``f`` when ``precomputed``,
-    else evaluated here) turned into cell masses ``(f_k + f_k+1) ds / 2``, mixed
-    with the defensive uniform share and normalized into the cumulative ``cdf`` and
-    the per-cell density ``cell``. One thread per edge, sequential over its cells (a
-    fixed summation order; both density routes give the same bits, test-pinned);
-    any consistent proposal is unbiased, and the generator reads exactly these
-    tables.
+    else evaluated here) turned into trapezoid cell masses
+    (:func:`~pyradmc.geometry.edge_rays.proposal_cell_mass`), then into the cumulative
+    ``cdf`` and the per-cell density ``cell`` by
+    :func:`~pyradmc.geometry.edge_rays.edge_proposal_tables` (defensive share,
+    sequential normalization). A fixed summation order; both density routes give
+    the same bits (test-pinned). Any consistent proposal is unbiased, and the
+    generator reads exactly these tables.
     """
     t = wp.tid()
     j = smooth[t]
     n = es.n_table
     soff = es.s_row[j] * n
     coff = es.table[j] * (n - 1)
-    s_max = es.s[soff + n - 1]
     mu_block = _mu(es, es.device[j], es.e_ref[j])
-    # First pass: the derivative mass per cell, and its total.
+    # The derivative mass per cell, and its total.
     total = float(0.0)  # noqa: UP018 -- Warp needs the constructor to declare a mutated var
     f_prev = float(0.0)  # noqa: UP018 -- Warp needs the constructor to declare a mutated var
     for k in range(n):
@@ -505,23 +425,11 @@ def build_proposals(
         # Warp compiles the conditional as two branches and a select: lazy, not both.
         f_k = f[k * smooth.shape[0] + t] if precomputed != 0 else _node_density(es, j, sk, mu_block)
         if k > 0:
-            mass = 0.5 * (f_prev + f_k) * (sk - es.s[soff + k - 1])
+            mass = proposal_cell_mass(f_prev, f_k, es.s[soff + k - 1], sk)
             es.cell[coff + k - 1] = mass
             total += mass
         f_prev = f_k
-    # Second pass: mix with the defensive share, normalize, accumulate.
-    share = es.defensive[j]
-    running = float(0.0)  # noqa: UP018 -- Warp needs the constructor to declare a mutated var
-    for c in range(n - 1):
-        width = es.s[soff + c + 1] - es.s[soff + c]
-        mass = width / s_max
-        if total > 0.0:
-            mass = (1.0 - share) * es.cell[coff + c] / total + share * width / s_max
-        running += mass
-        es.cdf[coff + c] = running
-        es.cell[coff + c] = mass / width
-    # The cumulative sum ends at 1 up to rounding; pin the last cell exactly.
-    es.cdf[coff + n - 2] = 1.0
+    edge_proposal_tables(es.cell, es.cdf, coff, es.s, soff, n - 1, total, es.defensive[j])
 
 
 @wp.func
@@ -538,49 +446,23 @@ def _queue_edge_ray(
     emitted: wp.array(dtype=wp.int64),
     q: Queue,
 ):
-    """Queue edge ``j``'s ray at ``(u_r, u_q)``: the host ``_rays``, its weight x ``factor``."""
+    """Queue edge ``j``'s ray at ``(u_r, u_q)``, its weight x ``factor``.
+
+    The host ``FanEdgeDerivativeSource._rays`` through the same
+    :mod:`~pyradmc.geometry.edge_rays` functions, on the edge's uploaded columns;
+    only the transmissions differ in form (here the stack's optical depth with the
+    block's chord subtracted, ``rest_transmission``; there a retracted stack).
+    """
     kind = es.kind[j]
     sign = es.sign[j]
     seg = es.segment[j]
-    rr = es.r_lo[j] + (es.r_hi[j] - es.r_lo[j]) * u_r
-    qq = es.x[j]
-    dens = float(1.0)  # noqa: UP018 -- Warp needs the constructor to declare a mutated var
-    s = float(0.0)  # noqa: UP018 -- Warp needs the constructor to declare a mutated var
-    if kind != 2:
-        cells = es.n_table - 1
-        coff = es.table[j] * cells
-        # The first cell whose cumulative mass exceeds u_q (searchsorted 'right').
-        lo_c = int(0)  # noqa: UP018, RUF046 -- Warp needs the constructor to declare a mutated var
-        hi_c = cells - 1
-        while lo_c < hi_c:
-            mid = (lo_c + hi_c) // 2
-            if es.cdf[coff + mid] > u_q:
-                hi_c = mid
-            else:
-                lo_c = mid + 1
-        lower = float(0.0)  # noqa: UP018 -- Warp needs the constructor to declare a mutated var
-        if lo_c > 0:
-            lower = es.cdf[coff + lo_c - 1]
-        width = es.cdf[coff + lo_c] - lower
-        resid = float(0.0)  # noqa: UP018 -- Warp needs the constructor to declare a mutated var
-        if width > 0.0:
-            resid = wp.min(wp.max((u_q - lower) / width, 0.0), 1.0)
-        soff = es.s_row[j] * es.n_table
-        s = es.s[soff + lo_c] + (es.s[soff + lo_c + 1] - es.s[soff + lo_c]) * resid
-        qq = es.q0[j] + sign * s * s
-        dens = es.cell[coff + lo_c] / wp.max(2.0 * s, 1.0e-30)
-
-    lu = qq
-    lv = rr
-    if es.q_axis[j] == 1:
-        lu = rr
-        lv = qq
-    zm = es.z_mid[j]
-    inv = 1.0 / wp.sqrt(lu * lu + lv * lv + zm * zm)
-    du = lu * inv
-    dv = lv * inv
-    dw = zm * inv
-    inside = lu >= es.u_lo[j] and lu <= es.u_hi[j] and lv >= es.v_lo[j] and lv <= es.v_hi[j]
+    cells = es.n_table - 1
+    s, qq, rr, dens = edge_ray_point(
+        kind, es.x[j], es.q0[j], sign, es.r_lo[j], es.r_hi[j], es.cdf, es.cell, es.s,
+        es.table[j] * cells, es.s_row[j] * es.n_table, cells, _DENSITY_FLOOR, u_r, u_q,
+    )  # fmt: skip
+    lu, lv, du, dv, dw = edge_ray_direction(qq, rr, es.q_axis[j], es.z_mid[j])
+    inside = edge_in_field(lu, lv, es.u_lo[j], es.u_hi[j], es.v_lo[j], es.v_hi[j])
 
     row = es.device[j]
     mu_block = _mu(es, row, energy)
@@ -590,23 +472,15 @@ def _queue_edge_ray(
         tau += _mu(es, dev, energy) * device_path_length(
             es.stack, dev, 0.0, 0.0, 0.0, du, dv, dw, 0
         )
-    t_rest = wp.exp(-(tau - mu_block * l_rest))
-
-    core = float(0.0)  # noqa: UP018 -- Warp needs the constructor to declare a mutated var
+    t_rest = rest_transmission(tau, mu_block, l_rest)
+    # On a focused face (a jump) every ray sees the full slant thickness of the slab.
+    l_att = l_block
     if kind == 2:
-        # On a focused face every ray sees the full slant thickness of the slab.
-        l_full = (es.b_z_bottom[j] - es.b_z_top[j]) / wp.abs(dw)
-        core = sign * (1.0 - wp.exp(-mu_block * l_full))
-    elif s > 0.0:
-        core = -mu_block * wp.exp(-mu_block * l_block) * rate / dens
-    weight = float(0.0)  # noqa: UP018 -- Warp needs the constructor to declare a mutated var
-    if inside:
-        weight = factor * es.scale[j] * core * t_rest
+        l_att = focused_slab_chord(es.b_z_top[j], es.b_z_bottom[j], dw)
+    core = edge_core(kind, sign, s, mu_block, wp.exp(-mu_block * l_att), rate, dens)
+    weight = edge_weight(inside, factor, es.scale[j], core, t_rest)
 
-    ro = seg * 9
-    ex = du * es.seg_rot[ro + 0] + dv * es.seg_rot[ro + 3] + dw * es.seg_rot[ro + 6]
-    ey = du * es.seg_rot[ro + 1] + dv * es.seg_rot[ro + 4] + dw * es.seg_rot[ro + 7]
-    ez = du * es.seg_rot[ro + 2] + dv * es.seg_rot[ro + 5] + dw * es.seg_rot[ro + 8]
+    ex, ey, ez = frame_direction(es.seg_rot, seg * 9, du, dv, dw)
     q.kind[tid] = PHOTON
     q.beamlet[tid] = local
     q.primary[tid] = 1
@@ -642,7 +516,8 @@ def generate_fan_edges(
     """Edge-gradient primaries for one batch's block of a beamlet group.
 
     The spectral beamlet route's thread-to-history mapping and RNG keying, then
-    the host ``FanEdgeDerivativeSource._rays`` arithmetic in float32. Four uniforms
+    the host ``FanEdgeDerivativeSource._rays`` arithmetic, through the same scalar
+    functions (:mod:`pyradmc.geometry.edge_rays`), in float32. Four uniforms
     per primary, in the host order: two for the energy, one along the edge, one
     across it. Emitted ``weight * energy`` is booked signed (closing edges are
     negative), like the wrapped-sampler route.
@@ -664,9 +539,7 @@ def generate_fan_edges(
     u_within = uniform(state)
     u_r = uniform(state)
     u_q = uniform(state)
-    kb = wp.min(wp.lower_bound(sp_cdf, u_bin), n_bins - 1)
-    e_lo = sp_edges[kb]
-    energy = e_lo + (sp_edges[kb + 1] - e_lo) * u_within
+    energy = spectrum_energy(sp_edges, sp_cdf, n_bins, u_bin, u_within)
 
     j = group_start + local
     _queue_edge_ray(es, j, 1.0, energy, u_r, u_q, local, tid, slots, emitted, q)
@@ -710,23 +583,17 @@ def generate_edge_steps(
     state = WarpRNGState()
     state.slots = slots
     state.idx = tid
-    position = (float(i) + uniform(state)) / float(per_batch)
+    position = stratified_position(i, per_batch, uniform(state))
     u_bin = uniform(state)
     u_within = uniform(state)
     u_r = uniform(state)
     u_q = uniform(state)
-    kb = wp.min(wp.lower_bound(sp_cdf, u_bin), n_bins - 1)
-    e_lo = sp_edges[kb]
-    energy = e_lo + (sp_edges[kb + 1] - e_lo) * u_within
-    # The first entry whose cumulative share exceeds the position; the last holds 1.
-    lo = es.step_first[column]
-    hi = es.step_first[column + 1] - 1
-    while lo < hi:
-        mid = (lo + hi) // 2
-        if es.step_cdf[mid] > position:
-            hi = mid
-        else:
-            lo = mid + 1
+    energy = spectrum_energy(sp_edges, sp_cdf, n_bins, u_bin, u_within)
+    # The first entry whose cumulative share exceeds the position (the host's pick,
+    # select_by_cdf_at); the last holds 1.
+    first = es.step_first[column]
+    pick = first + select_by_cdf_at(es.step_cdf, first, es.step_first[column + 1] - first, position)
     _queue_edge_ray(
-        es, es.step_edge[lo], es.step_factor[lo], energy, u_r, u_q, local, tid, slots, emitted, q
-    )
+        es, es.step_edge[pick], es.step_factor[pick], energy, u_r, u_q, local, tid, slots, emitted,
+        q,
+    )  # fmt: skip

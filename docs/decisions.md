@@ -1242,6 +1242,42 @@ edge weight would move at float32 rounding. The forward `run_dij` also re-upload
 refuses it; an arc whose outer pairs leave the field needs a pair selection (not
 built). The tables still hold one proposal row per edge, as the generator requires.
 
+**Single-source sampler, 2026-11-03.** The in-kernel generator implemented the proposal
+inversion, the ray geometry, the weight and the near-tangent chord itself, next to the
+host's `FanEdgeDerivativeSource._rays`: a sampling routine in `backends/`, against
+AGENTS.md 3, and the cancellation-sensitive arithmetic in two places (review of PR #13).
+It now lives in `geometry/edge_rays.py`, pure scalar functions that the physics loader
+compiles as it compiles `geometry/fan.py` and the collimation twins, and that the host
+route calls ray by ray: the crossing (`edge_ray_point`, `edge_proposal_point`), its
+place in the frame and field (`edge_ray_crossing`, `edge_in_field`), the twin
+dispatch (`edge_chord`, `edge_chord_rate`), the weight (`edge_core`, `edge_weight`),
+and the proposal's node density, cell mass and defensive mixture. The energy inversion
+is `fan.spectrum_energy`, the edge step's pick `fan.select_by_cdf_at` (host and
+kernel), the mu lookup the data layer's `lookup_loglinear_2d`. What the kernel alone
+takes is there too, each pinned against the host's float64 value in
+`tests/unit/test_edge_rays.py`: the near-tangent closed form (`edge_block_terms`,
+`near_tangent_terms`; within 2e-10 of the float64 twin, which needs no such branch),
+a focused jaw's slant chord and the rest-of-stack transmission by subtraction, the
+proposal's sequential normalization (`edge_proposal_tables`; within 1.2e-14 of the
+host's pairwise-renormalized table) and the frame rotation. `backends/warp/aperture.py`
+keeps the uploads, the launches, the RNG keying, the loop over a segment's stack devices
+and the queue writes. Two operations stay target-specific on purpose: the host divides
+the ray by its norm and the kernel multiplies by the reciprocal, because the twin's
+float32 circle test amplifies that ulp near a tangent (a dividing kernel moved its
+proposal tables by up to 5e-4 and the fixture's contractions by up to 8e-4 relative);
+and each route normalizes its own proposal, as before.
+
+Measured before and after on seeded outputs: on the host and reference route every one
+of 1 871 arrays (per-edge batches and emits, proposal tables, `FanEdgeColumns` of both
+builders, edge-step picks, reference contractions and an edge-step Dij) is
+`np.array_equal`. On Warp cpu one operation order changed, the defensive share now
+`d (w / s_max)` as on the host: proposal cells and cdf entries moved by one float32
+ulp (at most 1.5e-7 relative), 13 of 9 600 arc rays by an ulp in direction and one in
+weight, every contraction value, sigma and Dij entry stayed bit-identical, and only
+the arc's energy books moved (5e-9 relative). With the old order restored all 105 Warp
+arrays were bit-identical, so the move itself changes nothing. CUDA was not
+re-measured.
+
 ## DAO gradient consistency, 2026-10-22
 
 `tests/dij/test_dao_gradient_consistency.py`, `tests/integration/test_signed_weights.py`,

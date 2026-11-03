@@ -78,7 +78,9 @@ which this option changes, the truncated low-dose tail moves too (measured about
 ``docs/decisions.md``). Compare the two samplers, or rely on the tail, at
 ``truncation=0``. No
 approximation: any ``A_s`` inside ``F`` is unbiased; a poor ``A_s`` only costs
-efficiency, and the weight never exceeds ``1 / delta``. ``A_s`` is the leaf openings
+efficiency, and the weight never exceeds ``1 / delta`` (at most 1024: ``delta`` is
+refused below ``2**-10``, where the Warp generators' 24-bit component draw would no
+longer realize it; see ``aperture_sampling``). ``A_s`` is the leaf openings
 of each row widened by the tip margin (default: the rounded tips' partial-chord band,
 see ``aperture_margin``; closed pairs keep theirs, since touching rounded tips leak
 along their line of contact), intersected with the jaw openings and clipped to
@@ -124,6 +126,16 @@ _FOCAL_TOLERANCE_CM = 1.0e-6
 # How far a per-segment fan's aperture axes may differ from its frame's u/v axes
 # (per component, after both are normalized): rounding of two normalizations, no more.
 _AXIS_TOLERANCE = 1.0e-9
+
+# The smallest accepted defensive share of aperture sampling. The Warp generators
+# pick the mixture component with a 24-bit uniform (``wp.randf``) against the float32
+# table, so the whole field is drawn with probability ``delta`` rounded up to a
+# multiple of 2**-24 while its weight stays ``1 / delta``: the blocked region's
+# expectation is off by a relative amount below ``2**-24 / delta``, at most 2**-14
+# (6e-5) from this floor on. Below 2**-24 the draw cannot realize ``delta`` at all,
+# and below about 1e-16 the float64 table's share ``1 - (1 - delta)`` is zero and the
+# whole field is never drawn. A power of two, so the floor itself is realized exactly.
+_MIN_APERTURE_DELTA = 2.0**-10
 
 FanArgument = SpectralBeamSource | Sequence[SpectralBeamSource]
 
@@ -450,11 +462,15 @@ class SegmentedFanSource(BeamletSource):
         template's frame.
     aperture_sampling
         ``None`` (default): every segment samples its fan's field uniformly, the
-        fan's own four-uniform draw. A float ``delta`` in ``(0, 1)``: aperture
+        fan's own four-uniform draw. A float ``delta`` in ``[2**-10, 1)``: aperture
         importance sampling (module docstring) with defensive uniform share
         ``delta``; the rest of the histories go to the segment's opening. A small
         ``delta`` concentrates more but weights the blocked region's histories by
-        up to ``1 / delta`` (measured in docs/decisions.md).
+        up to ``1 / delta`` (measured in docs/decisions.md). Shares below ``2**-10``
+        (about 1e-3) are refused: the Warp generators draw the component with a
+        24-bit uniform, which realizes ``delta`` only to within ``2**-24``, a
+        relative error of the blocked region's dose below ``2**-24 / delta``
+        (at most 6e-5 from the floor on; 1e-6 at 0.05).
     aperture_margin
         How far beyond each leaf tip (cm, at its MLC's mid-plane) the sampled
         region extends. ``None`` (default): each MLC's rounded-tip partial-chord
@@ -752,6 +768,13 @@ class SegmentedFanSource(BeamletSource):
             raise ValueError(
                 f"aperture_sampling is the defensive uniform share and must lie in (0, 1), "
                 f"got {delta}"
+            )
+        if delta < _MIN_APERTURE_DELTA:
+            raise ValueError(
+                f"aperture_sampling must be at least 2**-10 (about 1e-3), got {delta}: the "
+                "Warp generators draw the mixture component with a 24-bit uniform, so a "
+                "smaller share is realized only to within 2**-24 and the blocked region, "
+                "weighted 1 / delta, would come out biased"
             )
         if margin is not None:
             margin = float(margin)

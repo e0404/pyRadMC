@@ -110,6 +110,8 @@ def test_device_weights_give_the_numpy_weights_result(device: str, flat: bool) -
 
 @pytest.mark.gpu
 def test_device_weights_on_another_device_are_copied_there() -> None:
+    if not wp.is_cuda_available():
+        pytest.skip("no CUDA device")
     engine = _engine("cpu")
     a = _weights(engine.grid.shape)
     run = dict(n_histories_per_beamlet=800, seed=SEED, **KWARGS)

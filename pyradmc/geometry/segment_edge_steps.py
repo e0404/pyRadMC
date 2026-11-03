@@ -19,7 +19,10 @@ The dose change of segment ``s`` is column ``2 s`` minus column ``2 s + 1``. A c
 nothing moved in lists one edge at factor zero.
 
 Physics, estimator and stated approximations are the edge source's. The Warp engine
-generates this exact type in-kernel from :attr:`SegmentedEdgeStepSource.selection`.
+generates this exact type in-kernel from :attr:`SegmentedEdgeStepSource.selection`,
+picking the edge as :meth:`SegmentedEdgeStepSource.emit` does
+(:func:`~pyradmc.geometry.fan.select_by_cdf_at`) from a position stratified over the
+batch's histories of the column.
 """
 
 from __future__ import annotations
@@ -29,6 +32,7 @@ from dataclasses import dataclass
 import numpy as np
 from numpy.typing import NDArray
 
+from pyradmc.geometry.fan import select_by_cdf_at
 from pyradmc.geometry.segment_edges import SegmentedEdgeSource
 from pyradmc.geometry.source import BeamletSource, Primary
 from pyradmc.rng import RNGState, uniform
@@ -128,8 +132,8 @@ class SegmentedEdgeStepSource(BeamletSource):
             raise IndexError(f"beamlet {beamlet} outside {self._n_columns} columns")
         selection = self._selection
         lo, hi = int(selection.first[beamlet]), int(selection.first[beamlet + 1])
-        pick = lo + int(np.searchsorted(selection.cdf[lo:hi], uniform(rng_state), side="right"))
-        pick = min(pick, hi - 1)
+        # The in-kernel generator's pick: the first entry whose share exceeds the draw.
+        pick = lo + select_by_cdf_at(selection.cdf, lo, hi - lo, uniform(rng_state))
         ray = self._edges.edge(int(selection.edge[pick])).emit(rng_state)
         return Primary(ray.energy, ray.x, ray.y, ray.z, ray.ux, ray.uy, ray.uz,
                        weight=ray.weight * float(selection.factor[pick]))  # fmt: skip

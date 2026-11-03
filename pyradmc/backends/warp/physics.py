@@ -85,6 +85,8 @@ _KERNEL_MODULES: dict[str, tuple[str, ...] | None] = {
         "mlc_tip_edge_derivative",
         "mlc_leaf_path_length",
     ),
+    # After fan and collimation: it calls their compiled functions.
+    "pyradmc.geometry.edge_rays": None,
 }
 
 _MISSING = object()
