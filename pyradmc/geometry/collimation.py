@@ -43,6 +43,7 @@ Stated v1 approximations (each also noted where it bites):
 
 from __future__ import annotations
 
+import copy
 import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -66,8 +67,11 @@ __all__ = [
     "JawPair",
     "TransmissionMaskBeamletSource",
     "TransmissionMaskSource",
+    "jaw_edge_derivative",
     "jaw_path_length",
+    "mlc_leaf_path_length",
     "mlc_path_length",
+    "mlc_tip_edge_derivative",
     "project_between_planes",
 ]
 
@@ -152,7 +156,7 @@ def project_between_planes(coordinate: float | _F64, z_from: float, z_to: float)
 # intersection stays a plain elementwise max/min with no branching.
 
 
-def _slab_interval(p: _F64, d: _F64, lo: float, hi: float) -> tuple[_F64, _F64]:
+def _slab_interval(p: _F64, d: _F64, lo: float | _F64, hi: float | _F64) -> tuple[_F64, _F64]:
     """Give the t-interval where ``lo <= p + t*d <= hi`` (full-line convention)."""
     safe = np.where(d == 0.0, 1.0, d)
     t_a = (lo - p) / safe
@@ -165,7 +169,7 @@ def _slab_interval(p: _F64, d: _F64, lo: float, hi: float) -> tuple[_F64, _F64]:
     return t_lo, t_hi
 
 
-def _halfspace_interval(p: _F64, d: _F64, edge: float, *, above: bool) -> tuple[_F64, _F64]:
+def _halfspace_interval(p: _F64, d: _F64, edge: float | _F64, *, above: bool) -> tuple[_F64, _F64]:
     """Give the t-interval where ``p + t*d >= edge`` (``<=`` for ``above=False``)."""
     safe = np.where(d == 0.0, 1.0, d)
     t_edge = (edge - p) / safe
@@ -205,7 +209,13 @@ def _intersect(a: tuple[_F64, _F64], b: tuple[_F64, _F64]) -> tuple[_F64, _F64]:
 
 
 def _disc_interval(
-    p_q: _F64, d_q: _F64, p_w: _F64, d_w: _F64, center_q: float, center_w: float, radius: float
+    p_q: _F64,
+    d_q: _F64,
+    p_w: _F64,
+    d_w: _F64,
+    center_q: float | _F64,
+    center_w: float | _F64,
+    radius: float | _F64,
 ) -> tuple[_F64, _F64]:
     """Give the t-interval where the ray is inside a disc in the (q, w) plane.
 
@@ -492,6 +502,342 @@ def mlc_path_length(
             is_lo, is_hi, p_u, d_u, p_w, d_w, tip_neg - tip_radius, z_mid, tip_radius, False
         )
     return total
+
+
+# --- edge derivatives of the chord twins (aperture gradients) ------------------------
+#
+# The pathwise derivative of a chord with respect to one edge coordinate, at fixed
+# ray: what the aperture-gradient estimator needs under a divergent fan, where
+# moving an edge is not a translation of the rays. Each chord endpoint lies on one
+# surface; a surface moving with velocity V moves its intersection parameter by
+# (n . V) / (n . d) (Hadamard's shape derivative), so the chord derivative is the
+# exit endpoint's rate minus the entry endpoint's, taken from whichever constraint
+# is active. Planes that do not move (slab faces, strip sides) contribute zero. A
+# face crossed end-on (a ray lying in it) makes the chord jump instead: that is a
+# boundary term these functions return as zero by construction, and the estimator
+# samples it separately. Scalar, branchy and math-only like the twins above, so the
+# Warp loader compiles them unchanged; ``tests/unit/test_collimation_edge_derivative.py``
+# pins them against central differences of the twins.
+
+
+def _affine_bound_rate(
+    s_lo: float, s_hi: float, a: float, b: float, da: float, db: float, above: bool
+) -> float:
+    """Rate of ``len([s_lo, s_hi] & {a + t*b >= 0})`` as ``a``, ``b`` move by ``da``, ``db``.
+
+    ``above=False`` uses ``a + t*b <= 0``. Zero when the root is not an active bound
+    of a nonempty interval, and for ``b == 0`` (the face is crossed end-on).
+    """
+    if b == 0.0:
+        return 0.0
+    t_root = -a / b
+    rate = -(da * b - a * db) / (b * b)
+    opens_up = b > 0.0 if above else b < 0.0
+    if t_root <= s_lo or t_root >= s_hi:
+        return 0.0
+    if opens_up:
+        return -rate  # the root is the entry endpoint
+    return rate  # the root is the exit endpoint
+
+
+def jaw_edge_derivative(
+    p_q: float,
+    d_q: float,
+    p_w: float,
+    d_w: float,
+    z_top: float,
+    z_bottom: float,
+    edge_neg: float,
+    edge_pos: float,
+    focused: int,
+    side_pos: int,
+) -> float:
+    """Pathwise ``d(chord)/d(edge)`` of one local-frame ray through a jaw pair.
+
+    Differentiates :func:`jaw_path_length` (same arguments, without ``from_origin``)
+    with respect to ``edge_pos`` (``side_pos=1``) or ``edge_neg`` (``side_pos=0``).
+    A straight face moves along ``q`` (``n . V / n . d = 1 / d_q``); a focused face
+    rotates about the focal spot, so a ray from the focal spot is end-on and gets 0.
+    """
+    if d_w == 0.0:
+        if p_w < z_top or p_w > z_bottom:
+            return 0.0
+        s_lo = -math.inf
+        s_hi = math.inf
+    else:
+        t_a = (z_top - p_w) / d_w
+        t_b = (z_bottom - p_w) / d_w
+        s_lo = min(t_a, t_b)
+        s_hi = max(t_a, t_b)
+    edge = edge_pos if side_pos != 0 else edge_neg
+    if focused != 0:
+        z_mid = 0.5 * (z_top + z_bottom)
+        a = z_mid * p_q - edge * p_w
+        b = z_mid * d_q - edge * d_w
+        da = -p_w
+        db = -d_w
+    else:
+        a = p_q - edge
+        b = d_q
+        da = -1.0
+        db = 0.0
+    return _affine_bound_rate(s_lo, s_hi, a, b, da, db, side_pos != 0)
+
+
+def _mlc_tip_rate(
+    is_lo: float,
+    is_hi: float,
+    p_u: float,
+    d_u: float,
+    p_w: float,
+    d_w: float,
+    center_u: float,
+    z_mid: float,
+    radius: float,
+    above: bool,
+) -> float:
+    """Rate of :func:`_mlc_tip_length` as the leaf end moves along ``u`` (per cm).
+
+    Inclusion-exclusion again: the body, disc and body-and-disc intervals each
+    change at whichever bound is active. The body face moves its root by
+    ``1 / d_u``; a disc root at ``t`` by ``g / (d_u g + d_w h)`` with ``g``, ``h`` the
+    hit point's offsets from the disc centre (the ``n . V / n . d`` of a cylinder).
+    """
+    inf = math.inf
+    bo_lo = -inf
+    bo_hi = inf
+    r_bo_lo = 0.0
+    r_bo_hi = 0.0
+    if d_u == 0.0:
+        inside = p_u >= center_u if above else p_u <= center_u
+        if not inside:
+            bo_lo = inf
+            bo_hi = -inf
+    else:
+        t_edge = (center_u - p_u) / d_u
+        opens_up = d_u > 0.0 if above else d_u < 0.0
+        if opens_up:
+            bo_lo = t_edge
+            r_bo_lo = 1.0 / d_u
+        else:
+            bo_hi = t_edge
+            r_bo_hi = 1.0 / d_u
+    off_u = p_u - center_u
+    off_w = p_w - z_mid
+    a_q = d_u * d_u + d_w * d_w
+    b_q = 2.0 * (d_u * off_u + d_w * off_w)
+    c_q = off_u * off_u + off_w * off_w - radius * radius
+    di_lo = inf
+    di_hi = -inf
+    r_di_lo = 0.0
+    r_di_hi = 0.0
+    if a_q > 0.0:
+        discriminant = b_q * b_q - 4.0 * a_q * c_q
+        if discriminant > 0.0:
+            half_width = math.sqrt(discriminant)
+            di_lo = (-b_q - half_width) / (2.0 * a_q)
+            di_hi = (-b_q + half_width) / (2.0 * a_q)
+            g_lo = off_u + di_lo * d_u
+            g_hi = off_u + di_hi * d_u
+            n_lo = d_u * g_lo + d_w * (off_w + di_lo * d_w)
+            n_hi = d_u * g_hi + d_w * (off_w + di_hi * d_w)
+            if n_lo != 0.0:
+                r_di_lo = g_lo / n_lo
+            if n_hi != 0.0:
+                r_di_hi = g_hi / n_hi
+    elif c_q <= 0.0:
+        di_lo = -inf
+        di_hi = inf
+    rate = float(0.0)  # noqa: UP018 -- Warp needs a float() cast to declare a mutated var
+    # Body term.
+    lo = max(is_lo, bo_lo)
+    hi = min(is_hi, bo_hi)
+    if hi > lo:
+        if bo_hi < is_hi:
+            rate += r_bo_hi
+        if bo_lo > is_lo:
+            rate -= r_bo_lo
+    # Disc term.
+    lo = max(is_lo, di_lo)
+    hi = min(is_hi, di_hi)
+    if hi > lo:
+        if di_hi < is_hi:
+            rate += r_di_hi
+        if di_lo > is_lo:
+            rate -= r_di_lo
+    # Body-and-disc term, subtracted.
+    lo = max(is_lo, max(bo_lo, di_lo))
+    hi = min(is_hi, min(bo_hi, di_hi))
+    if hi > lo:
+        if hi < is_hi:
+            if bo_hi <= di_hi:
+                rate -= r_bo_hi
+            else:
+                rate -= r_di_hi
+        if lo > is_lo:
+            if bo_lo >= di_lo:
+                rate += r_bo_lo
+            else:
+                rate += r_di_lo
+    return rate
+
+
+def mlc_tip_edge_derivative(
+    p_u: float,
+    p_v: float,
+    p_w: float,
+    d_u: float,
+    d_v: float,
+    d_w: float,
+    z_top: float,
+    z_bottom: float,
+    tip_radius: float,
+    edge_lo: float,
+    edge_hi: float,
+    tip: float,
+    focused_sides: int,
+    above: int,
+) -> float:
+    """Pathwise ``d(chord)/d(tip)`` of one local-frame ray through one leaf end.
+
+    The leaf of strip ``[edge_lo, edge_hi]`` whose tip apex is ``tip`` (the ``+u``
+    bank's leaf for ``above=1``, the ``-u`` bank's for ``above=0``), with the
+    strip and slab of :func:`mlc_path_length`. Only that leaf moves, so the
+    derivative of the whole MLC chord with respect to this tip is this one.
+    """
+    if d_w == 0.0:
+        if p_w < z_top or p_w > z_bottom:
+            return 0.0
+        s_lo = -math.inf
+        s_hi = math.inf
+    else:
+        t_a = (z_top - p_w) / d_w
+        t_b = (z_bottom - p_w) / d_w
+        s_lo = min(t_a, t_b)
+        s_hi = max(t_a, t_b)
+    z_mid = 0.5 * (z_top + z_bottom)
+    if focused_sides != 0:
+        k = z_mid
+        w_p = p_w
+        w_d = d_w
+    else:
+        k = 1.0
+        w_p = 1.0
+        w_d = 0.0
+    a_lo = k * p_v - edge_lo * w_p
+    b_lo = k * d_v - edge_lo * w_d
+    a_hi = k * p_v - edge_hi * w_p
+    b_hi = k * d_v - edge_hi * w_d
+    if b_lo == 0.0:
+        if a_lo >= 0.0:
+            g_lo = -math.inf
+            g_hi = math.inf
+        else:
+            g_lo = math.inf
+            g_hi = -math.inf
+    elif b_lo > 0.0:
+        g_lo = -a_lo / b_lo
+        g_hi = math.inf
+    else:
+        g_lo = -math.inf
+        g_hi = -a_lo / b_lo
+    if b_hi == 0.0:
+        if a_hi <= 0.0:
+            h_lo = -math.inf
+            h_hi = math.inf
+        else:
+            h_lo = math.inf
+            h_hi = -math.inf
+    elif b_hi < 0.0:
+        h_lo = -a_hi / b_hi
+        h_hi = math.inf
+    else:
+        h_lo = -math.inf
+        h_hi = -a_hi / b_hi
+    is_lo = max(s_lo, max(g_lo, h_lo))
+    is_hi = min(s_hi, min(g_hi, h_hi))
+    center_u = tip + tip_radius if above != 0 else tip - tip_radius
+    return _mlc_tip_rate(is_lo, is_hi, p_u, d_u, p_w, d_w, center_u, z_mid, tip_radius, above != 0)
+
+
+def mlc_leaf_path_length(
+    p_u: float,
+    p_v: float,
+    p_w: float,
+    d_u: float,
+    d_v: float,
+    d_w: float,
+    z_top: float,
+    z_bottom: float,
+    tip_radius: float,
+    edge_lo: float,
+    edge_hi: float,
+    tip: float,
+    focused_sides: int,
+    above: int,
+) -> float:
+    """Chord of one local-frame ray through one leaf end (cm).
+
+    The leaf that :func:`mlc_tip_edge_derivative` differentiates, same arguments:
+    :func:`mlc_path_length` of a one-pair MLC with the opposing tip retracted,
+    without the leaf arrays (pinned equal in the unit tier). The edge-gradient
+    kernel needs this one leaf's transmission per ray.
+    """
+    if d_w == 0.0:
+        if p_w < z_top or p_w > z_bottom:
+            return 0.0
+        s_lo = -math.inf
+        s_hi = math.inf
+    else:
+        t_a = (z_top - p_w) / d_w
+        t_b = (z_bottom - p_w) / d_w
+        s_lo = min(t_a, t_b)
+        s_hi = max(t_a, t_b)
+    z_mid = 0.5 * (z_top + z_bottom)
+    if focused_sides != 0:
+        k = z_mid
+        w_p = p_w
+        w_d = d_w
+    else:
+        k = 1.0
+        w_p = 1.0
+        w_d = 0.0
+    a_lo = k * p_v - edge_lo * w_p
+    b_lo = k * d_v - edge_lo * w_d
+    a_hi = k * p_v - edge_hi * w_p
+    b_hi = k * d_v - edge_hi * w_d
+    if b_lo == 0.0:
+        if a_lo >= 0.0:
+            g_lo = -math.inf
+            g_hi = math.inf
+        else:
+            g_lo = math.inf
+            g_hi = -math.inf
+    elif b_lo > 0.0:
+        g_lo = -a_lo / b_lo
+        g_hi = math.inf
+    else:
+        g_lo = -math.inf
+        g_hi = -a_lo / b_lo
+    if b_hi == 0.0:
+        if a_hi <= 0.0:
+            h_lo = -math.inf
+            h_hi = math.inf
+        else:
+            h_lo = math.inf
+            h_hi = -math.inf
+    elif b_hi < 0.0:
+        h_lo = -a_hi / b_hi
+        h_hi = math.inf
+    else:
+        h_lo = -math.inf
+        h_hi = -a_hi / b_hi
+    is_lo = max(s_lo, max(g_lo, h_lo))
+    is_hi = min(s_hi, min(g_hi, h_hi))
+    center_u = tip + tip_radius if above != 0 else tip - tip_radius
+    return _mlc_tip_length(
+        is_lo, is_hi, p_u, d_u, p_w, d_w, center_u, z_mid, tip_radius, above != 0
+    )
 
 
 @dataclass(frozen=True)
@@ -985,6 +1331,29 @@ class _StackTransmission(_RayWeightModel):
             ]
         )
         self._densities = np.asarray(stack.densities, dtype=np.float64)
+
+    def for_stack(self, stack: BeamLimitingStack) -> _StackTransmission:
+        """Return a copy evaluating ``stack`` with this table's mu(E) rows.
+
+        The rows depend only on the device materials and densities, so a stack whose
+        devices moved (an optimizer re-targeting leaves) reuses them unchanged; a
+        different material or density sequence is refused.
+        """
+        if stack.materials != self._stack.materials or stack.densities != self._stack.densities:
+            raise ValueError("table reuse needs the same device materials and densities")
+        clone = copy.copy(self)
+        clone._stack = stack
+        return clone
+
+    def linear_attenuation(self, energies: _F64) -> _F64:
+        """Per-device ``(mu/rho)(E) rho`` in 1/cm, shape ``(n, n_devices)``.
+
+        The same log-log table :meth:`factors` attenuates with, so a derivative
+        ``dT/dx = -mu T dl/dx`` built on it differentiates exactly that transmission.
+        """
+        log_e = np.log(np.asarray(energies, dtype=np.float64))
+        mu = np.exp(np.stack([np.interp(log_e, self._log_energies, row) for row in self._log_mu]))
+        return np.asarray(mu.T * self._densities, dtype=np.float64)
 
     def factors(self, energies: _F64, origins: _F64, directions: _F64) -> _F64:
         """Per-ray transmission factors in [0, 1], vectorized."""

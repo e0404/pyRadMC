@@ -28,6 +28,8 @@ installed; touching it then raises an error naming the extra to install.
 
 ::: pyradmc.backends.warp.dij.DeviceDijResult
 
+::: pyradmc.scoring.contraction.ContractionResult
+
 ## Geometry and scoring
 
 ::: pyradmc.geometry.grid.VoxelGrid
@@ -140,6 +142,10 @@ reaches for. They are supported, but imported from their modules:
 | `pyradmc.geometry.head` | Treatment-head pre-solve producing an exit-plane phase space |
 | `pyradmc.geometry.fan` | Single-source scalar samplers of the divergent spectral fan (uniform, and aperture importance-sampled) and of a discrete CDF draw, shared by the in-kernel generators |
 | `pyradmc.geometry.segments` | The segments of one collimated fan — or the control points of an arc, one fan and beam frame each — as Dij beamlets, and their MU-weighted plan view; opt-in aperture importance sampling (`aperture_sampling=delta`) concentrates each segment's histories on its opening, unbiased |
+| `pyradmc.geometry.aperture_gradient` | Monte Carlo dose derivatives with respect to leaf tips and jaw edges: the divergent-fan edge estimator an optimizer uses, and for monoenergetic parallel beams the exact estimator, its finite-difference oracle, the pathwise (Warp-taped) derivative and the bixel and profile-aware chain rules |
+| `pyradmc.geometry.segment_edges` | Every leaf and jaw edge of a segmented fan or arc as the beamlets of one gradient source, generated in-kernel on Warp |
+| `pyradmc.geometry.segment_edge_steps` | The first-order dose change of a segmented fan under a small move of its edges, two non-negative columns per segment |
+| `pyradmc.scoring.contraction` | The beamlet contraction `g = D^T a` scored per batch without a Dij, behind both engines' `run_beamlet_contraction` |
 | `pyradmc.adapters.ct` | Hounsfield calibration and CT image reading |
 | `pyradmc.data.tabulated` | Table precompiler and the EPICS build tool |
 | `pyradmc.study` | Toy fluence optimizer and DVH endpoints, used by the noise/bias study |

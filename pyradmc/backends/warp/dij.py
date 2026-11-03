@@ -11,6 +11,9 @@ which is bit-identical to ``run_dij`` with the same arguments on the same device
 
 Warp-only by construction: the reference engine computes on the host and has no
 device to leave anything on.
+
+The other direction is :func:`device_voxel_weights`: the contraction's voxel weights
+handed in as a Warp array, used where they lie.
 """
 
 from __future__ import annotations
@@ -19,15 +22,48 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import numpy as np
+import warp as wp
 
 from pyradmc.scoring.dij import DijResult
 
 if TYPE_CHECKING:
-    import warp as wp
-
     from pyradmc.backends.results import RunProvenance
 
-__all__ = ["DeviceDijResult"]
+__all__ = ["DeviceDijResult", "device_voxel_weights"]
+
+
+@wp.kernel
+def _count_nonfinite(values: wp.array(dtype=wp.float64), count: wp.array(dtype=wp.int32)):  # type: ignore[valid-type]
+    """Count the entries of ``values`` that are NaN or infinite (Warp kernel)."""
+    i = wp.tid()
+    if not wp.isfinite(values[i]):
+        wp.atomic_add(count, 0, 1)
+
+
+def device_voxel_weights(weights: wp.array, shape: tuple[int, int, int]) -> wp.array:
+    """Return contraction weights given on a device as a flat view, validated there.
+
+    ``weights`` is a contiguous ``wp.float64`` array of the scoring grid's ``shape``
+    or of its voxel count (flat C order, as the host weights are read). The checks
+    are the host path's (shape, finiteness) plus the dtype, which the host path
+    converts instead: a silent float32-to-float64 copy would hide a precision the
+    caller did not ask for. Finiteness is counted on the device; one int crosses.
+    """
+    n_voxels = int(np.prod(shape))
+    if weights.dtype != wp.float64:
+        raise ValueError(f"voxel weights on a device must be float64, got {weights.dtype}")
+    if tuple(weights.shape) not in (tuple(shape), (n_voxels,)):
+        raise ValueError(
+            f"voxel weight shape {tuple(weights.shape)} != scoring grid shape {tuple(shape)}"
+        )
+    if not weights.is_contiguous:
+        raise ValueError("voxel weights on a device must be contiguous")
+    flat = weights.reshape((n_voxels,))
+    count = wp.zeros(1, dtype=wp.int32, device=flat.device)
+    wp.launch(_count_nonfinite, dim=n_voxels, inputs=[flat, count], device=flat.device)
+    if int(count.numpy()[0]):
+        raise ValueError("voxel weights must be finite")
+    return flat
 
 
 @dataclass(frozen=True, eq=False)

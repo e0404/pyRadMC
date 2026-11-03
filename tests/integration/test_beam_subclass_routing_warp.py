@@ -75,3 +75,36 @@ def test_beamlet_grid_subclass_override_is_honoured() -> None:
     engine = WarpEngine(grid=grid, cross_sections=AnalyticCrossSections(), device="cpu")
     dij = engine.run_dij(source, n_histories_per_beamlet=500, n_batches=2, seed=SEED)
     assert dij.energy_emitted == pytest.approx(0.5 * 2.0 * 500 * 4, rel=1e-6)
+
+
+def test_segmented_edge_subclass_override_is_honoured() -> None:
+    """The edge-set twin: a ``SegmentedEdgeSource`` subclass keeps its own batch sampler.
+
+    The exact type generates in-kernel from its columns and would bypass an override;
+    a subclass must reach the host route, where halving every weight halves the
+    emitted-energy book exactly (signed weights, so compare against the unhalved
+    subclass rather than an analytic total).
+    """
+    from pyradmc.backends.warp.engine import WarpEngine
+    from pyradmc.geometry.segment_edges import SegmentedEdgeSource
+    from tests.unit.test_segmented_edge_source import XS, _segments
+
+    class PlainEdges(SegmentedEdgeSource):
+        pass
+
+    class HalfWeightEdges(SegmentedEdgeSource):
+        def sample_beamlet_batch(self, seed: int, history_offset: int, n: int, beamlet: int):
+            columns = super().sample_beamlet_batch(seed, history_offset, n, beamlet)
+            columns["weight"] = columns["weight"] * np.float32(0.5)
+            return columns
+
+    grid = VoxelGrid.uniform_water(
+        shape=(8, 3, 4), spacing=(1.0, 2.0, 2.0), origin=(3.0, -5.0, 0.0)
+    )
+    engine = WarpEngine(grid=grid, cross_sections=XS, device="cpu")
+    weights = np.ones(grid.shape)
+    kwargs = dict(n_histories_per_beamlet=40, n_batches=2, seed=SEED, transport_electrons=False)
+    plain = engine.run_beamlet_contraction(PlainEdges(_segments()), weights, **kwargs)
+    half = engine.run_beamlet_contraction(HalfWeightEdges(_segments()), weights, **kwargs)
+    assert plain.energy_emitted != 0.0
+    assert half.energy_emitted == pytest.approx(0.5 * plain.energy_emitted, rel=1e-6)

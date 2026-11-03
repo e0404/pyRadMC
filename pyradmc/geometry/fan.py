@@ -12,6 +12,8 @@ kernel.
   :meth:`~pyradmc.geometry.spectrum.Spectrum.sample_energy`): four uniforms in the
   host order — spectrum bin, position within the bin, then the in-aperture ``u``
   and ``v`` offsets — and the unit ray from the focal point through the aperture.
+- :func:`spectrum_energy` is the spectrum inversion alone, for a generator that draws
+  its uniforms itself (the fan edge-gradient rays, :mod:`pyradmc.geometry.edge_rays`).
 - :func:`select_by_cdf` draws a discrete index from cumulative shares: the first
   ``i`` with ``cdf[i] > u`` (``searchsorted`` ``side="right"``), so an index of
   zero probability is never returned, even for ``u`` on a share boundary.
@@ -42,6 +44,7 @@ __all__ = [
     "fan_primary_aperture",
     "select_by_cdf",
     "select_by_cdf_at",
+    "spectrum_energy",
     "upper_bound_at",
 ]
 
@@ -91,6 +94,21 @@ def select_by_cdf(cdf: Table1D, n: int, u: float) -> int:
         else:
             hi = mid
     return min(lo, n - 1)
+
+
+def spectrum_energy(
+    edges: Table1D, cdf: Table1D, n_bins: int, u_bin: float, u_within: float
+) -> float:
+    """Invert a histogram spectrum at two uniforms: ``u_bin`` the bin, ``u_within`` the energy.
+
+    :meth:`~pyradmc.geometry.spectrum.Spectrum.sample_energy`'s inversion (the bin is
+    the first ``cdf`` entry ``>= u_bin``, clamped to the top bin against a rounded
+    ``cdf[n_bins - 1] < 1``; the energy uniform within it), for generators that draw
+    their uniforms themselves. :func:`fan_primary` performs the same two steps inline.
+    """
+    k = min(cdf_lower_bound(cdf, n_bins, u_bin), n_bins - 1)
+    lo = float(edges[k])
+    return lo + (float(edges[k + 1]) - lo) * u_within
 
 
 def fan_primary(
