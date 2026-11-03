@@ -215,3 +215,126 @@ def test_mlc_twin_matches_host_on_device(device: str, focused_sides: int) -> Non
     )
     wp.synchronize_device(device)
     _compare(device, out.numpy(), host)
+
+
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("focused", [0, 1])
+def test_jaw_edge_derivative_matches_host_on_device(device: str, focused: int) -> None:
+    """The aperture-gradient twin of the jaw chord compiles and agrees in float32."""
+    _require_device(device)
+    from pyradmc.backends.warp.physics import warp_physics
+    from pyradmc.geometry.collimation import jaw_edge_derivative
+
+    rate = warp_physics().jaw_edge_derivative
+
+    @wp.kernel
+    def probe(
+        p_q: wp.array(dtype=float),
+        d_q: wp.array(dtype=float),
+        p_w: wp.array(dtype=float),
+        d_w: wp.array(dtype=float),
+        focused_flag: int,
+        out: wp.array(dtype=float),
+    ) -> None:
+        tid = wp.tid()
+        out[tid] = rate(
+            p_q[tid], d_q[tid], p_w[tid], d_w[tid], Z_TOP, Z_BOTTOM, EDGE_NEG, EDGE_POS,
+            focused_flag, 1,
+        )  # fmt: skip
+
+    origins, directions = _random_rays(seed=303)
+    host = np.array(
+        [
+            jaw_edge_derivative(
+                origins[k, 0],
+                directions[k, 0],
+                origins[k, 2],
+                directions[k, 2],
+                Z_TOP,
+                Z_BOTTOM,
+                EDGE_NEG,
+                EDGE_POS,
+                focused,
+                1,
+            )
+            for k in range(N)
+        ]
+    )
+    cols = [
+        wp.array(a.astype(np.float32), dtype=float, device=device)
+        for a in (origins[:, 0], directions[:, 0], origins[:, 2], directions[:, 2])
+    ]
+    out = wp.zeros(N, dtype=float, device=device)
+    wp.launch(probe, dim=N, inputs=[*cols, focused], outputs=[out], device=device)
+    wp.synchronize_device(device)
+    got = out.numpy()
+    # A float32 root can flip which side of a slab face it lands on for a ray that
+    # grazes it; those measure-zero rays aside, the values agree.
+    agree = np.isclose(got, host, rtol=RTOL, atol=ATOL)
+    assert agree.mean() > 0.995
+    assert np.count_nonzero(host) > 100
+
+
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("focused_sides", [0, 1])
+def test_mlc_tip_edge_derivative_matches_host_on_device(device: str, focused_sides: int) -> None:
+    """The aperture-gradient twin of one leaf end compiles and agrees in float32."""
+    _require_device(device)
+    from pyradmc.backends.warp.physics import warp_physics
+    from pyradmc.geometry.collimation import mlc_tip_edge_derivative
+
+    rate = warp_physics().mlc_tip_edge_derivative
+    edge_lo, edge_hi, tip = float(LEAF_EDGES[1]), float(LEAF_EDGES[2]), float(TIPS_POS[1])
+
+    @wp.kernel
+    def probe(
+        p: wp.array(dtype=wp.vec3),
+        d: wp.array(dtype=wp.vec3),
+        sides: int,
+        out: wp.array(dtype=float),
+    ) -> None:
+        tid = wp.tid()
+        out[tid] = rate(
+            p[tid][0], p[tid][1], p[tid][2], d[tid][0], d[tid][1], d[tid][2],
+            MLC_Z_TOP, MLC_Z_BOTTOM, TIP_RADIUS, edge_lo, edge_hi, tip, sides, 1,
+        )  # fmt: skip
+
+    rng = np.random.default_rng(404)
+    target = np.column_stack(
+        [rng.uniform(0.0, 3.0, N), rng.uniform(-0.9, 0.9, N), rng.uniform(48.0, 52.0, N)]
+    )
+    origins = target - np.column_stack(
+        [rng.normal(0.0, 3.0, N), rng.normal(0.0, 0.3, N), np.full(N, 50.0)]
+    )
+    directions = target - origins
+    directions /= np.linalg.norm(directions, axis=1, keepdims=True)
+    # Re-anchor at the mid-plane so float32 ray parameters stay O(slab) (full-line chords).
+    origins = origins + ((50.0 - origins[:, 2]) / directions[:, 2])[:, None] * directions
+    host = np.array(
+        [
+            mlc_tip_edge_derivative(
+                *origins[k],
+                *directions[k],
+                MLC_Z_TOP,
+                MLC_Z_BOTTOM,
+                TIP_RADIUS,
+                edge_lo,
+                edge_hi,
+                tip,
+                focused_sides,
+                1,
+            )
+            for k in range(N)
+        ]
+    )
+    p = wp.array(origins.astype(np.float32), dtype=wp.vec3, device=device)
+    d = wp.array(directions.astype(np.float32), dtype=wp.vec3, device=device)
+    out = wp.zeros(N, dtype=float, device=device)
+    wp.launch(probe, dim=N, inputs=[p, d, focused_sides], outputs=[out], device=device)
+    wp.synchronize_device(device)
+    got = out.numpy()
+    # Near the apex the rate grows like 1/sqrt(delta), so float32 position error is
+    # amplified there; compare in relative terms and require near-total agreement.
+    agree = np.isclose(got, host, rtol=1e-2, atol=1e-3)
+    assert agree.mean() > 0.99
+    assert np.count_nonzero(host) > 300

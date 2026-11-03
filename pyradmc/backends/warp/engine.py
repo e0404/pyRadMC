@@ -52,8 +52,8 @@ from pyradmc import (
     __version__,
 )
 from pyradmc.backends.results import RunProvenance, TransportResult
-from pyradmc.backends.warp import kernels
-from pyradmc.backends.warp.dij import DeviceDijResult
+from pyradmc.backends.warp import aperture, kernels
+from pyradmc.backends.warp.dij import DeviceDijResult, device_voxel_weights
 from pyradmc.backends.warp.kernels import ENERGY_QUANTUM_MEV, GridInfo, Queue, Tables
 from pyradmc.data.interface import CrossSectionSource
 from pyradmc.geometry.collimation import TransmissionMaskSource
@@ -77,6 +77,7 @@ from pyradmc.geometry.source import (
     SpectralBeamSource,
 )
 from pyradmc.progress import ProgressCallback, ProgressEmitter
+from pyradmc.scoring.contraction import ContractionResult
 from pyradmc.scoring.cylinder import CylindricalScoringGrid
 from pyradmc.scoring.dij import DijAssembler, DijResult
 from pyradmc.scoring.dose import ScoringGeometry
@@ -1867,6 +1868,90 @@ class WarpEngine:
             provenance=run.provenance,
         )
 
+    def run_beamlet_contraction(
+        self,
+        source: BeamletSource,
+        voxel_weights: np.ndarray | wp.array,
+        n_histories_per_beamlet: int,
+        n_batches: int,
+        seed: int,
+        pcut: float = PCUT_MEV,
+        ecut: float = ECUT_MEV,
+        transport_electrons: bool = True,
+        correlated: bool = True,
+        beamlet_group_size: int | None = None,
+        scoring_grid: ScoringGrid | None = None,
+        scoring_mode: str = "dose_to_medium",
+        step_energy_fraction: float | None = None,
+        deposit_resolution_cm: float | None = None,
+        msc_model: str = "gs",
+        devices: Sequence[str] | None = None,
+        concurrent_batches: int = 1,
+        progress: ProgressCallback | None = None,
+    ) -> ContractionResult:
+        """Score ``g_j = sum_v a_v D_vj`` per beamlet; same contract as the reference engine.
+
+        See :meth:`pyradmc.backends.ref.engine.ReferenceEngine.run_beamlet_contraction`.
+        The run is :meth:`run_dij`'s — routes, groups, devices, batch lanes and the
+        history mapping — with only the per-batch fold replaced: each batch's
+        quanta map is contracted with the weights per (column, chunk) and per column
+        in chunk order (a fixed float64 order on a device, so bit-reproducible), and
+        no dense dose map, truncation or compaction exists.
+
+        ``voxel_weights`` may also be a ``wp.float64`` Warp array (Warp only; see
+        :func:`~pyradmc.backends.warp.dij.device_voxel_weights`), of the scoring
+        grid's shape or flat: it is validated on its device and used there without
+        a host copy (copied device to device if it lies on another one), for an
+        optimizer that forms the objective gradient on the GPU. The result is
+        bit-identical to passing the same values as a NumPy array (test-pinned).
+        """
+        scoring = scoring_grid if scoring_grid is not None else ScoringGrid.for_grid(self.grid)
+        weights: np.ndarray | wp.array
+        if isinstance(voxel_weights, wp.array):
+            weights = device_voxel_weights(voxel_weights, scoring.shape)
+        else:
+            weights = np.asarray(voxel_weights, dtype=np.float64)
+            if weights.shape != scoring.shape:
+                raise ValueError(
+                    f"voxel weight shape {weights.shape} != scoring grid shape {scoring.shape}"
+                )
+            if not np.all(np.isfinite(weights)):
+                raise ValueError("voxel weights must be finite")
+        run = self._compute_dij(
+            source,
+            n_histories_per_beamlet=n_histories_per_beamlet,
+            n_batches=n_batches,
+            seed=seed,
+            pcut=pcut,
+            ecut=ecut,
+            transport_electrons=transport_electrons,
+            truncation=0.0,
+            correlated=correlated,
+            beamlet_group_size=beamlet_group_size,
+            scoring_grid=scoring_grid,
+            scoring_mode=scoring_mode,
+            step_energy_fraction=step_energy_fraction,
+            deposit_resolution_cm=deposit_resolution_cm,
+            msc_model=msc_model,
+            devices=devices,
+            concurrent_batches=concurrent_batches,
+            progress=progress,
+            device_blocks=False,
+            contraction=weights,
+        )
+        return ContractionResult(
+            values=np.concatenate([run.blocks[gs][0] for gs in run.group_starts]),
+            sigma=np.concatenate([run.blocks[gs][1] for gs in run.group_starts]),
+            n_histories_per_beamlet=n_histories_per_beamlet,
+            n_batches=n_batches,
+            correlated=correlated,
+            energy_emitted=run.energy_emitted,
+            energy_deposited=run.energy_deposited,
+            energy_escaped=run.energy_escaped,
+            energy_unscored=run.energy_unscored,
+            provenance=run.provenance,
+        )
+
     def _compute_dij(
         self,
         source: BeamletSource,
@@ -1889,12 +1974,17 @@ class WarpEngine:
         concurrent_batches: int,
         progress: ProgressCallback | None,
         device_blocks: bool,
+        contraction: np.ndarray | wp.array | None = None,
     ) -> _DijRun:
         """Validate, schedule and run every beamlet group; merge shards and books.
 
-        Everything :meth:`run_dij` and :meth:`run_dij_device` share: the two differ
-        only in where the per-group blocks end up (``device_blocks``) and how they
-        are concatenated.
+        Everything :meth:`run_dij`, :meth:`run_dij_device` and
+        :meth:`run_beamlet_contraction` share. The Dij paths differ only in where
+        the per-group blocks end up (``device_blocks``) and how they are
+        concatenated; ``contraction`` (voxel weights, scoring-grid shape) switches
+        the per-group reduction from dense columns to their contraction, whose
+        blocks are ``(values, sigma)`` per group. Transport, routes and the history
+        mapping are identical in all three.
         """
         if truncation < 0.0:
             # The host assembler's own check, made before any transport so the
@@ -2020,6 +2110,7 @@ class WarpEngine:
             concurrent_batches=concurrent_batches,
             emitter=emitter,
             device_blocks=device_blocks,
+            contraction=contraction,
         )
         # Kernel modules are loaded up front whenever any host thread beyond this
         # one will launch (device workers or batch lanes): warp's module loading is
@@ -2028,6 +2119,8 @@ class WarpEngine:
         if len(device_list) > 1 or concurrent_batches > 1:
             for d in device_list:
                 wp.load_module(kernels, device=d)
+                if aperture.is_device_edge_set(source):
+                    wp.load_module(aperture, device=d)
             if type(source) is SegmentedFanSource:
                 from pyradmc.backends.warp import segments
 
@@ -2097,6 +2190,7 @@ class WarpEngine:
         concurrent_batches: int,
         emitter: ProgressEmitter,
         device_blocks: bool = False,
+        contraction: np.ndarray | wp.array | None = None,
     ) -> _DijShard:
         """Pull beamlet groups from the shared queue and run them on one device.
 
@@ -2141,6 +2235,12 @@ class WarpEngine:
         in_kernel_builtin = use_lattice or use_spectral or use_segments
         if not in_kernel_builtin and source.warp_beamlet_sampler is not None:
             beamlet_generator = kernels.make_beamlet_generator_kernel(source.warp_beamlet_sampler)
+        # A set of fan edges (exact types) generates in-kernel from one uploaded
+        # edge set: the host route seeded and drained the queues once per edge.
+        use_edges = aperture.is_device_edge_set(source)
+        edge_set = None
+        if use_edges:
+            edge_set = aperture.upload_edge_set(source, device)
         if use_segments:
             # One stack layout + per-segment settings + the pre-solve's attenuation
             # table, uploaded once per shard: every group indexes it by segment.
@@ -2192,10 +2292,12 @@ class WarpEngine:
         deposited = counters.book("deposited")
         violations = counters.book("violations")  # zeroed with the book
         emitted_counter = None
-        if beamlet_generator is not None or use_spectral or use_segments:
+        if beamlet_generator is not None or use_spectral or use_segments or use_edges:
             emitted_counter = counters.book("emitted")
-        s1 = wp.zeros(max_group * n_voxels, dtype=wp.float64, device=device)
-        s2 = wp.zeros(max_group * n_voxels, dtype=wp.float64, device=device)
+        # A contraction keeps no dense dose map: its running sums are per column.
+        dense = 1 if contraction is not None else max_group * n_voxels
+        s1 = wp.zeros(dense, dtype=wp.float64, device=device)
+        s2 = wp.zeros(dense, dtype=wp.float64, device=device)
         total_q = counters.book("total_q")
         # Truncation runs one thread per (column, chunk) rather than one per column;
         # the layout is scheduling only and the output is independent of it. Sized
@@ -2208,6 +2310,29 @@ class WarpEngine:
         )
         col_max_dev = wp.zeros(max_group, dtype=wp.float64, device=device)
         chunk_counts_dev = wp.zeros(max_group * n_chunks, dtype=wp.int32, device=device)
+        # The contraction reduces per (column, chunk) on the same layout, then per
+        # column in chunk order: a fixed float64 order on this device.
+        contraction_buffers = None
+        if contraction is not None:
+            if isinstance(contraction, wp.array):
+                # Validated flat by device_voxel_weights; read where it lies, or copied
+                # device to device for a shard elsewhere. Never written.
+                same = contraction.device == wp.get_device(device)
+                weights_dev = contraction if same else wp.clone(contraction, device=device)
+            else:
+                weights_dev = wp.array(
+                    np.asarray(contraction, dtype=np.float64).reshape(n_voxels),
+                    dtype=wp.float64,
+                    device=device,
+                )
+            contraction_buffers = (
+                weights_dev,
+                wp.zeros(max_group * n_chunks, dtype=wp.float64, device=device),
+                wp.zeros(max_group, dtype=wp.float64, device=device),
+                wp.zeros(max_group, dtype=wp.float64, device=device),
+                n_chunks,
+                voxel_chunk,
+            )
 
         route_args = dict(
             source=source,
@@ -2217,6 +2342,8 @@ class WarpEngine:
             use_spectral=use_spectral,
             use_segments=use_segments,
             spectral_tables=spectral_tables,
+            use_edges=use_edges,
+            edge_set=edge_set,
             seed=seed,
             n_per=n_histories_per_beamlet,
             per_batch=per_batch,
@@ -2247,6 +2374,7 @@ class WarpEngine:
             s2=s2,
             total_q=total_q,
             device=device,
+            contraction=contraction_buffers,
         )
 
         while (group_start := next_group()) is not None:
@@ -2267,8 +2395,12 @@ class WarpEngine:
             # group's clear. Every dense launch below is dimensioned from ``group``,
             # so the tail beyond it is never read.
             span = group * n_voxels
-            wp.launch(kernels.fill_float64, dim=span, inputs=[s1, 0.0], device=device)
-            wp.launch(kernels.fill_float64, dim=span, inputs=[s2, 0.0], device=device)
+            if contraction_buffers is None:
+                wp.launch(kernels.fill_float64, dim=span, inputs=[s1, 0.0], device=device)
+                wp.launch(kernels.fill_float64, dim=span, inputs=[s2, 0.0], device=device)
+            else:
+                for sums in contraction_buffers[2:4]:
+                    wp.launch(kernels.fill_float64, dim=group, inputs=[sums, 0.0], device=device)
             # The fold resets every entry it consumes, so a quanta map only needs
             # clearing once per group rather than once per batch. It is still cleared
             # here rather than relying on the reset alone: a shorter group resets only
@@ -2314,6 +2446,30 @@ class WarpEngine:
                 # sequential path needs nothing here: every launch it made is on the
                 # default stream, and the readbacks below synchronize that stream.
                 wp.synchronize_device(device)
+            if contraction_buffers is not None:
+                # The group's contraction is complete in g1/g2: per-column mean and
+                # sigma on the host (the BatchedDoseScorer estimator), no dense map,
+                # no truncation. Same books as the Dij path, read in one transfer
+                # (it synchronizes the default stream).
+                books = counters.read_books()
+                _check_majorant(books)
+                g1 = contraction_buffers[2].numpy()[:group].astype(np.float64)
+                g2 = contraction_buffers[3].numpy()[:group].astype(np.float64)
+                mean = g1 / n_batches
+                if n_batches == 1:
+                    sigma = np.zeros_like(mean)
+                else:
+                    var = np.maximum(0.0, g2 / n_batches - mean**2) * n_batches / (n_batches - 1)
+                    sigma = np.sqrt(var / n_batches)
+                if dose_to_water != 0:
+                    deposited_quanta += books["deposited"]
+                else:
+                    deposited_quanta += books["total_q"]
+                escaped_quanta += books["escaped"]
+                unscored_quanta += books["unscored"]
+                shard.blocks[group_start] = (mean, sigma)
+                emitter.tick(group * n_histories_per_beamlet)
+                continue
             # Turn the group's accumulated sums into per-column dose mean and sigma,
             # in place: each thread reads s1[tid]/s2[tid] and writes only its own
             # element, so aliasing the outputs onto the inputs is safe and saves two
@@ -2449,6 +2605,8 @@ class WarpEngine:
         use_spectral,
         use_segments,
         spectral_tables,
+        use_edges,
+        edge_set,
         seed,
         n_per,
         per_batch,
@@ -2596,6 +2754,42 @@ class WarpEngine:
                 res.workspace,
             )
             return 0.0
+        if use_edges:
+            self._generate_group_edges(
+                edge_set,
+                group_start,
+                seed,
+                n_per,
+                per_batch,
+                batch,
+                correlated,
+                chunk,
+                block_histories,
+                gi,
+                si,
+                density,
+                material,
+                tab,
+                res.queues,
+                res.slots,
+                res.edep,
+                escaped,
+                unscored,
+                deposited,
+                violations,
+                pcut,
+                ecut,
+                step_energy_fraction,
+                deposit_resolution,
+                msc_model_gs,
+                transport_electrons,
+                dose_to_water,
+                emitted_counter,
+                device,
+                res.stream,
+                res.workspace,
+            )
+            return 0.0
         if beamlet_generator is not None:
             self._generate_group_beamlet_wrapped(
                 beamlet_generator,
@@ -2680,8 +2874,39 @@ class WarpEngine:
         s2,
         total_q,
         device,
+        contraction=None,
     ) -> None:
-        """Fold one batch's quanta map into the running sums (accumulate_dij_batch)."""
+        """Fold one batch's quanta map into the running sums (accumulate_dij_batch).
+
+        With ``contraction`` buffers the batch is contracted instead: per (column,
+        chunk) partials, then per column in chunk order into ``g1``/``g2``. Both
+        launches go on the fold stream, so the lanes' batch-ordered folds keep the
+        contraction's float64 order fixed as well.
+        """
+        if contraction is not None:
+            weights, partial, g1, g2, n_chunks, voxel_chunk = contraction
+            _launch(
+                kernels.contract_dij_batch,
+                group * n_chunks,
+                [
+                    edep,
+                    voxel_mass,
+                    weights,
+                    n_voxels,
+                    n_chunks,
+                    voxel_chunk,
+                    float(per_batch),
+                    float(ENERGY_QUANTUM_MEV),
+                    partial,
+                    total_q,
+                ],
+                device,
+                stream,
+            )
+            _launch(
+                kernels.close_contraction_batch, group, [partial, n_chunks, g1, g2], device, stream
+            )
+            return
         _launch(
             kernels.accumulate_dij_batch,
             group * n_voxels,
@@ -4105,6 +4330,109 @@ class WarpEngine:
             wp.array(centers[:, 1].astype(np.float32), dtype=float, device=device),
             wp.array(centers[:, 2].astype(np.float32), dtype=float, device=device),
         )
+
+    def _generate_group_edges(
+        self,
+        edge_set,
+        group_start,
+        seed,
+        n_per,
+        per_batch,
+        batch,
+        correlated,
+        chunk,
+        block_histories,
+        gi,
+        si,
+        density,
+        material,
+        tab,
+        queues,
+        slots,
+        edep,
+        escaped,
+        unscored,
+        deposited,
+        violations,
+        pcut,
+        ecut,
+        step_energy_fraction,
+        deposit_resolution,
+        msc_model_gs,
+        transport_electrons,
+        dose_to_water,
+        emitted,
+        device,
+        stream=None,
+        workspace=None,
+    ) -> None:
+        """Built-in fan edge route: one batch of the group in-kernel.
+
+        The spectral route's block chunking with
+        :func:`~pyradmc.backends.warp.aperture.generate_fan_edges` as the generator;
+        one launch and one drain per chunk for the whole group, where the host route
+        paid one of each per edge.
+        """
+        edges, (sp_edges, sp_cdf) = edge_set
+        generator = aperture.generate_fan_edges
+        if edges.step_first is not None:
+            generator = aperture.generate_edge_steps
+        t = 0
+        while t < block_histories:
+            n_chunk = min(chunk, block_histories - t)
+            for q in queues:
+                _reset_count(q, device, stream)
+            _launch(
+                generator,
+                n_chunk,
+                [
+                    seed,
+                    group_start,
+                    n_per,
+                    per_batch,
+                    batch,
+                    t,
+                    1 if correlated else 0,
+                    sp_edges,
+                    sp_cdf,
+                    int(sp_cdf.shape[0]),
+                    edges,
+                    slots,
+                    emitted,
+                    queues[0],
+                ],
+                device,
+                stream,
+            )
+            _set_count(queues[0], n_chunk, device, stream)
+            self._drain_queues(
+                queues[0],
+                queues[1],
+                queues[2],
+                queues[3],
+                gi,
+                si,
+                density,
+                material,
+                tab,
+                slots,
+                edep,
+                escaped,
+                unscored,
+                deposited,
+                violations,
+                pcut,
+                ecut,
+                step_energy_fraction,
+                deposit_resolution,
+                msc_model_gs,
+                transport_electrons,
+                dose_to_water,
+                device,
+                stream,
+                workspace,
+            )
+            t += n_chunk
 
     def _generate_group_spectral(
         self,

@@ -28,6 +28,13 @@ end on a laptop RTX 4070 at
 planning statistics: **~1.1e7 histories/s**, i.e. a 100-beamlet 6 MeV field at 2–3 %
 per-beamlet sigma in single-digit seconds.
 
+For direct aperture optimization, both engines also score an objective's gradient `D^T a`
+without assembling the matrix (`run_beamlet_contraction`), and a leaf tip or jaw edge can
+itself be the column: Monte Carlo derivatives of the dose with respect to the aperture, for
+every edge of a segmented fan or arc in one run (`pyradmc.geometry.aperture_gradient`,
+`pyradmc.geometry.segment_edges`; `examples/aperture_gradient_fan_dao.py`,
+`examples/vmat_arc_dao.py`).
+
 ![One physics source compiled three ways, and the throughput gap](https://raw.githubusercontent.com/e0404/pyRadMC/main/docs/assets/warp_backend_demo.png)
 
 The same 6 MeV beam computed with the reference interpreter and with the Warp compilation of

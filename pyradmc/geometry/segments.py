@@ -1145,6 +1145,11 @@ class SegmentedFanSource(BeamletSource):
         return self._tips_pos
 
     @property
+    def cross_sections(self) -> CrossSectionSource:
+        """The source of the device attenuation coefficients."""
+        return self._cross_sections
+
+    @property
     def attenuation_tables(self) -> _MuTables:
         """The per-device macroscopic attenuation tables (shared with the pre-solve)."""
         return self._tables
