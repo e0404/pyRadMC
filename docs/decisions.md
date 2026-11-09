@@ -2170,3 +2170,80 @@ start with 100k steps gives 6009. A full re-run half way adds nothing (5401).
 
 **Not done.** Moves of jaws are not in the step (a jaw that tracks the leaves clears them by a
 margin, so its effect is attenuation only); no refresh policy.
+
+## Contraction by deposit fold, 2026-11-09
+
+`run_beamlet_contraction` ran `run_dij`'s machinery and contracted each batch's dense
+`group x n_scoring_voxels` int64 map with the weights. Its cost and memory scaled with
+beamlets x scoring voxels and the group was memory-limited, which is why the TG-119 study
+crops the scoring grid to a box around the voxels with nonzero objective gradient. On
+1THA232 (78 edges per segment, a 0.6 M-voxel box) the gradient took 1.4 s at 4 deg against
+0.23 s on 1THA210 (34 edges, 0.13 M voxels), at the same histories per edge. This was the
+engine lever recorded under "Vectorized edge sets" above.
+
+**The fold.** `_deposit` (the single routing point) now sends a deposit's tally quanta `q`,
+under a fold scoring struct, through `_tally_index`: `round(q * K a_v / m_v)` is added with an
+int64 atomic to its beamlet's accumulator. `K` is a power of two per call
+(`_fold_scale`), so that `max|a/m| * per_batch * E_max / quantum * K` sits in
+`[2**55, 2**56)`; `K a_v / m_v` is then an exact scaling of the float64 ratio. Integer
+addition is associative, so the result is bit-reproducible on a device and bitwise inert to
+group size, sub-accumulator count and batch lanes (test-pinned). The only departure from
+the dense fold is the rounding of each weighted deposit, at most half of `1/K`. The same
+integer `q` is booked as before, so the energy books are identical integers.
+
+**Headroom and guard.** Each sub-accumulator also keeps the positive and the negative tally
+quanta, so a batch closes with `sum |q|` per beamlet, and `|A| <= (K max|a/m| + 1/2) sum |q|`
+bounds every partial sum of the weighted accumulator. A call whose largest such bound
+reaches `2**62` is rerun at the largest safe power of two (same seeds, same transport),
+and the rerun is logged. The a-priori budget leaves `2**6` for weights above one, roulette
+and the dose-to-water factor. On the study's leaf edges the measured bound sat `2**11`
+below the budget: every history's full energy in the voxel of largest `|a/m|` is far from
+what an edge deposits. A first choice of `2**50` wasted those bits (agreement 1.4e-8 of
+the largest value); at `2**56` it is 2e-10 to 5e-10, below 5e-5 of the sigma.
+
+**Contention.** The fold costs two atomics per deposit (weighted sum, tally) to a few
+addresses per beamlet, where the dense map took one to a scattered address. With thousands
+of beamlets in flight their threads are spread already: on 1THA232 (7020 edges) one
+sub-accumulator was fastest (0.153 s; 64: 0.156 s; 1024: 0.179 s). With one to four
+beamlets of 2M histories on a 64^3 grid every thread hits the same addresses: 0.069 s at
+one, 0.036 s at 256-1024, the dense fold 0.032 s. `_fold_subslots` therefore aims a group
+at 4096 sub-accumulators in total, picked by the low bits of the scoring index. Warp- or
+block-level reduction was not tried: the deposits come from divergent threads deep in the
+transport loop.
+
+**Cost to the other runs.** The fold lives in the transport kernels every run compiles. As a
+separate branch around its own atomics it cost plain `run` and `run_dij` 1.3-1.7 % (64^3
+water, 6 MeV, alternating processes, best of 7; register use 223 -> 224, so not occupancy).
+A variant without the branch but with the new struct fields matched the branch point, so
+the cost was the branch. In the shipped form (`_tally_index`) both paths share the one
+tally atomic and the fold only chooses its index: six alternating pairs gave `run`
+0.0636-0.0638 s old against 0.0639-0.0645 s, `run_dij` 0.0869-0.0880 s against
+0.0872-0.0885 s, a residual of about 0.5 % and 0.3 %. The study's forward runs (step and
+segment Dij, device and host) were within their 10 % process-to-process noise. Removing the
+residual would need two compiled variants of the transport kernels (struct-type overloads
+through every deposit helper); not done.
+
+**Measured** (RTX 4070 Laptop at 2535 MHz with no throttle reason, before and after each
+process; old = the branch point in an alternating process; best of 5; 1000 histories per
+edge, 2 batches, as the pipeline runs; "deposit" alone in its process, as in the study's
+loop, and in parentheses interleaved with the dense instrument, where it pays the transport
+pool's refit to its wider groups each call):
+
+| case | edges | box voxels | old | dense | deposit | deposit, full grid |
+|---|---|---|---|---|---|---|
+| 1THA232, 4 deg | 7020 | 628 524 | 1.39-1.42 s | 1.40-1.41 s | 0.171 s (0.19) | 0.177 s (0.19) |
+| 1THA232, 8 deg | 3510 | 605 280 | 0.69-0.74 s | 0.70-0.73 s | 0.093 s (0.11) | 0.095 s (0.12) |
+| 1THA210, 4 deg | 3060 | 128 340 | 0.23-0.28 s | 0.23-0.25 s | 0.081 s (0.08) | 0.082 s (0.10) |
+| 1THA210, 8 deg | 1530 | 131 400 | 0.16-0.19 s | 0.15-0.17 s | 0.042 s (0.043) | 0.045 s (0.067) |
+
+So the gradient no longer scales with edges x box: 1THA232 now costs 2.1x 1THA210, at
+2.3x the edges. The full grid (1.22 M voxels) costs only its coefficient array, so the
+study's box is no longer needed for speed. Full grid against box differ by 3e-5 of the
+largest value (below 6e-4 of the sigma), identically on the dense fold (2.9035e-5 both): it
+is the box's rebinned scoring geometry, not the fold. Deposit against dense on the same
+grid: 5.6e-11 to 4.9e-10 of the largest value, at most 4.9e-5 of a sigma, energy books
+equal.
+
+`fold="dense"` stays as the verification instrument. With one to four beamlets of millions
+of histories on a small grid it is up to ~8 % faster; the default is the deposit fold
+because the study cases, which are what it is for, are 3.4-8.2x faster with it.

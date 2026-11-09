@@ -192,6 +192,12 @@ class GridInfo:
     ``b_mode`` is one of the :mod:`pyradmc.geometry.field` mode constants;
     ``FIELD_NONE`` (the field-free world) leaves the remaining members inert and
     unread, like the cylindrical members at ``mode == 0``.
+
+    So does the deposit fold of a beamlet contraction (``fold_*``, read by
+    :func:`_deposit` only; see :func:`_tally_index`), and with it the beamlet column
+    stride of the tally (``column_stride``: ``n_voxels`` on every other path, where
+    the transport kernels' ``beamlet * column_stride`` is the former
+    ``beamlet * n_voxels``).
     """
 
     x_lo: float
@@ -235,6 +241,14 @@ class GridInfo:
     # --- exterior-air safety (air_on != 0, only under a uniform field); else unread -
     air_on: int
     air_safety: wp.array3d(dtype=float)
+    # --- beamlet column layout and the deposit fold (scoring geometry only) --------
+    # ``column_stride`` is the int64 offset between beamlet columns of ``edep``: the
+    # scoring voxel count for a dense map, the sub-accumulator block for a fold.
+    column_stride: int
+    fold_on: int
+    fold_mask: int
+    fold_stride: int
+    fold_coef: wp.array(dtype=wp.float64)
 
 
 @wp.struct
@@ -577,6 +591,57 @@ def _scoring_index(si: GridInfo, x: float, y: float, z: float) -> int:
 
 
 @wp.func
+def _tally_index(
+    edep: wp.array(dtype=wp.int64),
+    si: GridInfo,
+    base: int,
+    index: int,
+    quanta: wp.int64,
+) -> int:
+    """Return where a deposit's tally quanta go; under the deposit fold, weight them first.
+
+    Without the fold (``si.fold_on == 0``) this is the dense column entry
+    ``base + index`` and nothing else happens. The caller adds the quanta there with
+    its one atomic, which both paths share: written as a separate fold branch around
+    its own atomics, the fold measured ~1.5 % on plain ``run``/``run_dij`` wall time
+    (RTX 4070 Laptop; register use unchanged at 223-224), this form about half that.
+
+    Under the fold the deposit is folded into its beamlet's contraction accumulator:
+
+    ``g_j = sum_v a_v E_vj / m_v`` needs only ``sum_d c_v(d) q_d`` per beamlet and
+    batch, ``c_v = a_v / m_v`` (zero where the voxel has no mass) and ``q_d`` the
+    deposit's tally quanta. ``si.fold_coef`` holds ``K c_v`` for a power of two
+    ``K`` chosen per call (see the engine's ``_fold_scale``), and the product is
+    rounded to the nearest integer (``floor(x + 1/2)``, either sign) and added with
+    an int64 atomic: integer addition is associative, so the accumulators are
+    bit-reproducible run to run whatever order the threads arrive in (AGENTS.md
+    2.3). The rounding is the fold's only departure from the dense fold, at most
+    half a weighted quantum ``1/K`` per deposit.
+
+    The beamlet's block (``base = beamlet * si.column_stride``) holds
+    ``si.fold_mask + 1`` sub-accumulators of ``si.fold_stride`` int64s each, picked
+    by the low bits of the scoring index: neighbouring voxels land in different
+    ones, so the threads of one beamlet spread over many addresses rather than
+    contending on one. Each sub-accumulator keeps the weighted sum, then the
+    positive and the negative tally quanta (the energy book, and ``sum |q|``, which
+    bounds the weighted sum for the overflow guard); the returned index is the tally
+    entry of the deposit's sign. A zero weighted term is not added, so voxels outside
+    the objective's support cost one atomic, not two.
+
+    Early returns throughout, as in :func:`_scoring_index`.
+    """
+    if si.fold_on == 0:
+        return base + index
+    slot = base + (index & si.fold_mask) * si.fold_stride
+    weighted = wp.int64(wp.floor(wp.float64(quanta) * si.fold_coef[index] + wp.float64(0.5)))
+    if weighted != wp.int64(0):
+        wp.atomic_add(edep, slot, weighted)
+    if quanta < wp.int64(0):
+        return slot + 2
+    return slot + 1
+
+
+@wp.func
 def _deposit(
     edep: wp.array(dtype=wp.int64),
     deposited: wp.array(dtype=wp.int64),
@@ -601,7 +666,7 @@ def _deposit(
     invariant to the scoring geometry in exact quanta.
 
     ``base`` is the flat offset of this particle's beamlet column
-    (``beamlet * si.n_voxels``); zero for plain dose runs, whose ``edep`` is a
+    (``beamlet * si.column_stride``); zero for plain dose runs, whose ``edep`` is a
     single column. When the scoring grid is the transport grid (the default),
     the routing math is the identical ``point_axis_index`` arithmetic the
     transport loop used, so behaviour is byte-identical to indexed deposits.
@@ -613,13 +678,17 @@ def _deposit(
     books physical quanta, so the energy balance is scoring-mode invariant.
     Under dose-to-medium the host derives deposited energy from ``edep``
     directly and the counter is skipped.
+
+    With ``si.fold_on`` the same quanta go to :func:`_tally_index`'s fold instead of the
+    dense column (a beamlet contraction's deposit fold); routing, quantization and
+    the ledger are unchanged, so both folds see identical integers.
     """
     index = _scoring_index(si, x, y, z)
     if index >= 0:
         quanta = wp.int64(
             wp.float64(energy) * wp.float64(factor) * wp.float64(_INV_QUANTUM) + wp.float64(0.5)
         )
-        wp.atomic_add(edep, base + index, quanta)
+        wp.atomic_add(edep, _tally_index(edep, si, base, index, quanta), quanta)
         if dose_to_water != 0:
             physical = wp.int64(wp.float64(energy) * wp.float64(_INV_QUANTUM) + wp.float64(0.5))
             wp.atomic_add(deposited, 0, physical)
@@ -963,6 +1032,94 @@ def close_contraction_batch(
         s = s + partial[local * n_chunks + c]
     g1[local] = g1[local] + s
     g2[local] = g2[local] + s * s
+
+
+@wp.kernel
+def fold_ratio_max(
+    weights: wp.array(dtype=wp.float64),
+    voxel_mass: wp.array(dtype=wp.float64),
+    n_voxels: int,
+    chunk: int,
+    out: wp.array(dtype=wp.float64),
+):
+    """``max_v |a_v| / m_v`` over the voxels with mass, one chunk per thread.
+
+    A maximum is exact and order-independent, so the float64 ``atomic_max`` that
+    combines the chunks is deterministic (unlike a float sum). ``out`` must start at
+    zero.
+    """
+    start = wp.tid() * chunk
+    stop = wp.min(start + chunk, n_voxels)
+    m = wp.float64(0.0)
+    for v in range(start, stop):
+        mass = voxel_mass[v]
+        if mass > wp.float64(0.0):
+            m = wp.max(m, wp.abs(weights[v]) / mass)
+    if m > wp.float64(0.0):
+        wp.atomic_max(out, 0, m)
+
+
+@wp.kernel
+def fold_coefficients(
+    weights: wp.array(dtype=wp.float64),
+    voxel_mass: wp.array(dtype=wp.float64),
+    scale: wp.float64,
+    coef: wp.array(dtype=wp.float64),
+):
+    """Write the deposit fold's per-voxel factor ``K a_v / m_v``, zero where ``m_v = 0``.
+
+    ``K`` is a power of two, so the product is the exact scaling of ``a_v / m_v``;
+    a massless voxel scores nothing, as ``_batch_dose`` returns zero there.
+    """
+    v = wp.tid()
+    mass = voxel_mass[v]
+    if mass > wp.float64(0.0):
+        coef[v] = (weights[v] / mass) * scale
+    else:
+        coef[v] = wp.float64(0.0)
+
+
+@wp.kernel
+def close_fold_batch(
+    slots: wp.array(dtype=wp.int64),
+    n_sub: int,
+    stride: int,
+    scale: wp.float64,
+    g1: wp.array(dtype=wp.float64),
+    g2: wp.array(dtype=wp.float64),
+    total_quanta: wp.array(dtype=wp.int64),
+    abs_quanta_max: wp.array(dtype=wp.int64),
+):
+    """Close one batch of the deposit fold: per beamlet, sum and consume its accumulators.
+
+    One thread per beamlet sums its ``n_sub`` sub-accumulators (integers, so any
+    order gives the same sums), resets them for the next batch, and folds the batch
+    value ``g_b = A_b * scale`` (``scale = quantum / (K * n_histories)``) into the
+    running float64 sums in batch order, exactly as :func:`close_contraction_batch`
+    does for the dense fold. Books the tally quanta (the dose-to-medium deposited
+    energy) with an integer atomic, and the largest per-beamlet ``sum |q|`` seen,
+    which bounds ``|A_b| <= (max K|c| + 1/2) sum |q|`` for the engine's overflow
+    guard.
+    """
+    local = wp.tid()
+    base = local * n_sub * stride
+    a = wp.int64(0)
+    pos = wp.int64(0)
+    neg = wp.int64(0)
+    for s in range(n_sub):
+        k = base + s * stride
+        a = a + slots[k]
+        pos = pos + slots[k + 1]
+        neg = neg + slots[k + 2]
+        slots[k] = wp.int64(0)
+        slots[k + 1] = wp.int64(0)
+        slots[k + 2] = wp.int64(0)
+    g = wp.float64(a) * scale
+    g1[local] = g1[local] + g
+    g2[local] = g2[local] + g * g
+    if pos + neg != wp.int64(0):
+        wp.atomic_add(total_quanta, 0, pos + neg)
+    wp.atomic_max(abs_quanta_max, 0, pos - neg)
 
 
 @wp.kernel
@@ -1359,7 +1516,7 @@ def photon_kernel(
         return
     e = q_in.energy[tid]
     beamlet = q_in.beamlet[tid]
-    base = beamlet * si.n_voxels
+    base = beamlet * si.column_stride
     w = q_in.weight[tid]
     primary = q_in.primary[tid]
     x = q_in.x[tid]
@@ -1732,7 +1889,7 @@ def electron_kernel(
     # Nudge walked into the current voxel, charged by its first substep there.
     carry = float(0.0)  # noqa: UP018 - Warp needs a dynamic var mutated in the loop
     beamlet = q_in.beamlet[tid]
-    base = beamlet * si.n_voxels
+    base = beamlet * si.column_stride
     w = q_in.weight[tid]
     x = q_in.x[tid]
     y = q_in.y[tid]

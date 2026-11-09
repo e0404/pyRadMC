@@ -32,6 +32,8 @@ This module is Warp backend code: exempt from ``mypy --strict`` (AGENTS.md 5).
 
 from __future__ import annotations
 
+import logging
+import math
 import threading
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
@@ -87,6 +89,8 @@ from pyradmc.transport.electron import default_step_energy_fraction
 from pyradmc.transport.particles import ELECTRON, PHOTON, POSITRON
 
 __all__ = ["DeviceDijResult", "WarpEngine"]
+
+logger = logging.getLogger(__name__)
 
 _E_MAX_MARGIN = 1.0 + 1.0e-6  # table upper edge strictly above the primary energy
 
@@ -171,6 +175,7 @@ def _scoring_info(scoring: ScoringGeometry, device: str) -> GridInfo:
         si.r_edges_sq = wp.array(edges_sq, dtype=float, device=device)
         si.n_voxels = scoring.n_voxels
         si.min_spacing = float(scoring.depth_thickness.min())  # unused; kept coherent
+        _fill_no_fold(si, scoring.n_voxels, device)
         return si
     si.mode = 0
     si.x_lo, si.y_lo, si.z_lo = scoring.origin
@@ -184,6 +189,37 @@ def _scoring_info(scoring: ScoringGeometry, device: str) -> GridInfo:
     si.r_inner_sq = si.r_outer_sq = 0.0
     si.r_edges_sq = _no_shells(device)
     si.z_edges = _no_shells(device)
+    _fill_no_fold(si, scoring.n_voxels, device)
+    return si
+
+
+def _fill_no_fold(gi: GridInfo, n_voxels: int, device: str) -> None:
+    """Dense beamlet columns (stride ``n_voxels``) and the deposit fold off.
+
+    The fold members are inert at ``fold_on == 0``; the coefficient array is a
+    placeholder for the same reason as :func:`_no_shells`.
+    """
+    gi.column_stride = n_voxels
+    gi.fold_on = 0
+    gi.fold_mask = 0
+    gi.fold_stride = 1
+    gi.fold_coef = wp.zeros(1, dtype=wp.float64, device=device)
+
+
+def _fold_scoring_info(
+    scoring: ScoringGeometry, coef: wp.array, device: str, n_sub: int, stride: int
+) -> GridInfo:
+    """Build a fresh scoring struct routing deposits into the deposit fold's accumulators.
+
+    Fresh rather than the engine's cached ``_upload_scoring`` struct, which the dense
+    paths keep using: only the column stride and the fold members differ.
+    """
+    si = _scoring_info(scoring, device)
+    si.column_stride = n_sub * stride
+    si.fold_on = 1
+    si.fold_mask = n_sub - 1
+    si.fold_stride = stride
+    si.fold_coef = coef
     return si
 
 
@@ -278,6 +314,122 @@ def _auto_group_size(
     return max(1, min(sized, n_beamlets, _GROUP_SIZE_CAP))
 
 
+_FOLD_SUBSLOT_TARGET = 4096
+"""Sub-accumulators a deposit-fold group aims for in total (see :func:`_fold_subslots`)."""
+
+_FOLD_SUBSLOTS_MAX = 1024
+"""At most this many sub-accumulators per beamlet."""
+
+
+def _fold_subslots(group: int) -> int:
+    """Sub-accumulators per beamlet in the deposit fold: a power of two, bit-inert.
+
+    Every deposit of a beamlet's histories lands in one of these, picked by the low
+    bits of its scoring index, so the atomics of one beamlet's concurrent threads
+    spread over that many addresses instead of one. Integer sums make the count
+    bitwise inert (test-pinned); it only trades contention against the footprint of
+    the accumulators and their closing pass. Measured 2026-11-09 (RTX 4070 Laptop,
+    2535 MHz, interleaved best-of): with thousands of beamlets in flight their
+    threads are spread already, and one sub-accumulator is fastest (TG-119 leaf
+    edges, 7020 beamlets: 0.153 s at 1, 0.156 s at 64, 0.179 s at 1024); with one
+    to four beamlets carrying 2M histories every thread hits the same few
+    addresses (0.069 s at 1, 0.039 s at 64, 0.036 s at 256-1024, the dense fold
+    0.032 s). So the group as a whole aims for :data:`_FOLD_SUBSLOT_TARGET`.
+    """
+    n_sub = 1
+    while n_sub < _FOLD_SUBSLOTS_MAX and 2 * n_sub * group <= _FOLD_SUBSLOT_TARGET:
+        n_sub *= 2
+    return n_sub
+
+
+_FOLD_SLOT_STRIDE = 4
+"""int64 elements per sub-accumulator: weighted sum, positive and negative tally
+quanta, and one pad to a 32-byte sector."""
+
+_FOLD_SCALE_BITS = 56
+"""``K`` puts the largest weighted sum a unit-weight batch could reach,
+``max |a/m| * per_batch * E_max / quantum`` (every history's full energy in the
+voxel of largest ``|a/m|``), in ``[2**55, 2**56)``.
+
+That leaves a factor of 2**6 below :data:`_FOLD_GUARD_BITS` for source weights
+above one (the edge derivatives are not bounded by one), soft-photon roulette and
+the dose-to-water factor; the guard catches anything beyond it. The budget itself
+is far from reached in practice: on the TG-119 study's leaf-edge gradients
+(1THA232, 4 deg arc, 1000 histories per edge) the measured per-beamlet bound sat
+2**11 below it. The weighted quantum ``1/K`` is ``2**-55..2**-56`` of that batch
+budget, so each deposit's rounding error is at most ``2**-56`` of
+``max|a/m| * E_max`` on a per-history value (or ``2**-53`` relative, for a single
+product beyond ``2**53``, where float64 rounding of the product takes over)."""
+
+_FOLD_GUARD_BITS = 62
+"""The overflow guard: a call whose per-beamlet, per-batch bound
+``(K max|a/m| + 1/2) * sum |q|`` reaches ``2**62`` (half the int64 range) is rerun
+at a smaller ``K``."""
+
+
+def _fold_scale(ratio_max: float, per_batch: int, max_energy: float) -> float:
+    """Return the deposit fold's weighted-quanta scale ``K``: a power of two, per call.
+
+    ``ratio_max`` is ``max_v |a_v| / m_v`` over the voxels with mass. ``K`` is the
+    power of two with ``ratio_max * per_batch * max_energy / quantum * K`` in
+    ``[2**(B-1), 2**B)``, ``B = _FOLD_SCALE_BITS``; a power of two so that
+    ``K a_v / m_v`` is the exact scaling of the float64 ratio. Zero weights take
+    ``K = 1`` (every coefficient is zero).
+    """
+    budget = ratio_max * per_batch * max_energy / ENERGY_QUANTUM_MEV
+    if not budget > 0.0:
+        return 1.0
+    _, exponent = math.frexp(budget)  # budget in [2**(e-1), 2**e)
+    return math.ldexp(1.0, _FOLD_SCALE_BITS - exponent)
+
+
+def _fold_rescale(ratio_max: float, abs_quanta_max: int) -> float:
+    """Return the largest power-of-two ``K`` keeping ``(K ratio + 1/2) Q`` below the guard.
+
+    ``Q`` is the largest per-beamlet, per-batch ``sum |q|`` a call measured; a run
+    at the returned scale is therefore safe by construction (one bit of margin
+    below :data:`_FOLD_GUARD_BITS`).
+    """
+    room = math.ldexp(1.0, _FOLD_GUARD_BITS - 1) / abs_quanta_max - 0.5
+    if not room > 0.0:
+        raise ValueError(
+            f"a beamlet batch deposited {abs_quanta_max} quanta in absolute value, beyond "
+            "the deposit fold's int64 range at any scale; use fold='dense'"
+        )
+    _, exponent = math.frexp(room / ratio_max)
+    return math.ldexp(1.0, exponent - 1)
+
+
+def _fold_beamlet_bytes(lanes: int) -> int:
+    """Return the device bytes per beamlet of a wide deposit-fold group.
+
+    One sub-accumulator a lane plus the running sums g1/g2. A narrow group's extra
+    sub-accumulators total at most :data:`_FOLD_SUBSLOT_TARGET` per lane, which
+    :func:`_auto_fold_group_size` charges up front.
+    """
+    return lanes * _FOLD_SLOT_STRIDE * 8 + 16
+
+
+def _auto_fold_group_size(
+    free_bytes: int, n_beamlets: int, lanes: int, queue_bytes: int = 0
+) -> int:
+    """Largest beamlet group whose deposit-fold accumulators fit the memory budget.
+
+    The fold has no dense map, so a beamlet costs :func:`_fold_beamlet_bytes`
+    (48 bytes on one lane) instead of ``(8 lanes + 16) n_voxels``, and there is no
+    :data:`_GROUP_SIZE_CAP`: that cap stops dense maps growing past the point where
+    wider launches stop paying, but here a wider group costs nothing and fills the
+    chunk (a batch block of ``group * per_batch`` histories) where a narrow one
+    launches under-filled. Unknown free memory (cpu) takes every beamlet.
+    """
+    if free_bytes <= 0:
+        return max(1, n_beamlets)
+    budget = max(0, free_bytes - queue_bytes) * _GROUP_MEMORY_FRACTION
+    budget -= lanes * _FOLD_SUBSLOT_TARGET * _FOLD_SLOT_STRIDE * 8
+    sized = max(0, int(budget)) // _fold_beamlet_bytes(lanes)
+    return max(1, min(sized, n_beamlets))
+
+
 def _index_safe_group_size(group: int, per_batch: int) -> int:
     """Largest group ``<= group`` whose batch block fits ``_MAX_BLOCK_HISTORIES``.
 
@@ -353,6 +505,21 @@ class _DijShard:
     unscored_quanta: int = 0
     emitted_quanta: int = 0
     emitted_energy: float = 0.0
+    fold_abs_quanta_max: int = 0
+
+
+@dataclass
+class _FoldSpec:
+    """A deposit-fold contraction's weights and its per-call weighted-quanta scale.
+
+    ``weights`` is the flat float64 weight array on some device (each shard reads it
+    there or copies it, as the dense contraction does); ``scale`` is ``K``
+    (:func:`_fold_scale`) and ``ratio_max`` the ``max |a_v| / m_v`` it came from.
+    """
+
+    weights: wp.array
+    scale: float
+    ratio_max: float
 
 
 @dataclass
@@ -373,6 +540,7 @@ class _DijRun:
     energy_deposited: float
     energy_escaped: float
     energy_unscored: float
+    fold_abs_quanta_max: int = 0
 
 
 @dataclass
@@ -551,13 +719,24 @@ class _Workspace:
         )
 
 
-_BOOK = ("escaped", "unscored", "deposited", "total_q", "dep_total", "emitted", "violations")
+_BOOK = (
+    "escaped",
+    "unscored",
+    "deposited",
+    "total_q",
+    "dep_total",
+    "emitted",
+    "violations",
+    "fold_q_max",
+)
 """The counters a workspace keeps in one int64 array. The first
 :data:`_BOOK_PER_PASS` are cleared and read once per pass — a batch of ``run``, a
 group of ``run_dij`` — so no int64 sum spans more than the pass it always did; the
 rest accumulate over the whole call. ``violations`` is the kernels' int32
 majorant-violation count, aliased onto its slot (see :meth:`_Workspace.book`), so
-the per-pass readback raises on a violation in the pass that made it."""
+the per-pass readback raises on a violation in the pass that made it.
+``fold_q_max`` is the deposit fold's largest per-beamlet, per-batch ``sum |q|``
+(a maximum, for the overflow guard)."""
 
 _BOOK_PER_PASS = 4
 
@@ -1888,15 +2067,14 @@ class WarpEngine:
         devices: Sequence[str] | None = None,
         concurrent_batches: int = 1,
         progress: ProgressCallback | None = None,
+        fold: str = "deposit",
     ) -> ContractionResult:
         """Score ``g_j = sum_v a_v D_vj`` per beamlet; same contract as the reference engine.
 
         See :meth:`pyradmc.backends.ref.engine.ReferenceEngine.run_beamlet_contraction`.
-        The run is :meth:`run_dij`'s — routes, groups, devices, batch lanes and the
-        history mapping — with only the per-batch fold replaced: each batch's
-        quanta map is contracted with the weights per (column, chunk) and per column
-        in chunk order (a fixed float64 order on a device, so bit-reproducible), and
-        no dense dose map, truncation or compaction exists.
+        The run is :meth:`run_dij`'s — routes, devices, batch lanes and the history
+        mapping, so the same seeds transport the same histories — with only the
+        scoring replaced; no dense dose map, truncation or compaction exists.
 
         ``voxel_weights`` may also be a ``wp.float64`` Warp array (Warp only; see
         :func:`~pyradmc.backends.warp.dij.device_voxel_weights`), of the scoring
@@ -1904,8 +2082,45 @@ class WarpEngine:
         a host copy (copied device to device if it lies on another one), for an
         optimizer that forms the objective gradient on the GPU. The result is
         bit-identical to passing the same values as a NumPy array (test-pinned).
+
+        Parameters
+        ----------
+        fold
+            How the deposits become per-beamlet values; both are the reference
+            engine's estimator (per-batch values, their mean and standard error).
+
+            ``"deposit"`` (default): each deposit's tally quanta ``q`` are weighted
+            at the deposit by its scoring voxel's ``K a_v / m_v`` and added, rounded
+            to an integer, to an int64 accumulator of its beamlet (spread over
+            sub-accumulators against contention, :func:`_fold_subslots`). Cost and
+            memory follow the deposits, not ``beamlets x scoring voxels``: a beamlet
+            of a wide group holds 48 bytes, so groups are as wide as the history
+            index allows and the scoring grid's size costs only its coefficient
+            array.
+            Deterministic on a device for any group size, lane count or arrival
+            order, since integer addition is associative. ``K`` is a power of two
+            chosen per call (:func:`_fold_scale`) so that a unit-weight batch's
+            largest possible weighted sum sits near ``2**56``, and the *only*
+            difference from the dense fold is the rounding of each weighted
+            deposit: at most half a weighted quantum, i.e. ``2**-56`` of
+            ``max_v |a_v| / m_v * E_max`` per deposit on a per-history value
+            (test-pinned against ``"dense"``; see :data:`_FOLD_SCALE_BITS` and the
+            measurements in the changelog). An int64
+            guard measures each beamlet's per-batch ``sum |q|``; should a call's
+            weights push ``(K max|a/m| + 1/2) sum |q|`` to ``2**62``, the whole
+            call is rerun (same seeds, same histories) at the largest safe scale,
+            and logged. Energy books are the same integers as the dense fold's.
+
+            ``"dense"``: each batch's group of dense quanta maps
+            (``group x n_scoring_voxels``) is contracted with the weights per
+            (column, chunk) and per column in chunk order, a fixed float64 order on
+            a device. A verification instrument (AGENTS.md 2.10): it is the
+            unrounded fold the deposit fold is pinned against, at a cost that
+            scales with ``beamlets x scoring voxels``.
         """
-        scoring = scoring_grid if scoring_grid is not None else ScoringGrid.for_grid(self.grid)
+        if fold not in ("deposit", "dense"):
+            raise ValueError(f"unknown fold {fold!r}; expected 'deposit' or 'dense'")
+        scoring = self._scoring_geometry(scoring_grid)
         weights: np.ndarray | wp.array
         if isinstance(voxel_weights, wp.array):
             weights = device_voxel_weights(voxel_weights, scoring.shape)
@@ -1917,8 +2132,7 @@ class WarpEngine:
                 )
             if not np.all(np.isfinite(weights)):
                 raise ValueError("voxel weights must be finite")
-        run = self._compute_dij(
-            source,
+        common = dict(
             n_histories_per_beamlet=n_histories_per_beamlet,
             n_batches=n_batches,
             seed=seed,
@@ -1937,8 +2151,31 @@ class WarpEngine:
             concurrent_batches=concurrent_batches,
             progress=progress,
             device_blocks=False,
-            contraction=weights,
         )
+        if fold == "dense":
+            run = self._compute_dij(source, **common, contraction=weights)
+        else:
+            spec = self._fold_spec(
+                weights, scoring, n_histories_per_beamlet // max(n_batches, 1), source
+            )
+            run = self._compute_dij(source, **common, contraction=spec)
+            bound = (spec.scale * spec.ratio_max + 0.5) * float(run.fold_abs_quanta_max)
+            logger.debug(
+                "deposit fold: scale 2**%d, largest beamlet-batch bound 2**%.1f",
+                int(math.log2(spec.scale)),
+                math.log2(bound) if bound > 0.0 else -math.inf,
+            )
+            if bound >= math.ldexp(1.0, _FOLD_GUARD_BITS):
+                scale = _fold_rescale(spec.ratio_max, run.fold_abs_quanta_max)
+                logger.info(
+                    "deposit fold: a beamlet batch's weighted sum could reach 2**%.1f of the "
+                    "int64 range at scale 2**%d; rescaling to 2**%d and rerunning the call",
+                    math.log2(bound),
+                    int(math.log2(spec.scale)),
+                    int(math.log2(scale)),
+                )
+                spec = _FoldSpec(spec.weights, scale, spec.ratio_max)
+                run = self._compute_dij(source, **common, contraction=spec)
         return ContractionResult(
             values=np.concatenate([run.blocks[gs][0] for gs in run.group_starts]),
             sigma=np.concatenate([run.blocks[gs][1] for gs in run.group_starts]),
@@ -1951,6 +2188,39 @@ class WarpEngine:
             energy_unscored=run.energy_unscored,
             provenance=run.provenance,
         )
+
+    def _fold_spec(
+        self,
+        weights: np.ndarray | wp.array,
+        scoring: ScoringGeometry,
+        per_batch: int,
+        source: BeamletSource,
+    ) -> _FoldSpec:
+        """Put the weights on a device and derive the deposit fold's scale ``K`` there.
+
+        Host weights go to the engine's device (a shard there reads them in place),
+        device weights stay where they are; ``max |a_v| / m_v`` is reduced on that
+        device with the scoring masses, so both give the same ``K`` and therefore
+        bit-identical results (the ratio is a correctly rounded division and the
+        maximum is exact).
+        """
+        if isinstance(weights, wp.array):
+            flat, device = weights, str(weights.device)
+        else:
+            device = self.device
+            flat = wp.array(weights.reshape(-1), dtype=wp.float64, device=device)
+        _, voxel_mass = self._upload_scoring(scoring, device)
+        n_voxels = scoring.n_voxels
+        chunk = 256
+        ratio_max = wp.zeros(1, dtype=wp.float64, device=device)
+        wp.launch(
+            kernels.fold_ratio_max,
+            dim=(n_voxels + chunk - 1) // chunk,
+            inputs=[flat, voxel_mass, n_voxels, chunk, ratio_max],
+            device=device,
+        )
+        ratio = float(ratio_max.numpy()[0])
+        return _FoldSpec(flat, _fold_scale(ratio, per_batch, source.max_energy), ratio)
 
     def _compute_dij(
         self,
@@ -1974,7 +2244,7 @@ class WarpEngine:
         concurrent_batches: int,
         progress: ProgressCallback | None,
         device_blocks: bool,
-        contraction: np.ndarray | wp.array | None = None,
+        contraction: np.ndarray | wp.array | _FoldSpec | None = None,
     ) -> _DijRun:
         """Validate, schedule and run every beamlet group; merge shards and books.
 
@@ -1983,8 +2253,9 @@ class WarpEngine:
         the per-group blocks end up (``device_blocks``) and how they are
         concatenated; ``contraction`` (voxel weights, scoring-grid shape) switches
         the per-group reduction from dense columns to their contraction, whose
-        blocks are ``(values, sigma)`` per group. Transport, routes and the history
-        mapping are identical in all three.
+        blocks are ``(values, sigma)`` per group — a :class:`_FoldSpec` to the
+        deposit fold, which keeps no dense map at all. Transport, routes and the
+        history mapping are identical in all of them.
         """
         if truncation < 0.0:
             # The host assembler's own check, made before any transport so the
@@ -2037,6 +2308,13 @@ class WarpEngine:
                     # size (releasing the rest) before allocating, so they budget
                     # as free: the group size a fresh engine gets.
                     free += self._idle_workspace_bytes(d)
+                if isinstance(contraction, _FoldSpec):
+                    return _auto_fold_group_size(
+                        free,
+                        n_beamlets,
+                        lanes_d,
+                        _queue_bytes(chunk_d, self.queue_factor, lanes_d),
+                    )
                 return _auto_group_size(
                     free,
                     scoring.n_voxels,
@@ -2164,6 +2442,7 @@ class WarpEngine:
             energy_deposited=deposited_quanta * ENERGY_QUANTUM_MEV,
             energy_escaped=escaped_quanta * ENERGY_QUANTUM_MEV,
             energy_unscored=unscored_quanta * ENERGY_QUANTUM_MEV,
+            fold_abs_quanta_max=max(r.fold_abs_quanta_max for r in shard_results),
         )
 
     def _run_dij_shard(
@@ -2190,7 +2469,7 @@ class WarpEngine:
         concurrent_batches: int,
         emitter: ProgressEmitter,
         device_blocks: bool = False,
-        contraction: np.ndarray | wp.array | None = None,
+        contraction: np.ndarray | wp.array | _FoldSpec | None = None,
     ) -> _DijShard:
         """Pull beamlet groups from the shared queue and run them on one device.
 
@@ -2206,12 +2485,35 @@ class WarpEngine:
         concurrently, each lane on its own CUDA stream with its own queues, RNG
         slots, and quanta map (``_run_dij_group_lanes``); a cpu device has no
         streams and always runs the sequential path.
+
+        A :class:`_FoldSpec` ``contraction`` runs the deposit fold: the lanes' quanta
+        maps are the beamlets' sub-accumulator blocks, the transport scores through a
+        fold scoring struct (:func:`_fold_scoring_info`) and each batch closes with
+        :func:`~pyradmc.backends.warp.kernels.close_fold_batch`.
         """
         gi, density, material = self._upload_grid(device)
         si, voxel_mass = self._upload_scoring(scoring, device)
         tab = self._upload_tables(source.max_energy, pcut, ecut, device, with_gs=msc_model_gs == 1)
         n_beamlets = source.n_beamlets
         n_voxels = scoring.n_voxels
+        fold_spec = contraction if isinstance(contraction, _FoldSpec) else None
+        # The int64 entries per beamlet in a lane's quanta map: the scoring voxels of
+        # a dense column, or the deposit fold's sub-accumulator block.
+        column = n_voxels
+        n_sub = 1
+        if fold_spec is not None:
+            n_sub = _fold_subslots(min(beamlet_group_size, n_beamlets))
+            column = n_sub * _FOLD_SLOT_STRIDE
+            same = fold_spec.weights.device == wp.get_device(device)
+            weights_dev = fold_spec.weights if same else wp.clone(fold_spec.weights, device=device)
+            coef = wp.empty(n_voxels, dtype=wp.float64, device=device)
+            wp.launch(
+                kernels.fold_coefficients,
+                dim=n_voxels,
+                inputs=[weights_dev, voxel_mass, float(fold_spec.scale), coef],
+                device=device,
+            )
+            si = _fold_scoring_info(scoring, coef, device, n_sub, _FOLD_SLOT_STRIDE)
         # Route by capability: the built-in lattice generates in-kernel from analytic
         # bounds; the exact spectral beamlet type generates in-kernel from its
         # uploaded spectrum tables (a subclass keeps pre-sampling — exact-type check,
@@ -2281,7 +2583,7 @@ class WarpEngine:
         # the card between calls would starve whatever runs next.
         workspaces = self._acquire_workspaces(device, lanes, max_capacity)
         lane_resources = [
-            ws.lane(wp.zeros(max_group * n_voxels, dtype=wp.int64, device=device), lanes > 1)
+            ws.lane(wp.zeros(max_group * column, dtype=wp.int64, device=device), lanes > 1)
             for ws in workspaces
         ]
         counters = workspaces[0]
@@ -2308,12 +2610,25 @@ class WarpEngine:
         n_chunks, voxel_chunk = kernels.truncation_chunk_layout(
             n_voxels, max_group, int(getattr(wp.get_device(device), "sm_count", 0) or 0)
         )
-        col_max_dev = wp.zeros(max_group, dtype=wp.float64, device=device)
-        chunk_counts_dev = wp.zeros(max_group * n_chunks, dtype=wp.int32, device=device)
+        col_max_dev = chunk_counts_dev = None
+        if contraction is None:
+            col_max_dev = wp.zeros(max_group, dtype=wp.float64, device=device)
+            chunk_counts_dev = wp.zeros(max_group * n_chunks, dtype=wp.int32, device=device)
         # The contraction reduces per (column, chunk) on the same layout, then per
-        # column in chunk order: a fixed float64 order on this device.
+        # column in chunk order: a fixed float64 order on this device. The deposit
+        # fold has reduced per beamlet already; its batch closes into g1/g2 with the
+        # per-history value of one weighted quantum, quantum / (K * per_batch).
         contraction_buffers = None
-        if contraction is not None:
+        fold_buffers = None
+        if fold_spec is not None:
+            fold_buffers = (
+                wp.zeros(max_group, dtype=wp.float64, device=device),
+                wp.zeros(max_group, dtype=wp.float64, device=device),
+                float(ENERGY_QUANTUM_MEV) / (fold_spec.scale * float(per_batch)),
+                counters.book("fold_q_max"),
+                n_sub,
+            )
+        elif contraction is not None:
             if isinstance(contraction, wp.array):
                 # Validated flat by device_voxel_weights; read where it lies, or copied
                 # device to device for a shard elsewhere. Never written.
@@ -2375,7 +2690,14 @@ class WarpEngine:
             total_q=total_q,
             device=device,
             contraction=contraction_buffers,
+            fold=fold_buffers,
         )
+        # The per-column running sums of either contraction (None for the Dij).
+        column_sums = None
+        if contraction_buffers is not None:
+            column_sums = contraction_buffers[2:4]
+        elif fold_buffers is not None:
+            column_sums = fold_buffers[:2]
 
         while (group_start := next_group()) is not None:
             group = min(beamlet_group_size, n_beamlets - group_start)
@@ -2394,12 +2716,12 @@ class WarpEngine:
             # max_group, so zero_() would charge a trailing short group the full
             # group's clear. Every dense launch below is dimensioned from ``group``,
             # so the tail beyond it is never read.
-            span = group * n_voxels
-            if contraction_buffers is None:
+            span = group * column
+            if column_sums is None:
                 wp.launch(kernels.fill_float64, dim=span, inputs=[s1, 0.0], device=device)
                 wp.launch(kernels.fill_float64, dim=span, inputs=[s2, 0.0], device=device)
             else:
-                for sums in contraction_buffers[2:4]:
+                for sums in column_sums:
                     wp.launch(kernels.fill_float64, dim=group, inputs=[sums, 0.0], device=device)
             # The fold resets every entry it consumes, so a quanta map only needs
             # clearing once per group rather than once per batch. It is still cleared
@@ -2446,15 +2768,15 @@ class WarpEngine:
                 # sequential path needs nothing here: every launch it made is on the
                 # default stream, and the readbacks below synchronize that stream.
                 wp.synchronize_device(device)
-            if contraction_buffers is not None:
+            if column_sums is not None:
                 # The group's contraction is complete in g1/g2: per-column mean and
                 # sigma on the host (the BatchedDoseScorer estimator), no dense map,
                 # no truncation. Same books as the Dij path, read in one transfer
                 # (it synchronizes the default stream).
                 books = counters.read_books()
                 _check_majorant(books)
-                g1 = contraction_buffers[2].numpy()[:group].astype(np.float64)
-                g2 = contraction_buffers[3].numpy()[:group].astype(np.float64)
+                g1 = column_sums[0].numpy()[:group].astype(np.float64)
+                g2 = column_sums[1].numpy()[:group].astype(np.float64)
                 mean = g1 / n_batches
                 if n_batches == 1:
                     sigma = np.zeros_like(mean)
@@ -2467,6 +2789,7 @@ class WarpEngine:
                     deposited_quanta += books["total_q"]
                 escaped_quanta += books["escaped"]
                 unscored_quanta += books["unscored"]
+                shard.fold_abs_quanta_max = books["fold_q_max"]  # whole-call maximum
                 shard.blocks[group_start] = (mean, sigma)
                 emitter.tick(group * n_histories_per_beamlet)
                 continue
@@ -2875,14 +3198,37 @@ class WarpEngine:
         total_q,
         device,
         contraction=None,
+        fold=None,
     ) -> None:
         """Fold one batch's quanta map into the running sums (accumulate_dij_batch).
 
         With ``contraction`` buffers the batch is contracted instead: per (column,
         chunk) partials, then per column in chunk order into ``g1``/``g2``. Both
         launches go on the fold stream, so the lanes' batch-ordered folds keep the
-        contraction's float64 order fixed as well.
+        contraction's float64 order fixed as well. With ``fold`` buffers (the deposit
+        fold) ``edep`` holds the beamlets' accumulators and one launch closes the
+        batch per beamlet (:func:`~pyradmc.backends.warp.kernels.close_fold_batch`),
+        on the same stream and in the same batch order.
         """
+        if fold is not None:
+            g1, g2, batch_scale, abs_max, n_sub = fold
+            _launch(
+                kernels.close_fold_batch,
+                group,
+                [
+                    edep,
+                    n_sub,
+                    _FOLD_SLOT_STRIDE,
+                    float(batch_scale),
+                    g1,
+                    g2,
+                    total_q,
+                    abs_max,
+                ],
+                device,
+                stream,
+            )
+            return
         if contraction is not None:
             weights, partial, g1, g2, n_chunks, voxel_chunk = contraction
             _launch(
@@ -4893,6 +5239,7 @@ class WarpEngine:
         gi.r_inner_sq = gi.r_outer_sq = 0.0
         gi.r_edges_sq = _no_shells(device)
         gi.z_edges = _no_shells(device)
+        _fill_no_fold(gi, gi.n_voxels, device)
         # The magnetic field rides in the same struct so that no kernel signature
         # changes: b_mode routes the electron kernel's per-substep lookup (uniform:
         # the three scalars; nearest/trilinear: the vec3 map with its own geometry).

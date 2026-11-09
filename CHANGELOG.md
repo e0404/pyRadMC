@@ -280,6 +280,28 @@ without a field, so results are not byte-identical to the previous release.
 
 ### Changed
 
+- **Warp beamlet contraction folds each deposit straight into its beamlet**
+  (`WarpEngine.run_beamlet_contraction(fold="deposit")`, the new default). Each deposit's
+  tally quanta are weighted at the deposit by `K a_v / m_v` and added, rounded to an
+  integer, to an int64 accumulator of the beamlet, so cost and memory follow the
+  histories instead of `beamlets x scoring voxels`, and a group holds every beamlet the
+  int32 history index allows. Deterministic on a device (integer atomics) and bitwise
+  inert to group size, sub-accumulator count and batch lanes (test-pinned). Same
+  histories, estimator and energy books as before; **values move** by the rounding of
+  each weighted deposit, at most half a weighted quantum `1/K`, `K` a per-call power of
+  two (`2**-56` of `max|a/m| * E_max` per deposit): measured on the TG-119 study's leaf
+  edge gradients at 6e-11 to 5e-10 of the largest value and below 5e-5 of its sigma, and
+  ~1e-13 relative on the test phantoms. An int64 guard reruns a call at a smaller `K`
+  should its weights exhaust the headroom. `fold="dense"` keeps the former per-batch
+  dense fold as the verification instrument. TG-119 study gradient (RTX 4070 Laptop,
+  2535 MHz, 1000 histories per edge, best of 5): 1THA232 1.41 -> 0.17 s (4 deg, 7020
+  edges) and 0.70 -> 0.093 s (8 deg); 1THA210 0.28 -> 0.081 s and 0.165 -> 0.042 s. The
+  uncropped scoring grid now costs about the same as the gradient box (0.177 s and
+  0.095 s on 1THA232). With one to four beamlets of millions of histories on a small grid
+  the dense fold stays up to ~8 % faster; pass `fold="dense"` there if it matters. The
+  fold's index choice in the shared deposit path costs plain `run`/`run_dij` about
+  0.5 % / 0.3 % wall time (docs/decisions.md); their results are byte-identical.
+
 - Warp queue drain: rounds are launched blind at queue capacity and the counts read back
   once per block instead of before every launch (`WarpEngine(drain_rounds=...)`; default
   adaptive on CUDA, host-sized on cpu, `0` restores the old schedule). Results are

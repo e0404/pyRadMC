@@ -1,12 +1,14 @@
 """Beamlet contraction on Warp: the Dij group machinery with a contraction fold.
 
 ``WarpEngine.run_beamlet_contraction`` transports exactly the histories
-``run_dij`` transports (same routes, groups and mapping) and replaces only the
-per-batch fold: each batch's quanta map is contracted with the voxel weights per
-(column, chunk) in a fixed order, so no dense dose map, truncation or compaction
-exists. Pinned against its own untruncated Dij contracted afterwards (same
-target, float64 rounding apart), against itself run to run (bitwise), across
-batch lanes (bitwise), and statistically against the reference contraction.
+``run_dij`` transports (same routes and mapping) and replaces only the scoring: by
+default each deposit is weighted and folded into its beamlet's int64 accumulator
+(the deposit fold, pinned against the dense fold in
+``test_contraction_deposit_fold_warp``), so no dense dose map, truncation or
+compaction exists. Pinned against its own untruncated Dij contracted afterwards
+(same target, float64 rounding and the deposit fold's weighted quantum apart, both
+orders below the tolerance), against itself run to run (bitwise), across batch
+lanes (bitwise), and statistically against the reference contraction.
 """
 
 from __future__ import annotations
