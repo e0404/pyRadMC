@@ -242,7 +242,7 @@ class GridInfo:
     air_on: int
     air_safety: wp.array3d(dtype=float)
     # --- beamlet column layout and the deposit fold (scoring geometry only) --------
-    # ``column_stride`` is the int64 offset between beamlet columns of ``edep``: the
+    # ``column_stride`` is the int32 offset between beamlet columns of ``edep``: the
     # scoring voxel count for a dense map, the sub-accumulator block for a fold.
     column_stride: int
     fold_on: int

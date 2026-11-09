@@ -189,17 +189,22 @@ def test_deposit_fold_rescales_when_the_int64_headroom_would_be_exceeded(
 ) -> None:
     """A scale far past the int64 budget is caught by the guard and the call rerun.
 
-    ``_FOLD_SCALE_BITS = 66`` puts the a-priori budget above ``2**63``; the per-batch
-    absolute tally then proves the accumulators may have wrapped, and the call is
-    repeated (same seeds, same transport) at the largest safe power-of-two scale,
-    which is finer than the default one here.
+    ``_FOLD_SCALE_BITS = 74`` makes the accumulators really wrap: with the guard off
+    the result is wrong, which proves the test has power. With it on, the per-batch
+    absolute tally proves the accumulators may have wrapped, and the call is repeated
+    (same seeds, same transport) at the largest safe power-of-two scale, which is
+    finer than the default one here.
     """
     engine = _engine(device)
     a = _weights(engine.grid.shape)
     kwargs = dict(n_histories_per_beamlet=800, n_batches=8, seed=SEED)
     dense = engine.run_beamlet_contraction(_source(), a, fold="dense", **kwargs)
     default_scale = _scale(a, ScoringGrid.for_grid(engine.grid), 100, _source().max_energy)
-    monkeypatch.setattr(warp_engine, "_FOLD_SCALE_BITS", 66)
+    monkeypatch.setattr(warp_engine, "_FOLD_SCALE_BITS", 74)
+    with monkeypatch.context() as unguarded:
+        unguarded.setattr(warp_engine, "_FOLD_GUARD_BITS", 1000)  # never fires
+        wrapped = engine.run_beamlet_contraction(_source(), a, **kwargs)
+    assert np.max(np.abs(wrapped.values - dense.values)) > 0.1 * np.max(np.abs(dense.values))
     with caplog.at_level(logging.INFO, logger=warp_engine.__name__):
         deposit = engine.run_beamlet_contraction(_source(), a, **kwargs)
     assert any("rescal" in record.getMessage() for record in caplog.records)
