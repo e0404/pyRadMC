@@ -615,8 +615,12 @@ def _tally_index(
     rounded to the nearest integer (``floor(x + 1/2)``, either sign) and added with
     an int64 atomic: integer addition is associative, so the accumulators are
     bit-reproducible run to run whatever order the threads arrive in (AGENTS.md
-    2.3). The rounding is the fold's only departure from the dense fold, at most
-    half a weighted quantum ``1/K`` per deposit.
+    2.3). The rounding is the fold's one departure from the dense fold beyond float64
+    rounding, at most half a weighted quantum ``1/K`` per deposit. (The float64 terms:
+    the coefficient is a fast_math quotient, see ``fold_coefficients``, and the
+    product with ``0.5`` added may be contracted to one fused multiply-add; both are
+    a few ulps, fixed per target, and the dense fold rounds its own products in a
+    different order.)
 
     The beamlet's block (``base = beamlet * si.column_stride``) holds
     ``si.fold_mask + 1`` sub-accumulators of ``si.fold_stride`` int64s each, picked
@@ -1035,28 +1039,84 @@ def close_contraction_batch(
 
 
 @wp.kernel
-def fold_ratio_max(
+def fold_ratio_seed(
     weights: wp.array(dtype=wp.float64),
     voxel_mass: wp.array(dtype=wp.float64),
     n_voxels: int,
     chunk: int,
-    out: wp.array(dtype=wp.float64),
+    extremes: wp.array(dtype=wp.float64),
+    weighted: wp.array(dtype=wp.int32),
 ):
-    """``max_v |a_v| / m_v`` over the voxels with mass, one chunk per thread.
+    """Seed the deposit fold's exact ratio search; one chunk of voxels per thread.
 
-    A maximum is exact and order-independent, so the float64 ``atomic_max`` that
-    combines the chunks is deterministic (unlike a float sum). ``out`` must start at
-    zero.
+    Over the voxels with mass *and* a nonzero weight: an approximate
+    ``max |a_v| / m_v`` into ``extremes[0]``, and the exact extremes of their masses
+    into ``extremes[1]`` (min) and ``extremes[2]`` (max); ``weighted[0]`` becomes 1 if
+    any such voxel exists. The engine starts ``extremes`` at ``[0, FLOAT_MAX, 0]``.
+
+    The quotient is approximate: this module compiles with fast_math, whose division
+    need not be correctly rounded, and an overflowing quotient need not even be
+    meaningful. It therefore only tells :func:`fold_ratio_octave` where to start; the
+    octave itself is decided there, without dividing. Maxima and minima are exact and
+    order-independent, so the float64 atomics are deterministic.
     """
     start = wp.tid() * chunk
     stop = wp.min(start + chunk, n_voxels)
-    m = wp.float64(0.0)
+    r_hi = wp.float64(0.0)
+    m_lo = wp.float64(1.7976931348623157e308)
+    m_hi = wp.float64(0.0)
+    found = wp.int32(0)
     for v in range(start, stop):
         mass = voxel_mass[v]
-        if mass > wp.float64(0.0):
-            m = wp.max(m, wp.abs(weights[v]) / mass)
-    if m > wp.float64(0.0):
-        wp.atomic_max(out, 0, m)
+        a = wp.abs(weights[v])
+        if mass > wp.float64(0.0) and a > wp.float64(0.0):
+            r_hi = wp.max(r_hi, a / mass)
+            m_lo = wp.min(m_lo, mass)
+            m_hi = wp.max(m_hi, mass)
+            found = wp.int32(1)
+    if found != wp.int32(0):
+        wp.atomic_max(extremes, 0, r_hi)
+        wp.atomic_min(extremes, 1, m_lo)
+        wp.atomic_max(extremes, 2, m_hi)
+        wp.atomic_max(weighted, 0, wp.int32(1))
+
+
+@wp.kernel
+def fold_ratio_octave(
+    weights: wp.array(dtype=wp.float64),
+    voxel_mass: wp.array(dtype=wp.float64),
+    n_voxels: int,
+    chunk: int,
+    hi: wp.float64,
+    lo: wp.float64,
+    flags: wp.array(dtype=wp.int32),
+):
+    """Place ``max |a_v| / m_v`` against two powers of two, without dividing.
+
+    Over the voxels with mass and a nonzero weight, ``flags[0]`` becomes 1 if some
+    ``|a_v| >= hi m_v`` (the maximum ratio is at least ``hi``) and ``flags[1]`` if
+    some ``|a_v| >= lo m_v``. The engine passes powers of two for which every
+    ``hi m_v`` and ``lo m_v`` is a normal float (see its ``_octave_window``): such a
+    product is exact — multiplication is correctly rounded under fast_math too, and
+    there is no addition to contract — so each flag is the exact truth on every
+    target, and the octave the engine settles on cannot depend on how a device divides.
+    ``flags`` must start at zero.
+    """
+    start = wp.tid() * chunk
+    stop = wp.min(start + chunk, n_voxels)
+    above = wp.int32(0)
+    reached = wp.int32(0)
+    for v in range(start, stop):
+        mass = voxel_mass[v]
+        a = wp.abs(weights[v])
+        if mass > wp.float64(0.0) and a > wp.float64(0.0) and a >= hi * mass:
+            above = wp.int32(1)
+        if mass > wp.float64(0.0) and a > wp.float64(0.0) and a >= lo * mass:
+            reached = wp.int32(1)
+    if above != wp.int32(0):
+        wp.atomic_max(flags, 0, wp.int32(1))
+    if reached != wp.int32(0):
+        wp.atomic_max(flags, 1, wp.int32(1))
 
 
 @wp.kernel
@@ -1068,8 +1128,13 @@ def fold_coefficients(
 ):
     """Write the deposit fold's per-voxel factor ``K a_v / m_v``, zero where ``m_v = 0``.
 
-    ``K`` is a power of two, so the product is the exact scaling of ``a_v / m_v``;
-    a massless voxel scores nothing, as ``_batch_dose`` returns zero there.
+    ``K`` is a power of two, so multiplying by it is exact while the product stays a
+    normal float (it moves the exponent only). The quotient ``a_v / m_v``
+    is this module's fast_math division: within a few ulps of the exact ratio, and the
+    same bits for the same inputs on one target, which is all the fold's bit
+    reproducibility needs — the coefficients are formed here, on the device that
+    transports, whichever device the weights came from. A massless voxel scores
+    nothing, as ``_batch_dose`` returns zero there.
     """
     v = wp.tid()
     mass = voxel_mass[v]

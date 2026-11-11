@@ -34,10 +34,11 @@ from __future__ import annotations
 
 import logging
 import math
+import sys
 import threading
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -347,17 +348,20 @@ _FOLD_SLOT_STRIDE = 4
 quanta, and one pad to a 32-byte sector."""
 
 _FOLD_SCALE_BITS = 56
-"""``K`` puts the largest weighted sum a unit-weight batch could reach,
-``max |a/m| * per_batch * E_max / quantum`` (every history's full energy in the
-voxel of largest ``|a/m|``), in ``[2**55, 2**56)``.
+"""``K`` puts ``2**(e-1) * per_batch * E_max / quantum`` in ``[2**55, 2**56)``, where
+``max |a/m|`` lies in ``[2**(e-1), 2**e)`` (its exact octave, :func:`_fold_ratio_octave`).
+The largest weighted sum a unit-weight batch could reach, ``max |a/m| * per_batch *
+E_max / quantum`` (every history's full energy in the voxel of largest ``|a/m|``),
+therefore sits in ``[2**55, 2**57)``.
 
-That leaves a factor of 2**6 below :data:`_FOLD_GUARD_BITS` for source weights
-above one (the edge derivatives are not bounded by one), soft-photon roulette and
-the dose-to-water factor; the guard catches anything beyond it. The budget itself
-is far from reached in practice: on the TG-119 study's leaf-edge gradients
-(1THA232, 4 deg arc, 1000 histories per edge) the measured per-beamlet bound sat
-2**11 below it. The weighted quantum ``1/K`` is ``2**-55..2**-56`` of that batch
-budget, so each deposit's rounding error is at most ``2**-56`` of
+That leaves at least a factor of 2**5 below :data:`_FOLD_GUARD_BITS` for source
+weights above one (the edge derivatives are not bounded by one), soft-photon
+roulette and the dose-to-water factor; the guard catches anything beyond it. The
+budget itself is far from reached in practice: on the TG-119 study's leaf-edge
+gradients (1THA232, 4 deg arc, 1000 histories per edge) the measured per-beamlet
+bound sat 2**11 below the budget as it was then chosen (from ``max |a/m|`` itself,
+up to one octave lower than now). The weighted quantum ``1/K`` is at most ``2**-55``
+of that batch budget, so each deposit's rounding error is at most ``2**-56`` of
 ``max|a/m| * E_max`` on a per-history value (or ``2**-53`` relative, for a single
 product beyond ``2**53``, where float64 rounding of the product takes over)."""
 
@@ -367,28 +371,43 @@ _FOLD_GUARD_BITS = 62
 at a smaller ``K``."""
 
 
-def _fold_scale(ratio_max: float, per_batch: int, max_energy: float) -> float:
-    """Return the deposit fold's weighted-quanta scale ``K``: a power of two, per call.
+def _fold_scale(ratio: float, per_batch: int, max_energy: float) -> float:
+    """Return the budget rule's weighted-quanta scale ``K``: a power of two.
 
-    ``ratio_max`` is ``max_v |a_v| / m_v`` over the voxels with mass. ``K`` is the
-    power of two with ``ratio_max * per_batch * max_energy / quantum * K`` in
-    ``[2**(B-1), 2**B)``, ``B = _FOLD_SCALE_BITS``; a power of two so that
-    ``K a_v / m_v`` is the exact scaling of the float64 ratio. Zero weights take
-    ``K = 1`` (every coefficient is zero).
+    ``K`` is the power of two with ``ratio * per_batch * max_energy / quantum * K``
+    in ``[2**(B-1), 2**B)``, ``B = _FOLD_SCALE_BITS``; a power of two so that
+    multiplying by it moves exponents only. Zero weights take ``K = 1`` (every
+    coefficient is zero). The engine applies this rule at ``ratio = 2**(e-1)``, the
+    floor of the exact octave of ``max |a/m|``, in integer form
+    (:func:`_fold_scale_exponent`), never at a computed quotient.
     """
-    budget = ratio_max * per_batch * max_energy / ENERGY_QUANTUM_MEV
+    budget = ratio * per_batch * max_energy / ENERGY_QUANTUM_MEV
     if not budget > 0.0:
         return 1.0
     _, exponent = math.frexp(budget)  # budget in [2**(e-1), 2**e)
     return math.ldexp(1.0, _FOLD_SCALE_BITS - exponent)
 
 
-def _fold_rescale(ratio_max: float, abs_quanta_max: int) -> float:
-    """Return the largest power-of-two ``K`` keeping ``(K ratio + 1/2) Q`` below the guard.
+def _fold_scale_exponent(ratio_exponent: int, per_batch: int, max_energy: float) -> int:
+    """Return ``log2 K`` for a call whose ``max |a/m|`` lies in ``[2**(e-1), 2**e)``.
 
-    ``Q`` is the largest per-beamlet, per-batch ``sum |q|`` a call measured; a run
-    at the returned scale is therefore safe by construction (one bit of margin
-    below :data:`_FOLD_GUARD_BITS`).
+    :func:`_fold_scale` at the octave's floor ``2**(e-1)``, in integers: the budget
+    ``2**(e-1) * C``, ``C = per_batch * max_energy / quantum``, has exponent
+    ``e - 1 + exponent(C)`` exactly. ``C`` is formed on the host in IEEE float64
+    (the same products, in the same order, as :func:`_fold_scale`), and ``e`` is
+    decided without dividing, so the result is the same on every target.
+    """
+    _, c_exponent = math.frexp(per_batch * max_energy / ENERGY_QUANTUM_MEV)
+    return _FOLD_SCALE_BITS - (ratio_exponent - 1) - c_exponent
+
+
+def _fold_rescale_exponent(ratio_exponent: int, abs_quanta_max: int) -> int:
+    """Return the largest ``log2 K`` keeping ``(K 2**e + 1/2) Q`` below the guard.
+
+    ``Q`` is the largest per-beamlet, per-batch ``sum |q|`` a call measured and
+    ``2**e`` the exact power-of-two bound above ``max |a/m|``; a run at the returned
+    scale is therefore safe by construction (one bit of margin below
+    :data:`_FOLD_GUARD_BITS`).
     """
     room = math.ldexp(1.0, _FOLD_GUARD_BITS - 1) / abs_quanta_max - 0.5
     if not room > 0.0:
@@ -396,8 +415,119 @@ def _fold_rescale(ratio_max: float, abs_quanta_max: int) -> float:
             f"a beamlet batch deposited {abs_quanta_max} quanta in absolute value, beyond "
             "the deposit fold's int64 range at any scale; use fold='dense'"
         )
-    _, exponent = math.frexp(room / ratio_max)
-    return math.ldexp(1.0, exponent - 1)
+    _, exponent = math.frexp(room)  # room in [2**(x-1), 2**x): K 2**e = 2**(x-1) <= room
+    return exponent - 1 - ratio_exponent
+
+
+_FOLD_SEED_CHUNK = 256
+"""Voxels per thread in the fold's ratio reductions (:func:`_fold_ratio_octave`)."""
+
+
+@dataclass(frozen=True)
+class _RatioSeed:
+    """What :func:`_fold_ratio_seed` reads back: where the exact ratio search starts.
+
+    ``ratio_max`` is the fast_math quotient's maximum (approximate); the mass
+    extremes, over the voxels with mass and a nonzero weight, are exact.
+    """
+
+    ratio_max: float
+    mass_min: float
+    mass_max: float
+    weighted: bool
+
+
+def _fold_ratio_seed(flat: wp.array, voxel_mass: wp.array, device: str) -> _RatioSeed:
+    """Launch :func:`~pyradmc.backends.warp.kernels.fold_ratio_seed` and read it back."""
+    n_voxels = flat.shape[0]
+    extremes = wp.array([0.0, sys.float_info.max, 0.0], dtype=wp.float64, device=device)
+    weighted = wp.zeros(1, dtype=wp.int32, device=device)
+    wp.launch(
+        kernels.fold_ratio_seed,
+        dim=(n_voxels + _FOLD_SEED_CHUNK - 1) // _FOLD_SEED_CHUNK,
+        inputs=[flat, voxel_mass, n_voxels, _FOLD_SEED_CHUNK, extremes, weighted],
+        device=device,
+    )
+    ext = extremes.numpy()
+    return _RatioSeed(float(ext[0]), float(ext[1]), float(ext[2]), bool(weighted.numpy()[0]))
+
+
+def _octave_window(mass_min: float, mass_max: float) -> tuple[int, int]:
+    """Return the ``k`` range over which ``2**k m`` is a normal float for every mass.
+
+    Masses in ``[mass_min, mass_max]``, both positive: ``2**k m >= 2**-1022`` needs
+    ``k >= -1021 - exponent(mass_min)`` and ``2**k m < 2**1023`` holds for
+    ``k <= 1023 - exponent(mass_max)`` (``frexp`` exponents); ``2**k`` itself must be
+    normal. Within it the octave predicates are exact (no product rounds, none
+    overflows), which is what makes the search target-independent.
+    """
+    _, lo = math.frexp(mass_min)
+    _, hi = math.frexp(mass_max)
+    return max(-1022, -1021 - lo), min(1023, 1023 - hi)
+
+
+def _seed_exponent(value: float, k_lo: int, k_hi: int) -> int:
+    """Return the octave exponent ``e`` of a seed, clamped so ``2**(e-1)`` and ``2**e`` fit."""
+    if math.isfinite(value) and value > 0.0:
+        _, e = math.frexp(value)
+    else:
+        e = k_hi if value > 0.0 else k_lo + 1  # an overflowed quotient, or none at all
+    return min(max(e, k_lo + 1), k_hi)
+
+
+def _fold_ratio_octave(flat: wp.array, voxel_mass: wp.array, device: str) -> int | None:
+    """Return ``e`` with ``max |a_v| / m_v`` in ``[2**(e-1), 2**e)``, decided without dividing.
+
+    Over the voxels with mass and a nonzero weight; ``None`` if there is none (the
+    contraction is zero). The fast_math quotient seeds the search
+    (:func:`_fold_ratio_seed`); each step then asks the device, exactly, whether the
+    maximum reaches ``2**e`` or ``2**(e-1)``
+    (:func:`~pyradmc.backends.warp.kernels.fold_ratio_octave`) and moves ``e`` one
+    octave toward the answer. The steps are monotone, so a seed within an ulp of the
+    truth takes one launch and a seed on the wrong side of a power of two two, and
+    every seed — any target's quotient — ends on the same ``e``.
+    """
+    seed = _fold_ratio_seed(flat, voxel_mass, device)
+    if not seed.weighted:
+        return None
+    k_lo, k_hi = _octave_window(seed.mass_min, seed.mass_max)
+    out_of_range = ValueError(
+        "the voxel weights' |a/m| range lies outside the deposit fold's float64 range; "
+        "use fold='dense'"
+    )
+    if k_lo + 1 > k_hi:
+        raise out_of_range
+    e = _seed_exponent(seed.ratio_max, k_lo, k_hi)
+    n_voxels = flat.shape[0]
+    flags = wp.zeros(2, dtype=wp.int32, device=device)
+    for _ in range(k_hi - k_lo + 1):
+        flags.zero_()
+        wp.launch(
+            kernels.fold_ratio_octave,
+            dim=(n_voxels + _FOLD_SEED_CHUNK - 1) // _FOLD_SEED_CHUNK,
+            inputs=[
+                flat,
+                voxel_mass,
+                n_voxels,
+                _FOLD_SEED_CHUNK,
+                math.ldexp(1.0, e),
+                math.ldexp(1.0, e - 1),
+                flags,
+            ],
+            device=device,
+        )
+        above, reached = (bool(f) for f in flags.numpy())
+        if above:  # max >= 2**e
+            if e == k_hi:
+                raise out_of_range
+            e += 1
+        elif not reached:  # max < 2**(e-1)
+            if e - 1 == k_lo:
+                raise out_of_range
+            e -= 1
+        else:
+            return e
+    raise AssertionError("unreachable: the octave search is monotone within its window")
 
 
 def _fold_beamlet_bytes(lanes: int) -> int:
@@ -514,12 +644,18 @@ class _FoldSpec:
 
     ``weights`` is the flat float64 weight array on some device (each shard reads it
     there or copies it, as the dense contraction does); ``scale`` is ``K``
-    (:func:`_fold_scale`) and ``ratio_max`` the ``max |a_v| / m_v`` it came from.
+    (:func:`_fold_scale_exponent`) and ``ratio_exponent`` the exact octave ``e`` of
+    ``max |a_v| / m_v`` it came from, ``None`` when no voxel with mass is weighted.
     """
 
     weights: wp.array
     scale: float
-    ratio_max: float
+    ratio_exponent: int | None
+
+    @property
+    def ratio_bound(self) -> float:
+        """``2**e``: the exact power of two above ``max |a_v| / m_v`` (0 for zero weights)."""
+        return 0.0 if self.ratio_exponent is None else math.ldexp(1.0, self.ratio_exponent)
 
 
 @dataclass
@@ -2099,13 +2235,15 @@ class WarpEngine:
             array.
             Deterministic on a device for any group size, lane count or arrival
             order, since integer addition is associative. ``K`` is a power of two
-            chosen per call (:func:`_fold_scale`) so that a unit-weight batch's
-            largest possible weighted sum sits near ``2**56``, and the *only*
-            difference from the dense fold is the rounding of each weighted
-            deposit: at most half a weighted quantum, i.e. ``2**-56`` of
-            ``max_v |a_v| / m_v * E_max`` per deposit on a per-history value
-            (test-pinned against ``"dense"``; see :data:`_FOLD_SCALE_BITS` and the
-            measurements in the changelog). An int64
+            chosen per call from the exact octave of ``max_v |a_v| / m_v``
+            (:func:`_fold_scale_exponent`, decided without dividing, so host and
+            device weights get the same ``K`` on any device) so that a unit-weight
+            batch's largest possible weighted sum sits in ``[2**55, 2**57)``, and
+            beyond float64 rounding the only difference from the dense fold is the
+            rounding of each weighted deposit: at most half a weighted quantum, i.e.
+            ``2**-56`` of ``max_v |a_v| / m_v * E_max`` per deposit on a per-history
+            value (test-pinned against ``"dense"``; see :data:`_FOLD_SCALE_BITS` and
+            the measurements in the changelog). An int64
             guard measures each beamlet's per-batch ``sum |q|``; should a call's
             weights push ``(K max|a/m| + 1/2) sum |q|`` to ``2**62``, the whole
             call is rerun (same seeds, same histories) at the largest safe scale,
@@ -2159,22 +2297,23 @@ class WarpEngine:
                 weights, scoring, n_histories_per_beamlet // max(n_batches, 1), source
             )
             run = self._compute_dij(source, **common, contraction=spec)
-            bound = (spec.scale * spec.ratio_max + 0.5) * float(run.fold_abs_quanta_max)
+            bound = (spec.scale * spec.ratio_bound + 0.5) * float(run.fold_abs_quanta_max)
             logger.debug(
                 "deposit fold: scale 2**%d, largest beamlet-batch bound 2**%.1f",
                 int(math.log2(spec.scale)),
                 math.log2(bound) if bound > 0.0 else -math.inf,
             )
             if bound >= math.ldexp(1.0, _FOLD_GUARD_BITS):
-                scale = _fold_rescale(spec.ratio_max, run.fold_abs_quanta_max)
+                assert spec.ratio_exponent is not None  # zero weights cannot reach the guard
+                k = _fold_rescale_exponent(spec.ratio_exponent, run.fold_abs_quanta_max)
                 logger.info(
                     "deposit fold: a beamlet batch's weighted sum could reach 2**%.1f of the "
                     "int64 range at scale 2**%d; rescaling to 2**%d and rerunning the call",
                     math.log2(bound),
                     int(math.log2(spec.scale)),
-                    int(math.log2(scale)),
+                    k,
                 )
-                spec = _FoldSpec(spec.weights, scale, spec.ratio_max)
+                spec = replace(spec, scale=math.ldexp(1.0, k))
                 run = self._compute_dij(source, **common, contraction=spec)
         return ContractionResult(
             values=np.concatenate([run.blocks[gs][0] for gs in run.group_starts]),
@@ -2199,10 +2338,12 @@ class WarpEngine:
         """Put the weights on a device and derive the deposit fold's scale ``K`` there.
 
         Host weights go to the engine's device (a shard there reads them in place),
-        device weights stay where they are; ``max |a_v| / m_v`` is reduced on that
-        device with the scoring masses, so both give the same ``K`` and therefore
-        bit-identical results (the ratio is a correctly rounded division and the
-        maximum is exact).
+        device weights stay where they are. ``K`` depends on the weights only through
+        the exact octave of ``max |a_v| / m_v`` (:func:`_fold_ratio_octave`), which is
+        decided by exact comparisons rather than by this module's fast_math division,
+        so host weights and device weights — on whichever device — give the same
+        ``K``. The per-voxel coefficients are then formed on each transporting
+        device from the same weights, so the results are bit-identical.
         """
         if isinstance(weights, wp.array):
             flat, device = weights, str(weights.device)
@@ -2210,17 +2351,11 @@ class WarpEngine:
             device = self.device
             flat = wp.array(weights.reshape(-1), dtype=wp.float64, device=device)
         _, voxel_mass = self._upload_scoring(scoring, device)
-        n_voxels = scoring.n_voxels
-        chunk = 256
-        ratio_max = wp.zeros(1, dtype=wp.float64, device=device)
-        wp.launch(
-            kernels.fold_ratio_max,
-            dim=(n_voxels + chunk - 1) // chunk,
-            inputs=[flat, voxel_mass, n_voxels, chunk, ratio_max],
-            device=device,
-        )
-        ratio = float(ratio_max.numpy()[0])
-        return _FoldSpec(flat, _fold_scale(ratio, per_batch, source.max_energy), ratio)
+        e = _fold_ratio_octave(flat, voxel_mass, device)
+        if e is None:
+            return _FoldSpec(flat, 1.0, None)  # every coefficient is zero
+        k = _fold_scale_exponent(e, per_batch, source.max_energy)
+        return _FoldSpec(flat, math.ldexp(1.0, k), e)
 
     def _compute_dij(
         self,

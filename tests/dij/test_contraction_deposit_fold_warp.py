@@ -20,7 +20,10 @@ are compared exactly.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
+import math
+from fractions import Fraction
 
 import numpy as np
 import pytest
@@ -68,10 +71,9 @@ def _weights(shape: tuple[int, int, int]) -> np.ndarray:
 
 
 def _scale(a: np.ndarray, scoring: ScoringGrid, per_batch: int, max_energy: float) -> float:
-    mass = scoring.voxel_mass
-    covered = mass > 0.0
-    ratio = float(np.max(np.abs(a[covered]) / mass[covered])) if np.any(covered) else 0.0
-    return warp_engine._fold_scale(ratio, per_batch, max_energy)
+    """The engine's ``K``: the budget rule at the floor of the exact octave of max|a/m|."""
+    e = _exact_octave(a, scoring.voxel_mass)
+    return warp_engine._fold_scale(2.0 ** (e - 1), per_batch, max_energy)
 
 
 def _resolution(scale: float) -> float:
@@ -235,6 +237,74 @@ def test_an_unknown_fold_is_refused() -> None:
         )
 
 
+def _exact_octave(a: np.ndarray, mass: np.ndarray) -> int:
+    """``e`` with ``max |a_v| / m_v`` in ``[2**(e-1), 2**e)``, in exact rational arithmetic."""
+    covered = (mass > 0.0) & (a != 0.0)
+    pairs = zip(a[covered], mass[covered], strict=True)
+    ratio = max(Fraction(abs(float(x))) / Fraction(float(m)) for x, m in pairs)
+    e = 0
+    while ratio >= Fraction(2) ** e:
+        e += 1
+    while ratio < Fraction(2) ** (e - 1):
+        e -= 1
+    return e
+
+
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("power_of_two", [False, True], ids=["general", "power-of-two-max"])
+def test_fold_scale_follows_the_exact_ratio_octave(device: str, power_of_two: bool) -> None:
+    """``K`` comes from the exact octave of ``max|a/m|``, not from a fast_math quotient.
+
+    The fast_math module divides approximately, so a quotient one ulp short of a power
+    of two would put ``K`` an octave off on one target and not on another. ``K`` is the
+    budget rule (:func:`_fold_scale`) applied to the power of two at the bottom of the
+    exact octave, which no rounding of a quotient can move.
+    """
+    engine = _engine(device)
+    scoring = ScoringGrid.for_grid(engine.grid)
+    a = _weights(engine.grid.shape)
+    if power_of_two:
+        a = a / (2.0 * np.max(np.abs(a)))
+        a[3, 4, 5] = -4.0 * scoring.voxel_mass[3, 4, 5]  # max |a/m| is exactly 4
+    e = _exact_octave(a, scoring.voxel_mass)
+    spec = engine._fold_spec(a, scoring, 100, _source())
+    assert spec.scale == warp_engine._fold_scale(2.0 ** (e - 1), 100, _source().max_energy)
+    assert spec.ratio_bound == 2.0**e
+
+
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("factor", [1.0 - 2.0**-52, 1.0 + 2.0**-52, 0.125, 8.0, 0.0, math.inf])
+def test_fold_scale_does_not_depend_on_the_quotient_seed(
+    device: str, factor: float, monkeypatch
+) -> None:
+    """Any target's approximate quotient (here: perturbed, even absurdly) gives the same ``K``.
+
+    The seed only says where the exact search starts; host weights and device weights
+    on any device therefore get the same ``K`` and bit-identical results.
+    """
+    engine = _engine(device)
+    scoring = ScoringGrid.for_grid(engine.grid)
+    a = _weights(engine.grid.shape)
+    a = a / (2.0 * np.max(np.abs(a)))
+    a[3, 4, 5] = 4.0 * scoring.voxel_mass[3, 4, 5]  # on an octave boundary
+    kwargs = dict(n_histories_per_beamlet=400, n_batches=4, seed=SEED)
+    expected_spec = engine._fold_spec(a, scoring, 100, _source())
+    expected = engine.run_beamlet_contraction(_source(), a, **kwargs)
+    seed = warp_engine._fold_ratio_seed
+
+    def perturbed(*args, **kw):
+        s = seed(*args, **kw)
+        return dataclasses.replace(s, ratio_max=s.ratio_max * factor)
+
+    monkeypatch.setattr(warp_engine, "_fold_ratio_seed", perturbed)
+    spec = engine._fold_spec(a, scoring, 100, _source())
+    assert spec.scale == expected_spec.scale
+    assert spec.ratio_bound == expected_spec.ratio_bound == 8.0
+    result = engine.run_beamlet_contraction(_source(), a, **kwargs)
+    np.testing.assert_array_equal(result.values, expected.values)
+    np.testing.assert_array_equal(result.sigma, expected.sigma)
+
+
 class TestFoldScale:
     """The weighted quantum: a power of two putting one batch's budget in its octave."""
 
@@ -250,6 +320,27 @@ class TestFoldScale:
 
     def test_zero_weights_take_unit_scale(self) -> None:
         assert warp_engine._fold_scale(0.0, 500, 6.0) == 1.0
+
+    @pytest.mark.parametrize("ratio_exponent", [-30, -1, 0, 1, 2, 14])
+    @pytest.mark.parametrize(("per_batch", "energy"), [(1, 0.5), (500, 6.0), (10**6, 20.0)])
+    def test_exponent_form_is_the_budget_rule(
+        self, ratio_exponent: int, per_batch: int, energy: float
+    ) -> None:
+        """Integer form of the rule at the octave's floor ``2**(e-1)``: no float to overflow."""
+        k = warp_engine._fold_scale_exponent(ratio_exponent, per_batch, energy)
+        floor = math.ldexp(1.0, ratio_exponent - 1)
+        assert math.ldexp(1.0, k) == warp_engine._fold_scale(floor, per_batch, energy)
+
+    def test_rescale_keeps_the_guard_bound_below_half_the_range(self) -> None:
+        for ratio_exponent in (-5, 0, 3):
+            for q in (1, 2**20 + 1, 2**40, 2**59):
+                k = warp_engine._fold_rescale_exponent(ratio_exponent, q)
+                bound = (math.ldexp(1.0, k + ratio_exponent) + 0.5) * q
+                assert bound < 2.0 ** (warp_engine._FOLD_GUARD_BITS - 1) * (1 + 2**-40)
+                # and it is the largest such power of two
+                assert (math.ldexp(1.0, k + 1 + ratio_exponent) + 0.5) * q > 2.0 ** (
+                    warp_engine._FOLD_GUARD_BITS - 1
+                )
 
 
 class TestFoldGroupSize:
