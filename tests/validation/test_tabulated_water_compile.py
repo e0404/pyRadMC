@@ -202,3 +202,32 @@ def test_tabulated_dose_agrees_across_backends(water: TabulatedData) -> None:
         warp.n_batches,
         mask=mask,
     )
+
+
+@pytest.mark.validation
+def test_a_wider_compile_keeps_every_value_below_the_reference_top(water: TabulatedData) -> None:
+    """Compiling for 60 MeV leaves the 30 MeV table's nodes and values bit for bit.
+
+    The append-only grid (``compiled_grids``) is what makes a VHEE-range table safe
+    for photon work: every quantity on the shared nodes is identical, and so is a
+    lookup at photon energies, up to the float rounding of the grid's inverse
+    spacing (the span it is computed over differs).
+    """
+    epdl_text, eedl_text = _texts()
+    wide = compile_water(epdl_text, eedl_text, e_max=60.0)
+    n_p, n_e = water.photon_energies.size, water.electron_energies.size
+    np.testing.assert_array_equal(wide.photon_energies[:n_p], water.photon_energies)
+    np.testing.assert_array_equal(wide.electron_energies[:n_e], water.electron_energies)
+    for process, values in water.mu_over_rho.items():
+        np.testing.assert_array_equal(wide.mu_over_rho[process][:, :n_p], values)
+    for name in ("restricted_stopping", "radiative_stopping", "moller", "scattering_power"):
+        np.testing.assert_array_equal(getattr(wide, name)[:, :n_e], getattr(water, name))
+    np.testing.assert_array_equal(wide.csda_range[:, :n_e], water.csda_range)
+
+    narrow_xs, wide_xs = TabulatedCrossSections(water), TabulatedCrossSections(wide)
+    assert wide_xs.energy_max >= 60.0
+    for energy in np.geomspace(0.06, 29.0, 41):
+        for process in water.mu_over_rho:
+            assert wide_xs.mu_over_rho(float(energy), WATER, process) == pytest.approx(
+                narrow_xs.mu_over_rho(float(energy), WATER, process), rel=1e-12
+            )

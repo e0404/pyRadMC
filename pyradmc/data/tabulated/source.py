@@ -106,6 +106,16 @@ class TabulatedCrossSections(CrossSectionSource):
         return len(self._data.materials)
 
     @property
+    def energy_max(self) -> float:
+        """The compiled grids' top node (the lower of the two), in MeV.
+
+        Above it every lookup would clamp flat to the top-node value, so the
+        declared domain ends exactly there; recompile with a higher ``--e-max``
+        to go further.
+        """
+        return float(min(self._photon_energies[-1], self._electron_energies[-1]))
+
+    @property
     def provenance(self) -> str:
         """The compiled table's own citation: libraries, stopping strategy, cuts."""
         return self._data.provenance

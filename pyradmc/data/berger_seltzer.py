@@ -19,6 +19,7 @@ per unit mass in cm^2/g; ranges in g/cm^2.
 from __future__ import annotations
 
 import math
+from functools import lru_cache
 
 import numpy as np
 import numpy.typing as npt
@@ -33,6 +34,7 @@ __all__ = [
     "moller_dcs_per_electron",
     "radiative_fit_coefficients",
     "radiative_stopping",
+    "radiative_stopping_power",
     "restricted_collision_stopping",
     "restricted_moller_cross_section",
 ]
@@ -210,27 +212,99 @@ def radiative_stopping(energy: float, coefficients: tuple[float, float, float]) 
     return math.exp(c0 + c1 * log_e + c2 * log_e**2)
 
 
+@lru_cache(maxsize=64)
+def _radiative_model(
+    low_anchors: tuple[tuple[float, float], ...],
+    high_anchors: tuple[tuple[float, float], ...],
+) -> tuple[tuple[float, float, float], float, npt.NDArray[np.float64], npt.NDArray[np.float64]]:
+    """``(fit coefficients, fit top, ln E nodes, g nodes)`` for one material's anchors."""
+    coefficients = radiative_fit_coefficients(low_anchors)
+    top = low_anchors[-1][0]
+    # The junction node is the *fit's* value at its top anchor, so the model is
+    # continuous there by construction whatever the anchor table says.
+    nodes = ((top, radiative_stopping(top, coefficients)), *high_anchors)
+    log_e = np.log([e for e, _ in nodes])
+    g = np.array([s / (e + ELECTRON_MASS_MEV) for e, s in nodes])
+    return coefficients, top, log_e, g
+
+
+def radiative_stopping_power(energy: float, material: MaterialData) -> float:
+    r"""Radiative stopping power of ``material`` at ``energy``, in MeV cm^2/g.
+
+    Two pieces, named here where they are implemented:
+
+    - **At or below the top low anchor** (20 MeV for every registry medium) it is
+      the exact log-quadratic through ``material.radiative_anchors``
+      (:func:`radiative_stopping`), unchanged bit for bit.
+    - **Above it** the ratio
+
+      .. math::
+
+          g(E) = \frac{S_{rad}(E)/\rho}{E + m c^2}
+
+      is interpolated linearly in :math:`\ln E` between the fit's value at its top
+      anchor and the ESTAR nodes ``material.radiative_high_anchors`` (30 MeV to
+      1 GeV), and held constant above the last node. ``g`` is the natural variable:
+      it rises slowly through the incomplete-screening region and tends to
+      :math:`1/X_0` under complete screening (Bethe & Heitler (1934),
+      doi:10.1098/rspa.1934.0140; Tsai, Rev. Mod. Phys. 46, 815 (1974),
+      doi:10.1103/RevModPhys.46.815), where it is constant — which is what the
+      hold above 1 GeV assumes. Against ESTAR (Seltzer-Berger radiative stopping;
+      doi:10.18434/T4NC7P) the interpolation is within 0.25 % from 25 MeV to 1 GeV
+      for every registry medium (``tests/unit/test_radiative_high_energy.py``). The
+      log-quadratic it replaces there was +8 % to +32 % high at 200 MeV.
+
+    Raises
+    ------
+    ValueError
+        Above the fit with no ``radiative_high_anchors``: no data, no answer.
+    """
+    if energy <= 0.0:
+        raise ValueError(f"non-positive electron kinetic energy {energy} MeV")
+    coefficients, top, log_e, g = _radiative_model(
+        material.radiative_anchors, material.radiative_high_anchors
+    )
+    if energy <= top:
+        return radiative_stopping(energy, coefficients)
+    if not material.radiative_high_anchors:
+        raise ValueError(
+            f"no radiative stopping data for {material.name} above {top} MeV "
+            f"(queried at {energy} MeV): add radiative_high_anchors"
+        )
+    return float(np.interp(math.log(energy), log_e, g)) * (energy + ELECTRON_MASS_MEV)
+
+
+_CSDA_GRID_E_LO: float = 1.0e-3
+_CSDA_GRID_E_REF: float = 30.0
+_CSDA_GRID_POINTS: int = 600
+
+
 def csda_range_table(
     material: MaterialData,
+    e_top: float = _CSDA_GRID_E_REF,
 ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
     """CSDA range lookup ``(log_energies, ranges)`` in (log MeV, g/cm^2).
 
     Trapezoidal cumulative integration of ``1/S_total`` on a dense logarithmic grid
-    from 1 keV to 30 MeV, with the total the unrestricted collision plus radiative
-    stopping. Errs on the *under*-estimating side (the grid starts above zero,
-    truncating the sub-keV tail) by well under 1e-4 g/cm^2; see the analytic
-    backend's ``csda_range`` docstring for why that side is acceptable. 600
-    log-spaced points hold the interpolation error well under the 3 percent test
-    tolerance.
+    from 1 keV to 30 MeV, extended append-only at the same spacing up to ``e_top``
+    when that is higher (:func:`~pyradmc.data.grids.extendable_log_grid`: the
+    1 keV - 30 MeV nodes and their cumulative ranges are identical either way), with
+    the total the unrestricted collision plus radiative stopping
+    (:func:`radiative_stopping_power`). Errs on the *under*-estimating side (the
+    grid starts above zero, truncating the sub-keV tail) by well under 1e-4 g/cm^2;
+    see the analytic backend's ``csda_range`` docstring for why that side is
+    acceptable. 600 log-spaced points over the reference span hold the
+    interpolation error well under the 3 percent test tolerance.
     """
-    coefficients = radiative_fit_coefficients(material.radiative_anchors)
-    energies = np.geomspace(1.0e-3, 30.0, 600)
+    from pyradmc.data.grids import extendable_log_grid
+
+    energies = extendable_log_grid(_CSDA_GRID_E_LO, _CSDA_GRID_E_REF, _CSDA_GRID_POINTS, e_top)
     inverse_total = np.array(
         [
             1.0
             / (
                 restricted_collision_stopping(float(e), material, delta_cut=float(e) / 2.0)
-                + radiative_stopping(float(e), coefficients)
+                + radiative_stopping_power(float(e), material)
             )
             for e in energies
         ]

@@ -39,7 +39,7 @@ import numpy.typing as npt
 
 from pyradmc import RAYLEIGH_MOMENTUM_TRANSFER_PER_MEV
 from pyradmc.data.handles import Table1D, Table2D
-from pyradmc.data.interface import PhotonProcess
+from pyradmc.data.interface import PhotonProcess, require_energy_domain
 
 if TYPE_CHECKING:
     from pyradmc.data.interface import CrossSectionSource
@@ -250,6 +250,9 @@ def build_cross_section_tables(
         raise ValueError(f"e_max={e_max} MeV does not cover the transport range")
     if n_points < 2:
         raise ValueError(f"need at least two grid nodes, got {n_points}")
+    # Fail closed above the data's declared range: the lookups below would otherwise
+    # clamp or extrapolate without a word (AGENTS.md 2.6).
+    require_energy_domain(source, e_max)
 
     n_materials = source.n_materials
     photon_energies = np.geomspace(0.5 * pcut, e_max, n_points)

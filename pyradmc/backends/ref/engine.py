@@ -26,7 +26,7 @@ from pyradmc import (
     __version__,
 )
 from pyradmc.backends.results import RunProvenance, TransportResult
-from pyradmc.data.interface import CrossSectionSource
+from pyradmc.data.interface import CrossSectionSource, require_energy_domain
 from pyradmc.geometry.exterior import (
     EXTERIOR_AUTO,
     ExteriorAirChoice,
@@ -265,6 +265,7 @@ class ReferenceEngine:
             oracle is deliberately sequential, so any positive value is accepted
             and has no effect.
         """
+        require_energy_domain(self.cross_sections, source.max_energy)
         if n_histories < 1:
             raise ValueError(f"need at least one history, got {n_histories}")
         if concurrent_batches < 1:
@@ -439,6 +440,7 @@ class ReferenceEngine:
             backends. Treat ``histories_done / histories_total`` as the portable
             signal (see :mod:`pyradmc.progress`).
         """
+        require_energy_domain(self.cross_sections, source.max_energy)
         if n_histories_per_beamlet < 1:
             raise ValueError(
                 f"need at least one history per beamlet, got {n_histories_per_beamlet}"

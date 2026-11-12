@@ -47,14 +47,29 @@ import numpy as np
 from pyradmc import ECUT_MEV, PCUT_MEV, RAYLEIGH_MOMENTUM_TRANSFER_PER_MEV
 from pyradmc.data import berger_seltzer
 from pyradmc.data.goudsmit_saunderson import subthreshold_moller_scattering_power
+from pyradmc.data.grids import extendable_log_grid
 from pyradmc.data.materials import MATERIALS, STANDARD_ATOMIC_WEIGHT, MaterialData
 from pyradmc.data.tables import TABLE_POINTS
 from pyradmc.data.tabulated import eedl, epdl
 from pyradmc.data.tabulated.model import TabulatedData
 
-__all__ = ["ElectronStoppingStrategy", "compile_materials", "compile_water"]
+__all__ = [
+    "COMPILED_GRID_E_REF",
+    "ElectronStoppingStrategy",
+    "compile_materials",
+    "compile_water",
+    "compiled_grids",
+]
 
 _COHERENT_GRID_POINTS = 512  # momentum-transfer nodes for the coherent form-factor cumulative
+
+COMPILED_GRID_E_REF: float = 30.0
+"""Reference top (MeV) of the compiled energy grids, and the historical default.
+
+With the cut-anchored bottom and ``n_points`` it fixes each grid's log spacing
+(:func:`~pyradmc.data.grids.extendable_log_grid`): a table compiled for a higher
+``e_max`` appends nodes at that spacing and keeps every node of the 30 MeV table,
+so widening a table for a higher-energy source cannot move a lower-energy result."""
 
 
 class ElectronStoppingStrategy(str, Enum):
@@ -79,9 +94,10 @@ def compile_materials(
     """Compile the first ``n_materials`` registry materials from EPDL and EEDL text.
 
     Photons come from ``epdl_text`` and elastic scattering from ``eedl_text``; the
-    electron stopping quantities follow ``strategy``. Grids are geometric on
-    ``[pcut/2, e_max]`` (photons) and ``[ecut/2, e_max]`` (electrons), matching
-    :func:`pyradmc.data.tables.build_cross_section_tables`. ``delta_cut`` defaults to
+    electron stopping quantities follow ``strategy``. Grids are geometric from
+    ``pcut/2`` (photons) and ``ecut/2`` (electrons) to at least ``e_max``, at the
+    fixed spacing of their 30 MeV reference span (:func:`compiled_grids`): ``e_max``
+    above 30 MeV appends nodes and moves none. ``delta_cut`` defaults to
     ``ecut`` (the delta-ray production threshold the restricted quantities are built
     at). ``n_materials`` defaults to the whole registry; the compiled rows are the
     registry prefix ``MATERIALS[:n_materials]``, aligned with geometry material
@@ -95,8 +111,9 @@ def compile_materials(
     materials = MATERIALS[:count]
     cut = ecut if delta_cut is None else delta_cut
 
-    photon_energies = np.geomspace(0.5 * pcut, e_max, n_points)
-    electron_energies = np.geomspace(0.5 * ecut, e_max, n_points)
+    photon_energies, electron_energies, coherent_x = compiled_grids(
+        pcut=pcut, ecut=ecut, e_max=e_max, n_points=n_points
+    )
     elements = {z for material in materials for z, _ in material.composition}
 
     # -- photons: EPDL, mixed by mass fraction --------------------------------
@@ -114,8 +131,6 @@ def compile_materials(
     # Only the F^2 *shape* matters (the magnitude is the MF=23 coherent channel), so
     # any per-material-consistent atom count works; mass fraction over atomic weight
     # is atoms per gram up to Avogadro.
-    x_max = RAYLEIGH_MOMENTUM_TRANSFER_PER_MEV * e_max  # max momentum transfer, backscatter
-    coherent_x = np.geomspace(x_max * 1.0e-7, x_max, _COHERENT_GRID_POINTS)
     form_factors = epdl.element_coherent_form_factor(epdl_text, elements=elements)
     coherent_cumulative = np.stack(
         [
@@ -191,16 +206,15 @@ def compile_materials(
                 for m in materials
             ]
         )
-        radiative_rows = []
-        for m in materials:
-            coefficients = berger_seltzer.radiative_fit_coefficients(m.radiative_anchors)
-            radiative_rows.append(
+        radiative = np.stack(
+            [
                 _evaluate(
-                    lambda e, c=coefficients: berger_seltzer.radiative_stopping(e, c),
+                    lambda e, m=m: berger_seltzer.radiative_stopping_power(e, m),
                     electron_energies,
                 )
-            )
-        radiative = np.stack(radiative_rows)
+                for m in materials
+            ]
+        )
         stopping_provenance = "Berger-Seltzer ICRU-37 per material on grid"
 
     return TabulatedData(
@@ -256,9 +270,38 @@ def _atoms_per_gram(material: MaterialData) -> dict[int, float]:
     return {z: fraction / STANDARD_ATOMIC_WEIGHT[z] for z, fraction in material.composition}
 
 
+def compiled_grids(
+    *, pcut: float, ecut: float, e_max: float, n_points: int
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return the photon, electron and coherent momentum-transfer grids of a compile.
+
+    Photon nodes start at ``pcut / 2`` and electron nodes at ``ecut / 2`` (margin
+    below each cut); the coherent grid spans ``1e-7`` to ``1`` of the backscatter
+    momentum transfer at the reference top. All three take their spacing from the
+    :data:`COMPILED_GRID_E_REF` span and are extended above it, append-only, to
+    reach ``e_max`` (the coherent grid to the backscatter transfer at the photon
+    grid's actual top). At or below the reference top they are exactly the
+    historical ``geomspace`` grids; they never shrink below it.
+    """
+    photon = extendable_log_grid(0.5 * pcut, COMPILED_GRID_E_REF, n_points, e_top=e_max)
+    electron = extendable_log_grid(0.5 * ecut, COMPILED_GRID_E_REF, n_points, e_top=e_max)
+    x_ref = RAYLEIGH_MOMENTUM_TRANSFER_PER_MEV * COMPILED_GRID_E_REF
+    coherent_x = extendable_log_grid(
+        x_ref * 1.0e-7,
+        x_ref,
+        _COHERENT_GRID_POINTS,
+        e_top=RAYLEIGH_MOMENTUM_TRANSFER_PER_MEV * float(photon[-1]),
+    )
+    return photon, electron, coherent_x
+
+
 def _csda_on_grid(material: MaterialData, energies: np.ndarray) -> np.ndarray:
-    """Interpolate the material's CSDA range table onto the compile grid."""
-    log_energies, ranges = berger_seltzer.csda_range_table(material)
+    """Interpolate the material's CSDA range table onto the compile grid.
+
+    The range table is extended (append-only) to the grid's top, so no node here
+    is ever a clamped lookup.
+    """
+    log_energies, ranges = berger_seltzer.csda_range_table(material, e_top=float(energies[-1]))
     return np.asarray(np.interp(np.log(energies), log_energies, ranges), dtype=np.float64)
 
 

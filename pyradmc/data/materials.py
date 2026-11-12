@@ -134,6 +134,12 @@ class MaterialData:
     radiative_anchors
         ``((E_MeV, S_rad_MeV_cm2_g), ...)`` NIST ESTAR radiative stopping anchors the
         log-quadratic radiative fit passes through exactly (three or more, ascending).
+    radiative_high_anchors
+        ``((E_MeV, S_rad_MeV_cm2_g), ...)`` NIST ESTAR radiative stopping above the
+        top of ``radiative_anchors``, ascending: the nodes the high-energy model
+        interpolates ``S_rad / (E + m c^2)`` between
+        (:func:`pyradmc.data.berger_seltzer.radiative_stopping_power`). Empty means
+        the material has no radiative data above its fit, and queries there raise.
     """
 
     name: str
@@ -143,6 +149,7 @@ class MaterialData:
     mean_excitation_mev: float
     sternheimer: SternheimerParameters
     radiative_anchors: tuple[tuple[float, float], ...]
+    radiative_high_anchors: tuple[tuple[float, float], ...] = ()
 
 
 WATER: int = 0
@@ -256,7 +263,16 @@ MATERIALS: tuple[MaterialData, ...] = (
             a=0.09116, m=3.4773, x0=0.2400, x1=2.8004, cbar=3.5017, delta0=0.097
         ),
         # NIST ESTAR radiative mass stopping power, liquid water (MeV -> MeV cm^2/g).
-        radiative_anchors=((1.0, 0.0128), (10.0, 0.1813), (20.0, 0.4008)),
+        radiative_anchors=((1.0, 0.0128), (10.0, 0.1813), (20.0, 0.4086)),
+        # NIST ESTAR radiative stopping above the fit (retrieved 2026-11-12).
+        radiative_high_anchors=(
+            (30.0, 0.6489),
+            (50.0, 1.146),
+            (100.0, 2.434),
+            (200.0, 5.078),
+            (500.0, 13.17),
+            (1000.0, 26.79),
+        ),
     ),
     MaterialData(
         name="air",
@@ -268,6 +284,15 @@ MATERIALS: tuple[MaterialData, ...] = (
             a=0.1091, m=3.3994, x0=1.7418, x1=4.2759, cbar=10.5961, delta0=0.0
         ),
         radiative_anchors=((1.0, 1.271e-2), (10.0, 1.795e-1), (20.0, 4.042e-1)),
+        # NIST ESTAR radiative stopping above the fit (retrieved 2026-11-12).
+        radiative_high_anchors=(
+            (30.0, 0.6417),
+            (50.0, 1.133),
+            (100.0, 2.405),
+            (200.0, 5.018),
+            (500.0, 13.01),
+            (1000.0, 26.46),
+        ),
     ),
     MaterialData(
         name="lung",
@@ -279,6 +304,15 @@ MATERIALS: tuple[MaterialData, ...] = (
             a=0.0859, m=3.5353, x0=0.2261, x1=2.8001, cbar=3.4708, delta0=0.0
         ),
         radiative_anchors=((1.0, 1.265e-2), (10.0, 1.793e-1), (20.0, 4.038e-1)),
+        # NIST ESTAR radiative stopping above the fit (retrieved 2026-11-12).
+        radiative_high_anchors=(
+            (30.0, 0.6413),
+            (50.0, 1.133),
+            (100.0, 2.406),
+            (200.0, 5.02),
+            (500.0, 13.02),
+            (1000.0, 26.49),
+        ),
     ),
     MaterialData(
         name="adipose",
@@ -290,6 +324,15 @@ MATERIALS: tuple[MaterialData, ...] = (
             a=0.1028, m=3.4817, x0=0.1827, x1=2.6530, cbar=3.2367, delta0=0.0
         ),
         radiative_anchors=((1.0, 1.070e-2), (10.0, 1.542e-1), (20.0, 3.485e-1)),
+        # NIST ESTAR radiative stopping above the fit (retrieved 2026-11-12).
+        radiative_high_anchors=(
+            (30.0, 0.5544),
+            (50.0, 0.9815),
+            (100.0, 2.089),
+            (200.0, 4.368),
+            (500.0, 11.35),
+            (1000.0, 23.13),
+        ),
     ),
     MaterialData(
         name="cortical_bone",
@@ -301,6 +344,15 @@ MATERIALS: tuple[MaterialData, ...] = (
             a=0.0620, m=3.5919, x0=0.1161, x1=3.0919, cbar=3.6488, delta0=0.0
         ),
         radiative_anchors=((1.0, 1.824e-2), (10.0, 2.476e-1), (20.0, 5.525e-1)),
+        # NIST ESTAR radiative stopping above the fit (retrieved 2026-11-12).
+        radiative_high_anchors=(
+            (30.0, 0.8735),
+            (50.0, 1.537),
+            (100.0, 3.249),
+            (200.0, 6.762),
+            (500.0, 17.49),
+            (1000.0, 35.53),
+        ),
     ),
     # Tungsten (BLD workstream, 2026-07-15): density and I from the PDG 2024
     # atomic-properties page; Sternheimer row from the same page's muE header (the
@@ -316,6 +368,15 @@ MATERIALS: tuple[MaterialData, ...] = (
             a=0.1551, m=2.8447, x0=0.2167, x1=3.4960, cbar=5.4059, delta0=0.14
         ),
         radiative_anchors=((1.0, 1.159e-1), (10.0, 1.132), (20.0, 2.406)),
+        # NIST ESTAR radiative stopping above the fit (retrieved 2026-11-12).
+        radiative_high_anchors=(
+            (30.0, 3.735),
+            (50.0, 6.477),
+            (100.0, 13.55),
+            (200.0, 27.98),
+            (500.0, 71.78),
+            (1000.0, 145.2),
+        ),
     ),
     # Tungsten heavy alloy W95/Ni3.5/Cu1.5 (Halcyon commissioning workstream,
     # 2026-08-11): the published composition/density surrogate for dual-layer MLC
@@ -340,6 +401,18 @@ MATERIALS: tuple[MaterialData, ...] = (
             a=0.1564, m=2.8413, x0=0.2323, x1=3.4878, cbar=5.3699, delta0=0.14
         ),
         radiative_anchors=((1.0, 1.124e-1), (10.0, 1.104), (20.0, 2.348)),
+        # Above the fit: the 0.95/0.035/0.015 mass-fraction sum of NIST ESTAR elements
+        # 074, 028 and 029 (retrieved 2026-11-12), to four figures. Radiative stopping
+        # is additive by mass fraction; the same sum reproduces the three user-defined-
+        # material anchors above exactly.
+        radiative_high_anchors=(
+            (30.0, 3.646),
+            (50.0, 6.324),
+            (100.0, 13.23),
+            (200.0, 27.32),
+            (500.0, 70.10),
+            (1000.0, 141.8),
+        ),
     ),
 )
 """Material registry, indexed by the ``WATER``-style integer constants."""

@@ -34,7 +34,7 @@ from pyradmc.data.tabulated.epdl import mass_fractions_from_formula
 ESTAR_WATER_RADIATIVE: dict[float, float] = {
     1.0: 0.0128,
     10.0: 0.1813,
-    20.0: 0.4008,
+    20.0: 0.4086,
 }
 
 TOLERANCE_RELATIVE = 0.05

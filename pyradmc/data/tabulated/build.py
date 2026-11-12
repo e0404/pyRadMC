@@ -168,7 +168,12 @@ def main(argv: list[str] | None = None) -> None:
         choices=[s.value for s in ElectronStoppingStrategy],
         default=ElectronStoppingStrategy.BERGER_SELTZER.value,
     )
-    parser.add_argument("--e-max", type=float, default=30.0, help="upper grid edge in MeV")
+    parser.add_argument(
+        "--e-max",
+        type=float,
+        default=30.0,
+        help="highest energy the table must cover, in MeV (above 30 nodes are appended)",
+    )
     parser.add_argument("--pcut", type=float, default=PCUT_MEV)
     parser.add_argument("--ecut", type=float, default=ECUT_MEV)
     parser.add_argument("--n-points", type=int, default=TABLE_POINTS)
