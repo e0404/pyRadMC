@@ -763,12 +763,13 @@ def _log_dense_fallback(reason: str) -> None:
     )
 
 
-def _fold_beamlet_bytes(lanes: int, stride: int = _FOLD_SLOT_STRIDE) -> int:
+def _fold_beamlet_bytes(lanes: int, stride: int) -> int:
     """Return the device bytes per beamlet of a wide deposit-fold group.
 
     One sub-accumulator a lane plus the running sums g1/g2. A narrow group's extra
     sub-accumulators total at most :data:`_FOLD_SUBSLOT_TARGET` per lane, which
-    :func:`_auto_fold_group_size` charges up front.
+    :func:`_auto_fold_group_size` charges up front. ``stride`` is the call's
+    (:attr:`_FoldSpec.stride`): no default, since a wide fold's is twice a narrow one's.
     """
     return lanes * stride * 8 + 16
 
@@ -777,18 +778,19 @@ def _auto_fold_group_size(
     free_bytes: int,
     n_beamlets: int,
     lanes: int,
-    queue_bytes: int = 0,
-    stride: int = _FOLD_SLOT_STRIDE,
+    queue_bytes: int,
+    stride: int,
 ) -> int:
     """Largest beamlet group whose deposit-fold accumulators fit the memory budget.
 
     The fold has no dense map, so a beamlet costs :func:`_fold_beamlet_bytes`
-    (48 bytes on one lane) instead of ``(8 lanes + 16) n_voxels``, and there is no
-    :data:`_GROUP_SIZE_CAP`: that cap stops dense maps growing past the point where
-    wider launches stop paying, but here a wider group costs nothing and fills the
-    chunk (a batch block of ``group * per_batch`` histories) where a narrow one
-    launches under-filled. Unknown free memory (cpu) takes every beamlet. This is
-    one device's fit; a multi-device call then cuts it (:func:`_shard_group_size`).
+    (48 bytes on one lane at the narrow stride, 80 at the wide one) instead of
+    ``(8 lanes + 16) n_voxels``, and there is no :data:`_GROUP_SIZE_CAP`: that cap
+    stops dense maps growing past the point where wider launches stop paying, but
+    here a wider group costs nothing and fills the chunk (a batch block of ``group *
+    per_batch`` histories) where a narrow one launches under-filled. Unknown free
+    memory (cpu) takes every beamlet. This is one device's fit; a multi-device call
+    then cuts it (:func:`_shard_group_size`).
     """
     if free_bytes <= 0:
         return max(1, n_beamlets)
@@ -1001,6 +1003,48 @@ class _FoldSpec:
         if self.ratio_exponent is None or self.n_bands == 1:
             return 1.0
         return math.ldexp(1.0, self.ratio_exponent - self.band_width)
+
+
+@dataclass(frozen=True)
+class _FoldBuffers:
+    """What one shard's deposit-fold batches close with, by name.
+
+    The inputs of :func:`~pyradmc.backends.warp.kernels.close_fold_batch` beyond the
+    quanta map and the ``total_q`` book. ``g1``/``g2`` are the per-beamlet running
+    sums of the batch values and of their squares; ``batch_scale`` is the per-history
+    value of one band-0 weighted quantum, ``quantum / (K_0 per_batch)``, and
+    ``step_down`` the ``2**-W`` from one band's to the next; ``abs_quanta_max`` is the
+    ``fold_q_max`` book; ``n_sub`` sub-accumulators of ``stride`` int64s each per
+    beamlet hold ``n_bands`` bands.
+    """
+
+    g1: wp.array
+    g2: wp.array
+    batch_scale: float
+    abs_quanta_max: wp.array
+    n_sub: int
+    stride: int
+    n_bands: int
+    step_down: float
+
+
+@dataclass(frozen=True)
+class _ContractionBuffers:
+    """What one shard's dense-contraction batches close with, by name.
+
+    The inputs of ``contract_dij_batch`` and ``close_contraction_batch`` beyond the
+    quanta map and the scoring arrays. ``weights`` are the flat voxel weights on the
+    shard's device, ``partial`` the per (column, chunk) partials of the ``n_chunks``
+    x ``voxel_chunk`` layout, and ``g1``/``g2`` the per-column running sums of the
+    batch values and their squares.
+    """
+
+    weights: wp.array
+    partial: wp.array
+    g1: wp.array
+    g2: wp.array
+    n_chunks: int
+    voxel_chunk: int
 
 
 @dataclass
@@ -3443,15 +3487,15 @@ class WarpEngine:
         contraction_buffers = None
         fold_buffers = None
         if fold_spec is not None:
-            fold_buffers = (
-                wp.zeros(max_group, dtype=wp.float64, device=device),
-                wp.zeros(max_group, dtype=wp.float64, device=device),
-                float(ENERGY_QUANTUM_MEV) / (fold_spec.scale * float(per_batch)),
-                counters.book("fold_q_max"),
-                n_sub,
-                fold_spec.stride,
-                fold_spec.n_bands,
-                math.ldexp(1.0, -fold_spec.band_width),
+            fold_buffers = _FoldBuffers(
+                g1=wp.zeros(max_group, dtype=wp.float64, device=device),
+                g2=wp.zeros(max_group, dtype=wp.float64, device=device),
+                batch_scale=float(ENERGY_QUANTUM_MEV) / (fold_spec.scale * float(per_batch)),
+                abs_quanta_max=counters.book("fold_q_max"),
+                n_sub=n_sub,
+                stride=fold_spec.stride,
+                n_bands=fold_spec.n_bands,
+                step_down=math.ldexp(1.0, -fold_spec.band_width),
             )
         elif contraction is not None:
             if isinstance(contraction, wp.array):
@@ -3465,13 +3509,13 @@ class WarpEngine:
                     dtype=wp.float64,
                     device=device,
                 )
-            contraction_buffers = (
-                weights_dev,
-                wp.zeros(max_group * n_chunks, dtype=wp.float64, device=device),
-                wp.zeros(max_group, dtype=wp.float64, device=device),
-                wp.zeros(max_group, dtype=wp.float64, device=device),
-                n_chunks,
-                voxel_chunk,
+            contraction_buffers = _ContractionBuffers(
+                weights=weights_dev,
+                partial=wp.zeros(max_group * n_chunks, dtype=wp.float64, device=device),
+                g1=wp.zeros(max_group, dtype=wp.float64, device=device),
+                g2=wp.zeros(max_group, dtype=wp.float64, device=device),
+                n_chunks=n_chunks,
+                voxel_chunk=voxel_chunk,
             )
 
         route_args = dict(
@@ -3520,9 +3564,9 @@ class WarpEngine:
         # The per-column running sums of either contraction (None for the Dij).
         column_sums = None
         if contraction_buffers is not None:
-            column_sums = contraction_buffers[2:4]
+            column_sums = (contraction_buffers.g1, contraction_buffers.g2)
         elif fold_buffers is not None:
-            column_sums = fold_buffers[:2]
+            column_sums = (fold_buffers.g1, fold_buffers.g2)
 
         # The deposit fold ticks once per batch of a group (its ``block_histories``),
         # the other folds once per group: a fold group may be the whole call, which
@@ -4032,8 +4076,8 @@ class WarpEngine:
         s2,
         total_q,
         device,
-        contraction=None,
-        fold=None,
+        contraction: _ContractionBuffers | None = None,
+        fold: _FoldBuffers | None = None,
     ) -> None:
         """Fold one batch's quanta map into the running sums (accumulate_dij_batch).
 
@@ -4046,48 +4090,51 @@ class WarpEngine:
         on the same stream and in the same batch order.
         """
         if fold is not None:
-            g1, g2, batch_scale, abs_max, n_sub, stride, n_bands, step_down = fold
             _launch(
                 kernels.close_fold_batch,
                 group,
                 [
                     edep,
-                    n_sub,
-                    stride,
-                    n_bands,
-                    float(batch_scale),
-                    float(step_down),
-                    g1,
-                    g2,
+                    fold.n_sub,
+                    fold.stride,
+                    fold.n_bands,
+                    float(fold.batch_scale),
+                    float(fold.step_down),
+                    fold.g1,
+                    fold.g2,
                     total_q,
-                    abs_max,
+                    fold.abs_quanta_max,
                 ],
                 device,
                 stream,
             )
             return
         if contraction is not None:
-            weights, partial, g1, g2, n_chunks, voxel_chunk = contraction
+            c = contraction
             _launch(
                 kernels.contract_dij_batch,
-                group * n_chunks,
+                group * c.n_chunks,
                 [
                     edep,
                     voxel_mass,
-                    weights,
+                    c.weights,
                     n_voxels,
-                    n_chunks,
-                    voxel_chunk,
+                    c.n_chunks,
+                    c.voxel_chunk,
                     float(per_batch),
                     float(ENERGY_QUANTUM_MEV),
-                    partial,
+                    c.partial,
                     total_q,
                 ],
                 device,
                 stream,
             )
             _launch(
-                kernels.close_contraction_batch, group, [partial, n_chunks, g1, g2], device, stream
+                kernels.close_contraction_batch,
+                group,
+                [c.partial, c.n_chunks, c.g1, c.g2],
+                device,
+                stream,
             )
             return
         _launch(

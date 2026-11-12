@@ -574,6 +574,22 @@ class TestFoldBands:
         assert warp_engine._fold_stride(1) == warp_engine._fold_stride(2) == 4
         assert warp_engine._fold_stride(3) == warp_engine._fold_stride(6) == 8
 
+    def test_the_stride_holds_the_kernels_slot_layout(self) -> None:
+        """The host's strides and the kernels' slot offsets describe one layout.
+
+        A sub-accumulator keeps the tally quanta at offsets 1 and 2 and band ``b``'s
+        weighted sum at ``kernels._fold_band_slot(b)`` (called here from Python): for
+        every band count the fold may use, those offsets are distinct and inside the
+        stride the host allocates and indexes with.
+        """
+        from pyradmc.backends.warp import kernels
+
+        for n_bands in range(1, warp_engine._FOLD_BANDS_MAX + 1):
+            offsets = [1, 2] + [kernels._fold_band_slot(b) for b in range(n_bands)]
+            assert len(set(offsets)) == len(offsets)
+            assert min(offsets) >= 0
+            assert max(offsets) < warp_engine._fold_stride(n_bands)
+
 
 class TestFoldScale:
     """The weighted quantum: a power of two putting one batch's budget in its octave."""
@@ -613,35 +629,41 @@ class TestFoldScale:
                 )
 
 
+STRIDE = warp_engine._FOLD_SLOT_STRIDE
+"""A one- or two-band fold's sub-accumulator stride, the narrow one."""
+
+
 class TestFoldGroupSize:
     """No dense map: the group is bounded by the sub-accumulators, not the voxels."""
 
     def test_unknown_memory_takes_every_beamlet(self) -> None:
-        assert warp_engine._auto_fold_group_size(0, 7020, 1) == 7020
+        assert warp_engine._auto_fold_group_size(0, 7020, 1, 0, STRIDE) == 7020
 
     def test_ample_memory_is_not_capped_at_the_dense_cap(self) -> None:
-        group = warp_engine._auto_fold_group_size(4 * 2**30, 7020, 1)
+        group = warp_engine._auto_fold_group_size(4 * 2**30, 7020, 1, 0, STRIDE)
         assert group == 7020 > warp_engine._GROUP_SIZE_CAP
 
     def test_budget_arithmetic(self) -> None:
         """The narrow-group sub-accumulators are charged up front, then per beamlet."""
-        per_beamlet = warp_engine._fold_beamlet_bytes(2)
-        extra = 2 * warp_engine._FOLD_SUBSLOT_TARGET * warp_engine._FOLD_SLOT_STRIDE * 8
+        per_beamlet = warp_engine._fold_beamlet_bytes(2, STRIDE)
+        extra = 2 * warp_engine._FOLD_SUBSLOT_TARGET * STRIDE * 8
         free = 2 * (extra + 1000 * per_beamlet)  # half is budgeted
-        assert warp_engine._auto_fold_group_size(free, 7020, 2) == 1000
+        assert warp_engine._auto_fold_group_size(free, 7020, 2, 0, STRIDE) == 1000
 
-    def test_the_accumulators_fit_what_was_budgeted(self) -> None:
+    @pytest.mark.parametrize(
+        "stride", [warp_engine._FOLD_SLOT_STRIDE, warp_engine._FOLD_SLOT_STRIDE_WIDE]
+    )
+    def test_the_accumulators_fit_what_was_budgeted(self, stride: int) -> None:
         """Whatever group comes out, its lanes' sub-accumulator blocks fit the budget."""
-        stride = warp_engine._FOLD_SLOT_STRIDE
         for free in (10**5, 10**6, 10**7, 10**9):
             for lanes in (1, 3):
-                group = warp_engine._auto_fold_group_size(free, 10**6, lanes)
+                group = warp_engine._auto_fold_group_size(free, 10**6, lanes, 0, stride)
                 n_sub = warp_engine._fold_subslots(group)
                 used = lanes * group * n_sub * stride * 8 + 16 * group
                 assert group == 1 or used <= free * warp_engine._GROUP_MEMORY_FRACTION
 
     def test_tiny_memory_floors_at_one(self) -> None:
-        assert warp_engine._auto_fold_group_size(1, 7020, 1) == 1
+        assert warp_engine._auto_fold_group_size(1, 7020, 1, 0, STRIDE) == 1
 
 
 class TestFoldSubslots:
