@@ -1062,3 +1062,114 @@ def test_a_remembered_scale_stays_with_its_source(monkeypatch) -> None:
     assert passes[4] == a_priori and len(passes) == 6
     engine.run_beamlet_contraction(_source(), a, **kwargs)
     assert passes[6:] == [settled]
+
+
+# -- the provenance says which fold, at which scale, produced the result -------------
+
+FOLD_FIELDS = ("fold", "fold_requested", "fold_scale_exponent", "fold_bands", "fold_band_width")
+
+
+def _without_fold(provenance) -> dict:
+    """Every provenance field that is not the fold's."""
+    record = dataclasses.asdict(provenance)
+    for name in FOLD_FIELDS:
+        record.pop(name)
+    return record
+
+
+def _assert_dense_record(provenance, requested: str) -> None:
+    assert provenance.fold == "dense" and provenance.fold_requested == requested
+    assert provenance.fold_scale_exponent is None
+    assert provenance.fold_bands is None and provenance.fold_band_width is None
+
+
+def test_provenance_tells_the_deposit_fold_from_the_dense_one() -> None:
+    """Two folds differ at ~1e-10, so two results from them cannot share a record.
+
+    Everything else in the record (seed, device, cuts) is identical; the fold, and for
+    the deposit fold the scale and bands that fix its rounding, are what tell the two
+    results apart.
+    """
+    engine = _engine("cpu")
+    a = _weights(engine.grid.shape)
+    kwargs = dict(n_histories_per_beamlet=400, n_batches=4, seed=SEED)
+    deposit, dense = _both(engine, _source(), a, **kwargs)
+    scoring = ScoringGrid.for_grid(engine.grid)
+    spec = engine._fold_spec(a, scoring, 100, _source())
+    assert deposit.provenance is not None and dense.provenance is not None
+    assert deposit.provenance.fold == "deposit" == deposit.provenance.fold_requested
+    assert deposit.provenance.fold_scale_exponent == spec.scale_exponent
+    assert deposit.provenance.fold_bands == spec.n_bands
+    assert deposit.provenance.fold_band_width == spec.band_width
+    _assert_dense_record(dense.provenance, "dense")
+    assert deposit.provenance != dense.provenance
+    assert _without_fold(deposit.provenance) == _without_fold(dense.provenance)
+    assert "deposit" in deposit.provenance.summary()
+    assert "dense" in dense.provenance.summary()
+
+
+def test_provenance_of_a_dij_has_no_fold() -> None:
+    """A Dij has no fold: the fields stay at their not-applicable ``None``."""
+    engine = _engine("cpu")
+    dij = engine.run_dij(_source(), n_histories_per_beamlet=100, n_batches=2, seed=SEED)
+    assert dij.provenance is not None
+    for name in FOLD_FIELDS:
+        assert getattr(dij.provenance, name) is None
+
+
+def test_a_fallback_to_the_dense_fold_is_recorded_as_dense(caplog) -> None:
+    """A deposit fold that ran dense says so, and still says it was asked for deposit."""
+    engine = _engine("cpu")
+    a = np.ones(engine.grid.shape)
+    a[5, 5, 2] = 2.0**-400  # beyond every band one call can hold
+    kwargs = dict(n_histories_per_beamlet=400, n_batches=4, seed=SEED)
+    with caplog.at_level(logging.WARNING, logger=warp_engine.__name__):
+        fell_back = engine.run_beamlet_contraction(_source(), a, **kwargs)
+    assert len(_fallbacks(caplog)) == 1
+    asked_dense = engine.run_beamlet_contraction(_source(), a, fold="dense", **kwargs)
+    assert fell_back.provenance is not None and asked_dense.provenance is not None
+    _assert_dense_record(fell_back.provenance, "deposit")
+    _assert_dense_record(asked_dense.provenance, "dense")
+    assert fell_back.provenance != asked_dense.provenance  # same bits, different request
+    np.testing.assert_array_equal(fell_back.values, asked_dense.values)
+
+
+def test_a_fold_that_never_holds_is_recorded_as_dense(monkeypatch, caplog) -> None:
+    """The guard's own dense fallback, after every pass failed, is recorded as dense."""
+    engine = _engine("cpu")
+    a = np.ones(engine.grid.shape)
+    kwargs = dict(n_histories_per_beamlet=400, n_batches=4, seed=SEED)
+    monkeypatch.setattr(warp_engine, "_FOLD_SCALE_BITS", 74)
+    passes = _record_passes(monkeypatch, lambda n: 2 ** (8 * n))
+    with caplog.at_level(logging.INFO, logger=warp_engine.__name__):
+        result = engine.run_beamlet_contraction(_source(), a, **kwargs)
+    assert passes[-1] is None
+    assert result.provenance is not None
+    _assert_dense_record(result.provenance, "deposit")
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_a_guard_rescale_shows_in_the_recorded_scale(device: str, monkeypatch, caplog) -> None:
+    """The scale the returned pass ran at is recorded, not the a-priori one.
+
+    A different ``K_0`` gives different bits, so a result the overflow guard rescaled
+    must not carry the record of the unscaled run. ``_FOLD_SCALE_BITS = 74`` trips the
+    guard; the call settles at the rescale, and its record carries that exponent and
+    the band width it implies, which differ from the record of the unforced run.
+    """
+    engine = _engine(device)
+    a = np.ones(engine.grid.shape)
+    a[5, 5, 2] = 2.0**-40  # re-banded at the rescaled scale
+    kwargs = dict(n_histories_per_beamlet=800, n_batches=8, seed=SEED)
+    plain = engine.run_beamlet_contraction(_source(), a, **kwargs)
+    monkeypatch.setattr(warp_engine, "_FOLD_SCALE_BITS", 74)
+    passes = _record_passes(monkeypatch)
+    with caplog.at_level(logging.INFO, logger=warp_engine.__name__):
+        rescaled = engine.run_beamlet_contraction(_source(), a, **kwargs)
+    assert len(passes) == 2 and None not in passes and passes[1] != passes[0]
+    assert plain.provenance is not None and rescaled.provenance is not None
+    assert plain.provenance.fold == rescaled.provenance.fold == "deposit"
+    assert rescaled.provenance.fold_scale_exponent == passes[1]
+    assert rescaled.provenance.fold_scale_exponent != plain.provenance.fold_scale_exponent
+    assert rescaled.provenance.fold_band_width != plain.provenance.fold_band_width
+    assert rescaled.provenance != plain.provenance

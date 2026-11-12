@@ -38,7 +38,7 @@ import sys
 import threading
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Protocol
 
 import numpy as np
@@ -2770,6 +2770,17 @@ class WarpEngine:
             key = _fold_memory_key(source, scoring_mode, transport_electrons)
             run = self._settle_fold(spec, per_batch, run_pass, weights, key)
         call_progress.finish()
+        # The record names the fold that ran: a fallback to dense, and a guard rescale,
+        # change the bits (the pass returned is the one `run.fold_spec` describes).
+        fold_spec = run.fold_spec
+        provenance = replace(
+            run.provenance,
+            fold="dense" if fold_spec is None else "deposit",
+            fold_requested=fold,
+            fold_scale_exponent=None if fold_spec is None else fold_spec.scale_exponent,
+            fold_bands=None if fold_spec is None else fold_spec.n_bands,
+            fold_band_width=None if fold_spec is None else fold_spec.band_width,
+        )
         return ContractionResult(
             values=np.concatenate([run.blocks[gs][0] for gs in run.group_starts]),
             sigma=np.concatenate([run.blocks[gs][1] for gs in run.group_starts]),
@@ -2780,7 +2791,7 @@ class WarpEngine:
             energy_deposited=run.energy_deposited,
             energy_escaped=run.energy_escaped,
             energy_unscored=run.energy_unscored,
-            provenance=run.provenance,
+            provenance=provenance,
         )
 
     def _settle_fold(
