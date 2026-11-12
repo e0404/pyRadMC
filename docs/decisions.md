@@ -1095,8 +1095,15 @@ existing log-quadratic, extrapolated, is 26 % to 110 % off over the same range. 
 the right variable because it tends to the constant `1/X_0` under complete screening,
 which is also what justifies holding it constant above 1 GeV.
 
-**Open: the water 20 MeV radiative anchor.** The registry has 0.4008 MeV cm^2/g. ESTAR
-(retrieved 2026-11-12) gives 0.4086, and every other registry anchor matches ESTAR to
-the printed digit. It looks like a transcription error. It was not changed here: it
-moves water's radiative stopping between 10 and 20 MeV by up to 2 %, which is a 1 to
-20 MeV physics change that needs its own measurement.
+**The water 20 MeV radiative anchor was a transcription error, now corrected.** The
+registry had 0.4008 MeV cm^2/g, and ESTAR (retrieved 2026-11-12) gives 0.4086. Every other
+anchor in the registry matches ESTAR to the printed digit, apart from water at 10 MeV
+(0.1813 against 0.1814), which was left as it is. The error survived because the test
+tables that "pinned it to ESTAR" had been copied from the registry. The check now uses
+an independent retrieval (`test_registry_low_anchors_are_the_estar_values`).
+
+The fix was a maintainer decision. It moves water's radiative stopping by about −1 % at
+2–6 MeV and +1.95 % at 20 MeV, closer to ESTAR at every energy. That is at most +0.32 % of
+the total stopping power at 20 MeV and under 0.05 % below 8 MeV, and under 0.05 % in the
+CSDA range from 6 to 20 MeV. That is too small to resolve in a transport-level dose
+comparison, so none was run.

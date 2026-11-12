@@ -263,10 +263,8 @@ ESTAR_CSDA_RANGE: dict[int, dict[float, float]] = {
     TUNGSTEN: {30.0: 11.9, 50.0: 15.06, 100.0: 19.6, 200.0: 24.28},
 }
 
-RADIATIVE_HIGH_ENERGY_TOLERANCE = 0.01
-"""Measured worst case 0.25 % over 25 MeV - 1 GeV for every medium except water,
-where 0.9 % at 25 MeV is inherited from the registry's 20 MeV water anchor
-(0.4008 against ESTAR's 0.4086), the junction the interpolation starts from."""
+RADIATIVE_HIGH_ENERGY_TOLERANCE = 0.005
+"""Twice the measured worst case: 0.25 % over 25 MeV - 1 GeV, every registry medium."""
 
 RANGE_TOLERANCE = 0.03  # the existing per-medium CSDA gate (tests/unit/test_icrp_media.py)
 
@@ -351,3 +349,33 @@ def test_csda_range_table_keeps_its_legacy_nodes() -> None:
     np.testing.assert_array_equal(wide_e[: legacy_e.size], legacy_e)
     np.testing.assert_array_equal(wide_r[: legacy_r.size], legacy_r)
     np.testing.assert_array_equal(legacy_e, np.log(np.geomspace(1.0e-3, 30.0, 600)))
+
+
+# ESTAR radiative stopping at the low-fit anchor energies, from the same retrieval.
+ESTAR_LOW_ANCHORS: dict[int, dict[float, float]] = {
+    WATER: {1.0: 0.0128, 10.0: 0.1814, 20.0: 0.4086},
+    AIR: {1.0: 0.01271, 10.0: 0.1795, 20.0: 0.4042},
+    LUNG: {1.0: 0.01265, 10.0: 0.1793, 20.0: 0.4038},
+    ADIPOSE: {1.0: 0.0107, 10.0: 0.1542, 20.0: 0.3485},
+    CORTICAL_BONE: {1.0: 0.01824, 10.0: 0.2476, 20.0: 0.5525},
+    TUNGSTEN: {1.0: 0.1159, 10.0: 1.132, 20.0: 2.406},
+}
+
+ANCHOR_TRANSCRIPTION_TOLERANCE = 1.0e-3
+"""One unit in ESTAR's fourth printed digit, near its smallest: a transcription
+check, not a physics tolerance. Admits water's 10 MeV anchor (0.1813 against
+ESTAR's 0.1814, 5.5e-4); catches the 20 MeV water anchor's former 0.4008 (1.9 %)."""
+
+
+@pytest.mark.parametrize("material", list(ESTAR_LOW_ANCHORS), ids=lambda m: MATERIALS[m].name)
+def test_registry_low_anchors_are_the_estar_values(material: int) -> None:
+    """The registry's 1/10/20 MeV anchors agree with an independent ESTAR retrieval.
+
+    Earlier test copies of the water anchors were themselves transcribed from the
+    registry, so a typo there was pinned rather than caught; this table was not.
+    """
+    for energy, s_rad in MATERIALS[material].radiative_anchors:
+        expected = ESTAR_LOW_ANCHORS[material][energy]
+        assert s_rad == pytest.approx(expected, rel=ANCHOR_TRANSCRIPTION_TOLERANCE), (
+            f"{MATERIALS[material].name} anchor at {energy} MeV: {s_rad} vs ESTAR {expected}"
+        )

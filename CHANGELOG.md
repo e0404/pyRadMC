@@ -159,6 +159,20 @@ without a field, so results are not byte-identical to the previous release.
 
 ### Fixed
 
+- **Water's 20 MeV radiative stopping anchor is ESTAR's 0.4086 MeV cm²/g, not 0.4008.**
+  A transcription error, made in the registry and copied into three test reference tables,
+  so those tests confirmed the typo instead of catching it. A new test checks every
+  registry anchor against an independent ESTAR retrieval
+  (`test_registry_low_anchors_are_the_estar_values`). **This moves water doses at all
+  energies above 1 MeV.** Through the three-anchor fit, water's radiative stopping changes
+  by about −1 % at 2–6 MeV, 0 at 10 MeV, +1.0 % at 15 MeV and +1.95 % at 20 MeV, and moves
+  closer to ESTAR everywhere: at 20 MeV from −1.9 % to 0.0 %, at 2 MeV from +6.4 % to
+  +5.3 %. That is under 0.05 % of the total stopping power below 8 MeV and +0.32 % at
+  20 MeV. The CSDA range moves by under 0.05 % from 6 to 20 MeV. No transport-level dose
+  comparison was run: these changes are below what a run of practical length can
+  resolve. The other media were already correct to ESTAR's printed digits. Water's
+  10 MeV anchor (0.1813 against ESTAR's 0.1814) is unchanged.
+
 - **Radiative stopping power above 20 MeV now follows ESTAR to 1 GeV.** The registry's
   three-anchor log-quadratic (1, 10 and 20 MeV) was extrapolated above 20 MeV. Against
   ESTAR it was +8 % (water) to +32 % (tungsten) high at 200 MeV and up to +110 % at
@@ -166,11 +180,11 @@ without a field, so results are not byte-identical to the previous release.
   `S_rad / (E + m c^2)` linearly in `ln E` between per-material ESTAR anchors at 30, 50,
   100, 200, 500 and 1000 MeV (`MaterialData.radiative_high_anchors`), and holds it
   constant above 1 GeV (the complete-screening limit). It is within 0.25 % of ESTAR from
-  25 MeV to 1 GeV, except 0.9 % for water at 25 MeV, inherited from its 20 MeV anchor. Used by
-  the analytic source, the default `berger-seltzer` compile and the CSDA range.
-  **Doses at or below 20 MeV are bit-identical.** Tabulated runs above 20 MeV move: in the
-  default 30 MeV table's 20–30 MeV band the radiative stopping changes by at most 2 %
-  (old fit −2.0 % to +1.6 % against ESTAR, now −0.9 % to 0.0 %).
+  25 MeV to 1 GeV for every registry medium. Used by the analytic source, the default
+  `berger-seltzer` compile and the CSDA range. **This change on its own leaves doses at or
+  below 20 MeV bit-identical** (the water anchor fix above does not). Tabulated runs above
+  20 MeV move: in the default 30 MeV table's 20–30 MeV band the radiative stopping changes
+  by at most 2 % (old fit −2.0 % to +1.6 % against ESTAR, now −0.1 % to 0.0 %).
 
 - **Negative-weight histories keep their electron dose.** Both engines skipped a
   continuous-loss deposit when the *weighted* energy was not positive, and spawned

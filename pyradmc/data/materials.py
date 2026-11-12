@@ -263,7 +263,7 @@ MATERIALS: tuple[MaterialData, ...] = (
             a=0.09116, m=3.4773, x0=0.2400, x1=2.8004, cbar=3.5017, delta0=0.097
         ),
         # NIST ESTAR radiative mass stopping power, liquid water (MeV -> MeV cm^2/g).
-        radiative_anchors=((1.0, 0.0128), (10.0, 0.1813), (20.0, 0.4008)),
+        radiative_anchors=((1.0, 0.0128), (10.0, 0.1813), (20.0, 0.4086)),
         # NIST ESTAR radiative stopping above the fit (retrieved 2026-11-12).
         radiative_high_anchors=(
             (30.0, 0.6489),

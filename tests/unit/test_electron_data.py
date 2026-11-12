@@ -52,7 +52,7 @@ ESTAR_WATER_COLLISION: dict[float, float] = {
 ESTAR_WATER_RADIATIVE: dict[float, float] = {
     1.0: 0.0128,
     10.0: 0.1813,
-    20.0: 0.4008,
+    20.0: 0.4086,
 }
 
 # Kinetic energy (MeV) -> CSDA range (g/cm^2), water, NIST ESTAR.
