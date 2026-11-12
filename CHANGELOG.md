@@ -17,6 +17,22 @@ without a field, so results are not byte-identical to the previous release.
 
 ### Added
 
+- **Cross-section sources declare an energy domain, enforced fail-closed.**
+  `CrossSectionSource.energy_max` is the analytic source's 20 MeV calibration top or the
+  tabulated source's compiled grid top. Both engines' `run` and `run_dij` refuse a
+  source whose `max_energy` exceeds it, before any transport. `build_tables` refuses an
+  `e_max` above it. The restricted-range lookup raises above it instead of clamping to
+  64 MeV. Previously such a run silently used clamped or extrapolated data. Does not move
+  any dose inside the domain.
+
+- **Tabulated tables can be compiled above 30 MeV without moving a node below it.**
+  `compile_materials`/`--e-max` grids take their spacing from the 30 MeV reference span
+  and append nodes above it (`pyradmc.data.grids.extendable_log_grid`). A 60 MeV water
+  compile holds every node and value of the 30 MeV compile bit for bit (validation tier).
+  The default 30 MeV grids are unchanged. An `e_max` below 30 MeV now still compiles to
+  30 MeV instead of shrinking the grid. The restricted-range and CSDA-range grids
+  extend the same way.
+
 - **A device-resident Dij on the Warp engine.** `WarpEngine.run_dij_device` takes
   `run_dij`'s arguments and returns a `DeviceDijResult` (`pyradmc.backends.warp.dij`) whose
   CSC arrays stay on the computing device as Warp arrays: no readback of the compacted
@@ -142,6 +158,19 @@ without a field, so results are not byte-identical to the previous release.
   Results are unaffected.
 
 ### Fixed
+
+- **Radiative stopping power above 20 MeV now follows ESTAR to 1 GeV.** The registry's
+  three-anchor log-quadratic (1, 10 and 20 MeV) was extrapolated above 20 MeV. Against
+  ESTAR it was +8 % (water) to +32 % (tungsten) high at 200 MeV and up to +110 % at
+  1 GeV. Above the fit, `berger_seltzer.radiative_stopping_power` now interpolates
+  `S_rad / (E + m c^2)` linearly in `ln E` between per-material ESTAR anchors at 30, 50,
+  100, 200, 500 and 1000 MeV (`MaterialData.radiative_high_anchors`), and holds it
+  constant above 1 GeV (the complete-screening limit). It is within 0.25 % of ESTAR from
+  25 MeV to 1 GeV, except 0.9 % for water at 25 MeV, inherited from its 20 MeV anchor. Used by
+  the analytic source, the default `berger-seltzer` compile and the CSDA range.
+  **Doses at or below 20 MeV are bit-identical.** Tabulated runs above 20 MeV move: in the
+  default 30 MeV table's 20–30 MeV band the radiative stopping changes by at most 2 %
+  (old fit −2.0 % to +1.6 % against ESTAR, now −0.9 % to 0.0 %).
 
 - **Negative-weight histories keep their electron dose.** Both engines skipped a
   continuous-loss deposit when the *weighted* energy was not positive, and spawned

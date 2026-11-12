@@ -40,6 +40,23 @@ The build downloads `EPDL2023.ALL` and `EEDL2023.ALL` (~120 MB) from
 [www-nds.iaea.org/epics](https://www-nds.iaea.org/epics/ENDF2023/) and caches them under
 `~/.cache/pyradmc/epics`.
 
+## Energy domain
+
+Every source declares the highest energy its data is valid for, `xs.energy_max`, and
+it is enforced fail-closed, like the material coverage below: a run whose source
+emits above it, a table built above it, and a restricted-range query above it all
+raise instead of answering.
+
+- **Analytic:** 20 MeV, the top of its pair and radiative calibration.
+- **Tabulated:** the compiled grid's top node, 30 MeV by default. To go higher, compile
+  with `--e-max`, for example `--e-max 250`.
+
+A wider compile only **appends** grid nodes. The grids take their spacing from the
+30 MeV reference span, so a table compiled for 250 MeV holds every node and every
+value of the 30 MeV table unchanged, and a lower-energy run gives the same result
+(up to float rounding of the lookup). Electron radiative stopping power is gated
+against ESTAR up to 1 GeV for every registry medium.
+
 ## Integrity
 
 **Every library is verified against a pinned SHA-256 before it is used** — freshly
@@ -120,7 +137,7 @@ The registry carries water, air, lung, adipose tissue, cortical bone (the ICRP/I
 reference formulations, so every number is independently checkable), tungsten, and the
 W95/Ni3.5/Cu1.5 heavy alloy that MLC leaves are actually made of. Each entry has
 elemental mass fractions, an ICRU-37 I-value, exact Sternheimer density-effect
-coefficients, and per-material ESTAR radiative anchors.
+coefficients, and per-material ESTAR radiative anchors: three for the 1–20 MeV fit, and six from 30 MeV to 1 GeV above it.
 
 ```python
 from pyradmc import MATERIALS, WATER, LUNG, CORTICAL_BONE

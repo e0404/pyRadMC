@@ -1057,3 +1057,46 @@ x12 / x7.
 better for tungsten at 6 MV in both regions and both setups, but on one MLC geometry.
 No adaptive `delta`. The edge-gradient route (`SegmentedEdgeSource`, not on develop)
 does not see the option.
+
+## Energy domain and append-only grids, 2026-11-12
+
+Groundwork for energies above 20 MeV, without a scope change: AGENTS.md sections 1 and 6
+still describe a 1 to 20 MeV photon engine.
+
+**A source declares its energy domain and the engine refuses to go past it.** Above the
+data's top, three places used to answer anyway. The restricted-range lookup clamped to
+64 MeV, a tabulated source clamped to its compiled grid top, and the analytic fits
+extrapolated. Each is a silent transport bias of the kind section 2.6 rules out.
+`energy_max` follows the `n_materials` pattern: unbounded by default for test
+instruments, overridden by every calibrated source, and checked at the table build and
+at each engine run entry. The only slack is `DOMAIN_EDGE_RTOL = 1e-5`, which covers the
+Warp table margin (`1 + 1e-6`). It is a rounding allowance, not an extrapolation licence.
+
+**The grid layout is fixed by a reference span, not by its top.** `geomspace(lo, e_max,
+n)` moves every node when `e_max` changes, so a table widened for one high-energy source
+would perturb every lower-energy result. The compiled, restricted-range and CSDA grids
+take their spacing from a fixed reference span (30, 64 and 30 MeV) and append nodes
+above it. The historical grids are reproduced exactly, and a wider grid only adds nodes.
+The per-run kernel tables (`build_cross_section_tables`) still span `[cut/2, run
+e_max]` with 2048 nodes. They have always varied with the beam energy, and their
+interpolation error stays a few 1e-5 at 250 MeV, so they were left alone.
+
+There is **no automatically cached compiled table** to content-address. `--output` names
+the file. The two automatic caches already key on what they hold: the EPICS libraries by
+SHA-256, and the GS grid by a construction-identity digest.
+
+**Radiative stopping above 20 MeV: interpolated ESTAR ratio, not a wider fit.** Tested
+against every ESTAR point from 20 MeV to 1 GeV for all seven registry media. Linear
+interpolation of `g = S_rad / (E + m c^2)` in `ln E` between anchors at 30, 50, 100, 200,
+500 and 1000 MeV is within 0.25 %. Monotone cubic (PCHIP) interpolation reaches 0.06 % but
+was not adopted: it is smoother than the data needs and adds a scipy call to an
+oracle-side formula. Anchors at 50, 100, 200, 500 and 1000 MeV alone give 0.57 %. The
+existing log-quadratic, extrapolated, is 26 % to 110 % off over the same range. `g` is
+the right variable because it tends to the constant `1/X_0` under complete screening,
+which is also what justifies holding it constant above 1 GeV.
+
+**Open: the water 20 MeV radiative anchor.** The registry has 0.4008 MeV cm^2/g. ESTAR
+(retrieved 2026-11-12) gives 0.4086, and every other registry anchor matches ESTAR to
+the printed digit. It looks like a transcription error. It was not changed here: it
+moves water's radiative stopping between 10 and 20 MeV by up to 2 %, which is a 1 to
+20 MeV physics change that needs its own measurement.
