@@ -738,7 +738,7 @@ def _plan(engine, contraction, devices, n_beamlets: int, n_per: int = 8) -> int:
         n_batches=2,
         concurrent_batches=1,
         n_voxels=ScoringGrid.for_grid(engine.grid).n_voxels,
-        contraction=contraction,
+        reduction=warp_engine._reduction_for(contraction, truncation=0.0, device_blocks=False),
         max_energy=_source().max_energy,
     )
 
