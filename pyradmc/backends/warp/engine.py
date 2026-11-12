@@ -762,6 +762,39 @@ def _shard_group_size(group: int, n_beamlets: int, n_devices: int) -> int:
     return max(1, min(group, share))
 
 
+_BOOK_BUDGET_BITS = 60
+"""A deposit-fold group's unit-weight energy books stay within ``2**60`` quanta.
+
+The per-pass books (:data:`_BOOK`) are int64 sums over one group's histories. With
+the dense fold's :data:`_GROUP_SIZE_CAP` gone, a fold group can be the whole call:
+7020 leaf edges of 1e6 histories absorbing about 1.3 MeV each book 9.1e18 quanta,
+at the int64 limit of 9.2e18. :func:`_book_safe_group_size` bounds the group so that
+``group * n_histories_per_beamlet * E_max / quantum`` (every history booking its
+source's full energy) is at most ``2**60``, an eighth of the int64 range. The
+factor of 8 is for source weights above one (the edge derivatives are not bounded
+by one), soft-photon roulette and the dose-to-water factor, which this bound does
+not see; realistic books are well below it, since a history does not deposit, or
+escape with, more than its own energy on average. At 6 MeV the bound binds only
+past 1.9e8 histories per group, so a split adds one group's fixed cost (a few
+launches and one readback) per 1.9e8 histories at the least; the study (7020 edges
+of 1000 histories) stays one group."""
+
+
+def _book_safe_group_size(group: int, n_histories_per_beamlet: int, max_energy: float) -> int:
+    """Largest group ``<= group`` whose unit-weight books fit :data:`_BOOK_BUDGET_BITS`.
+
+    At least one beamlet: a single beamlet's ``n_histories_per_beamlet * E_max`` can
+    exceed the budget (past 1.9e8 histories at 6 MeV) and cannot be split further;
+    its books then keep only the int64 range's remaining headroom, as on every other
+    path. Group size is bit-inert (test-pinned), so this is scheduling only.
+    """
+    per_beamlet = n_histories_per_beamlet * max_energy / ENERGY_QUANTUM_MEV
+    if not per_beamlet > 0.0:
+        return group
+    fits = int(math.ldexp(1.0, _BOOK_BUDGET_BITS) // per_beamlet)
+    return max(1, min(group, fits))
+
+
 def _index_safe_group_size(group: int, per_batch: int) -> int:
     """Largest group ``<= group`` whose batch block fits ``_MAX_BLOCK_HISTORIES``.
 
@@ -1107,8 +1140,16 @@ _BOOK = (
 )
 """The counters a workspace keeps in one int64 array. The first
 :data:`_BOOK_PER_PASS` are cleared and read once per pass — a batch of ``run``, a
-group of ``run_dij`` — so no int64 sum spans more than the pass it always did; the
-rest accumulate over the whole call. ``violations`` is the kernels' int32
+group of ``run_dij`` or of a beamlet contraction. A dense group is capped by memory
+and :data:`_GROUP_SIZE_CAP`; a deposit-fold group has no such cap and could be the
+whole call, so it is bounded instead to keep its unit-weight books within
+``2**_BOOK_BUDGET_BITS`` quanta (:func:`_book_safe_group_size`). The rest accumulate
+over the whole call on a device, unguarded, on every path alike (the dense fold
+included, and before the deposit fold existed): ``dep_total`` over ``run``'s
+histories, and ``emitted`` over ``run``'s or over every beamlet history a Dij shard
+ran, at unit weight up to ``n_beamlets * n_per * E_max`` quanta, which passes the
+int64 range at e.g. 7020 beamlets of 1e6 histories emitting 1.3 MeV on average (the
+lattice and pre-sampled routes do not use it). ``violations`` is the kernels' int32
 majorant-violation count, aliased onto its slot (see :meth:`_Workspace.book`), so
 the per-pass readback raises on a violation in the pass that made it.
 ``fold_q_max`` is the deposit fold's largest per-beamlet, per-batch ``sum |q|``
@@ -2660,6 +2701,7 @@ class WarpEngine:
         concurrent_batches: int,
         n_voxels: int,
         contraction: np.ndarray | wp.array | _FoldSpec | None,
+        max_energy: float,
     ) -> int:
         """Return the beamlet group size a call runs at: scheduling only, bit-inert.
 
@@ -2668,7 +2710,9 @@ class WarpEngine:
         every beamlet); on several devices the fold's auto group is then cut so that
         each device has groups to pull (:func:`_shard_group_size`). Auto-sized or
         explicit, a batch block stays inside the int32 history index
-        (:func:`_index_safe_group_size`).
+        (:func:`_index_safe_group_size`), and a deposit-fold group inside what its
+        int64 energy books hold at unit weight (:func:`_book_safe_group_size`; the
+        dense paths' groups are capped by memory and :data:`_GROUP_SIZE_CAP`).
         """
         per_batch = n_histories_per_beamlet // n_batches
         fold = isinstance(contraction, _FoldSpec)
@@ -2713,7 +2757,12 @@ class WarpEngine:
         # Auto-sized or explicit, one batch's block must stay inside the generators'
         # int32 history index; past it the index wraps and histories land in other
         # columns with no error. Bit-inert, like every grouping.
-        return _index_safe_group_size(beamlet_group_size, per_batch)
+        beamlet_group_size = _index_safe_group_size(beamlet_group_size, per_batch)
+        if fold:
+            beamlet_group_size = _book_safe_group_size(
+                beamlet_group_size, n_histories_per_beamlet, max_energy
+            )
+        return beamlet_group_size
 
     def _compute_dij(
         self,
@@ -2798,6 +2847,7 @@ class WarpEngine:
             concurrent_batches=concurrent_batches,
             n_voxels=scoring.n_voxels,
             contraction=contraction,
+            max_energy=source.max_energy,
         )
 
         # Beamlet groups are independent — no cross-group reduction — so sharding them

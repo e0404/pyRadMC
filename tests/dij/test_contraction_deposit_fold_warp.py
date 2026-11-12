@@ -679,6 +679,33 @@ class TestFoldShardGroups:
                 assert groups >= 2 * n_devices
 
 
+class TestBookSafeGroups:
+    """A pass's unit-weight energy, group x histories x E_max, stays inside the books' budget."""
+
+    @pytest.mark.parametrize(
+        ("n_per", "energy"), [(1000, 6.0), (10**6, 6.0), (10**6, 20.0), (10**8, 6.0)]
+    )
+    def test_largest_group_within_the_budget(self, n_per: int, energy: float) -> None:
+        budget = 2.0**warp_engine._BOOK_BUDGET_BITS
+        group = warp_engine._book_safe_group_size(10**7, n_per, energy)
+        per_beamlet = n_per * energy / ENERGY_QUANTUM_MEV
+        assert group * per_beamlet <= budget < (group + 1) * per_beamlet
+
+    def test_the_study_case_stays_one_group(self) -> None:
+        """TG-119, 7020 leaf edges of 1000 histories at 6 MeV: the launch pattern is kept."""
+        assert warp_engine._book_safe_group_size(7020, 1000, 6.0) == 7020
+
+    def test_a_call_at_the_int64_limit_is_split(self) -> None:
+        """7020 edges of 1e6 histories absorbing ~1.3 MeV each book ~9.1e18 quanta."""
+        group = warp_engine._book_safe_group_size(7020, 10**6, 6.0)
+        assert 1 <= group < 7020
+        assert group * 10**6 * 6.0 / ENERGY_QUANTUM_MEV <= 2.0**warp_engine._BOOK_BUDGET_BITS
+
+    def test_one_beamlet_is_the_floor(self) -> None:
+        assert warp_engine._book_safe_group_size(5, 2**31 - 1, 20.0) == 1
+        assert 2.0**31 * 20.0 / ENERGY_QUANTUM_MEV > 2.0**warp_engine._BOOK_BUDGET_BITS
+
+
 def _plan(engine, contraction, devices, n_beamlets: int, n_per: int = 8) -> int:
     return engine._plan_group_size(
         None,
@@ -689,6 +716,7 @@ def _plan(engine, contraction, devices, n_beamlets: int, n_per: int = 8) -> int:
         concurrent_batches=1,
         n_voxels=ScoringGrid.for_grid(engine.grid).n_voxels,
         contraction=contraction,
+        max_energy=_source().max_energy,
     )
 
 
@@ -702,6 +730,14 @@ def test_the_planner_shards_the_fold_over_every_device() -> None:
     assert -(-400 // group) >= 2 * warp_engine._FOLD_GROUPS_PER_DEVICE
     dense = _plan(engine, a, ["cpu"], 400)
     assert _plan(engine, a, ["cpu", "cpu"], 400) == dense
+
+
+def test_the_planner_bounds_the_fold_by_the_books() -> None:
+    engine = _engine("cpu")
+    a = _weights(engine.grid.shape)
+    spec = engine._fold_spec(a, ScoringGrid.for_grid(engine.grid), 4, _source())
+    group = _plan(engine, spec, ["cpu"], 7020, n_per=10**6)
+    assert group == warp_engine._book_safe_group_size(7020, 10**6, _source().max_energy) < 7020
 
 
 def _record_pulls(monkeypatch, barrier=None) -> list[tuple[str, int]]:
@@ -729,6 +765,27 @@ def _record_pulls(monkeypatch, barrier=None) -> list[tuple[str, int]]:
 
     monkeypatch.setattr(warp_engine.WarpEngine, "_run_dij_shard", spy)
     return pulls
+
+
+def test_a_book_bound_split_changes_no_bit(monkeypatch) -> None:
+    """Groups the books force are scheduling only: values, sigma and books are unchanged."""
+    engine = _engine("cpu")
+    a = _weights(engine.grid.shape)
+    kwargs = dict(n_histories_per_beamlet=800, n_batches=8, seed=SEED)
+    whole = engine.run_beamlet_contraction(_source(), a, **kwargs)
+    per_beamlet = 800 * _source().max_energy / ENERGY_QUANTUM_MEV
+    budget_bits = math.ceil(math.log2(2 * per_beamlet))
+    assert 2 * per_beamlet <= 2.0**budget_bits < 3 * per_beamlet  # two beamlets fit, not three
+    monkeypatch.setattr(warp_engine, "_BOOK_BUDGET_BITS", budget_bits)
+    pulls = _record_pulls(monkeypatch)
+    split = engine.run_beamlet_contraction(_source(), a, **kwargs)
+    assert [start for _, start in pulls] == [0, 2, 4, 6, 8]
+    np.testing.assert_array_equal(split.values, whole.values)
+    np.testing.assert_array_equal(split.sigma, whole.sigma)
+    assert split.energy_deposited == whole.energy_deposited
+    assert split.energy_escaped == whole.energy_escaped
+    assert split.energy_unscored == whole.energy_unscored
+    assert split.energy_emitted == whole.energy_emitted
 
 
 SHARD_DEVICES = ["cuda:0", "cpu"]
