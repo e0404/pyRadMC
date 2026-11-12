@@ -2182,26 +2182,104 @@ crops the scoring grid to a box around the voxels with nonzero objective gradien
 engine lever recorded under "Vectorized edge sets" above.
 
 **The fold.** `_deposit` (the single routing point) now sends a deposit's tally quanta `q`,
-under a fold scoring struct, through `_tally_index`: `round(q * K a_v / m_v)` is added with an
-int64 atomic to its beamlet's accumulator. `K` is a power of two per call
-(`_fold_scale`), so that `max|a/m| * per_batch * E_max / quantum * K` sits in
-`[2**55, 2**56)`; `K a_v / m_v` is then an exact scaling of the float64 ratio. Integer
+under a fold scoring struct, through `_tally_index`: `round(q * K_b a_v / m_v)` is added with
+an int64 atomic to its beamlet's accumulator. `K_0` is a power of two per call, chosen from
+the exact octave `e` of `max|a/m|` (`max|a/m|` in `[2**(e-1), 2**e)`) so that
+`2**(e-1) * per_batch * E_max / quantum * K_0` sits in `[2**55, 2**56)`: the largest weighted
+sum a unit-weight batch could reach is then in `[2**55, 2**57)`, at least `2**5` below the
+overflow guard. The octave is decided on the device by exact comparisons `|a_v| >= 2**k m_v`,
+never from a quotient: the kernel module is compiled with `fast_math`, whose division need not
+be correctly rounded, and a quotient one ulp short of a power of two moved the budget an
+octave and gave host weights, and device weights on another device, different bits. The
+coefficient `K_b a_v / m_v` is the target's `fast_math` quotient times a power of two:
+deterministic per target and formed on the device that transports, which is all the fold's
+bit reproducibility needs; it is not an exact scaling of a correctly rounded ratio. Integer
 addition is associative, so the result is bit-reproducible on a device and bitwise inert to
 group size, sub-accumulator count and batch lanes (test-pinned). The only departure from
-the dense fold is the rounding of each weighted deposit, at most half of `1/K`. The same
+the dense fold is the rounding of each weighted deposit, at most half of `1/K_b`. The same
 integer `q` is booked as before, so the energy books are identical integers.
 
-**Headroom and guard.** Each sub-accumulator also keeps the positive and the negative tally
-quanta, so a batch closes with `sum |q|` per beamlet, and `|A| <= (K max|a/m| + 1/2) sum |q|`
-bounds every partial sum of the weighted accumulator. A call whose largest such bound
-reaches `2**62` is rerun at the largest safe power of two (same seeds, same transport),
-and the rerun is logged. The a-priori budget leaves `2**6` for weights above one, roulette
-and the dose-to-water factor. On the study's leaf edges the measured bound sat `2**11`
-below the budget: every history's full energy in the voxel of largest `|a/m|` is far from
-what an edge deposits. A first choice of `2**50` wasted those bits (agreement 1.4e-8 of
-the largest value); at `2**56` it is 2e-10 to 5e-10, below 5e-5 of the sigma.
+**Bands.** One `K` serves only the voxel of largest `|a/m|`. A scoring grid padded one voxel
+past the transport grid (`ScoringGrid.rebin`) keeps an outer layer of float-overlap mass of
+about 1.8e-15 g; with unit weights its `a/m` is 5e14 times the phantom's, `K` collapsed, every
+real deposit was weighted below half a quantum and all nine beamlets of the test came back
+exactly 0.0 (dense: 0.41), with no warning. Signed weights that cancel in one voxel do the
+same: the tests' weights reach 5.6e-17, a `2**56` range. Deposits therefore fold in up to
+`_FOLD_BANDS_MAX = 6` octave bands of `W = k + e + 10` octaves (`K_0 = 2**k`), band `b` at
+`K_b = K_0 2**(bW)` with its own int64 accumulator: every band's top reaches the same budget
+(the guard's bound covers all of them) and every band's floor keeps the resolution.
+Guarantee, enforced in code by `_FOLD_RESOLUTION_BITS = 10`: in every scoring voxel with mass
+and a nonzero weight `K_b |a/m| >= 2**-10`, i.e. a deposit's rounding is at most
+`|a/m| x 0.51 eV`, about the float32 spacing of a 6 MeV energy, the precision the transport
+carries its energies in. Zero weights score nothing and do not count. Bands are assigned on
+the device by exact comparisons, like the octave search. A sub-accumulator is 4 int64 for one
+or two bands (band 1 takes the pad of the 32-byte sector) and 8 for three to six: 48 or 80
+bytes per beamlet on one lane. A range past six bands (about `2**150` at the study's 500
+histories per batch and 6 MeV), or scales that would leave the normal float range (weights
+near 1e-300 wanted `K` near the top of the float64 range: `OverflowError` at 1e-305, silent
+zeros at 1e-302, a subnormal batch scale at 1e-300), run the dense fold for that call, logged
+at WARNING; at 1e-290 the deposit fold still runs. Cost: one `uint8` band load per weighted
+deposit and one more `GridInfo` array, neither timed yet.
 
-**Contention.** The fold costs two atomics per deposit (weighted sum, tally) to a few
+**Headroom and guard.** Each sub-accumulator also keeps the positive and the negative tally
+quanta, so a batch closes with `sum |q|` per beamlet, and `|A| <= (K_0 2**e + 1/2) sum |q|`
+bounds every partial sum of every band's accumulator. Every pass is checked against its own
+guard, and a pass whose largest such bound reaches `2**62` is never returned: it is rescaled
+from the largest `sum |q|` any pass of the call measured, re-banded and rerun (logged), at
+most `_FOLD_PASSES_MAX = 3` passes. After that, or when a rescale cannot be banded, the call
+runs the dense fold, logged at WARNING. A deterministic source needs at most two passes (the
+rerun measures the first pass's `sum |q|` and holds by construction). The third exists
+because a source need not be run-to-run deterministic (the device pre-solve is
+order-nondeterministic at a fixed seed), and a rerun that deposited more than the pass it
+was scaled for could return silently wrapped accumulators. A rescale by `2**-h` coarsens the
+global bound `2**-56 max|a/m| E_max` per deposit to `2**(h-56)`; the per-voxel `2**-10`
+guarantee is unchanged. The a-priori budget leaves at least `2**5` for weights above one,
+roulette and the dose-to-water factor. On the study's leaf edges the measured bound sat
+`2**11` below the budget as it was first chosen (from `max|a/m|` itself, up to an octave
+lower than now): every history's full energy in the voxel of largest `|a/m|` is far from what
+an edge deposits. A first choice of `2**50` wasted those bits (agreement 1.4e-8 of the
+largest value); at `2**56` it is 2e-10 to 5e-10, below 5e-5 of the sigma (original PR head).
+
+**Remembered scale.** A source whose weights exceed the a-priori headroom on every call (edge
+derivatives, MU-scaled weights, one contraction per optimizer iteration) transported every
+call twice. The engine therefore remembers how many octaves below the a-priori `K_0` the last
+call of the same kind (source type, beamlet count, scoring mode, electron transport) settled,
+and starts the next such call there; the headroom is relative, so new voxel weights move the
+start with their octave. It is a verified start guess: its pass is held to the scale a fresh
+engine settles at from that pass's own `sum |q|` (the tally quanta before weighting,
+independent of `K_0`) and rerun there if it differs. For a deterministic source the result is
+therefore bit-identical to a fresh engine's whatever the call history (test-pinned); only the
+number of transports changes. It follows the last call only (one outlier costs the next call
+one extra transport and no resolution) and clears when a call settles at the a-priori scale
+or runs dense.
+
+**Groups and books.** On one device the auto group is every beamlet that the int32 history
+index, the device memory and the energy books allow (it is not "as wide as the history index
+allows" alone, as an earlier draft of this entry said). On several devices it is cut to about
+four groups per device (`_FOLD_GROUPS_PER_DEVICE`, chosen, not measured), because one
+whole-call group left every device but one idle. A group is also bounded so that its
+unit-weight energy books (`total_q`, `escaped`, `unscored`, `deposited`, read once per group)
+stay within `2**60` quanta (`_book_safe_group_size`): 7020 edges of 1e6 histories absorbing
+about 1.3 MeV each book 9.1e18 quanta, at the int64 limit. The bound binds only past about
+1.9e8 histories per group at 6 MeV, so the study stays one group. Group size is bit-inert
+(test-pinned). The whole-call `emitted` and `dep_total` books keep an unguarded int64
+exposure on every path, the dense fold included (pre-existing; e.g. 7020 beamlets of 1e6
+histories); it is documented in the `_BOOK` docstring and not changed here.
+
+**Devices, progress, provenance.** The fold sets up only on the devices listed in
+`devices=`: device weights not on a listed device are copied to the first listed one, host
+weights go to the first listed one, and device weights are still validated where they lie.
+Progress ticks once per batch of each group (a whole-call group would otherwise report
+nothing until the call returned); across guard reruns `histories_done` is strictly increasing
+and reaches the total exactly once. `RunProvenance` records `fold` (the fold that actually
+ran, so a fallback reads `"dense"`), `fold_requested`, `fold_scale_exponent`, `fold_bands` and
+`fold_band_width`; `fold` and `fold_requested` are `None` outside a contraction, the last
+three unless the deposit fold ran; `summary()` shows them. The deposit and
+dense folds, and the deposit fold at two scales or band layouts, agree only to rounding
+(about 1e-10 relative), so two results with otherwise equal records are not interchangeable
+without them.
+
+**Contention** (measured at the first PR head). The fold costs two atomics per deposit (weighted sum, tally) to a few
 addresses per beamlet, where the dense map took one to a scattered address. With thousands
 of beamlets in flight their threads are spread already: on 1THA232 (7020 edges) one
 sub-accumulator was fastest (0.153 s; 64: 0.156 s; 1024: 0.179 s). With one to four
@@ -2211,7 +2289,8 @@ at 4096 sub-accumulators in total, picked by the low bits of the scoring index. 
 block-level reduction was not tried: the deposits come from divergent threads deep in the
 transport loop.
 
-**Cost to the other runs.** The fold lives in the transport kernels every run compiles. As a
+**Cost to the other runs** (measured at the first PR head; the band array added since is
+not timed). The fold lives in the transport kernels every run compiles. As a
 separate branch around its own atomics it cost plain `run` and `run_dij` 1.3-1.7 % (64^3
 water, 6 MeV, alternating processes, best of 7; register use 223 -> 224, so not occupancy).
 A variant without the branch but with the new struct fields matched the branch point, so
@@ -2223,7 +2302,8 @@ segment Dij, device and host) were within their 10 % process-to-process noise. R
 residual would need two compiled variants of the transport kernels (struct-type overloads
 through every deposit helper); not done.
 
-**Measured** (RTX 4070 Laptop at 2535 MHz with no throttle reason, before and after each
+**Measured** at the first PR head, before the review fixes (to be re-measured, see below;
+RTX 4070 Laptop at 2535 MHz with no throttle reason, before and after each
 process; old = the branch point in an alternating process; best of 5; 1000 histories per
 edge, 2 batches, as the pipeline runs; "deposit" alone in its process, as in the study's
 loop, and in parentheses interleaved with the dense instrument, where it pays the transport
@@ -2244,6 +2324,29 @@ is the box's rebinned scoring geometry, not the fold. Deposit against dense on t
 grid: 5.6e-11 to 4.9e-10 of the largest value, at most 4.9e-5 of a sigma, energy books
 equal.
 
-`fold="dense"` stays as the verification instrument. With one to four beamlets of millions
-of histories on a small grid it is up to ~8 % faster; the default is the deposit fold
-because the study cases, which are what it is for, are 3.4-8.2x faster with it.
+Speed-up, by division from the table's own cells (ends of the old and dense ranges over the
+deposit column): against the old code 8.1-8.3x (1THA232, 4 deg), 7.4-8.0x (1THA232, 8 deg),
+2.8-3.5x (1THA210, 4 deg) and 3.8-4.5x (1THA210, 8 deg); against the dense fold 8.2x,
+7.5-7.9x, 2.8-3.1x and 3.6-4.0x. Over the four study cases that is **2.8-8.3x** faster than the
+old code and 2.8-8.2x than the dense fold. (An earlier draft of this entry said 3.4-8.2x,
+taking the top of 1THA210's old range, 0.28 s, as its figure.)
+
+**Not re-measured.** Every timing, speed-up and agreement figure in this entry was taken at
+the first head of this PR (07f74e0), before the review fixes: the octave bands add one
+`uint8` band load per weighted deposit and one `GridInfo` array, and the exact octave
+changes `K_0` by up to one octave. They are a record of that head, not of the shipped code.
+**Open, to be re-measured before merge:** the single-device study table above (band load,
+changed `K_0`); the cost of the extra `GridInfo` array to plain `run`/`run_dij`; multi-device
+fold calls at four groups per device; a high-statistics fold that the book bound splits; and
+how often an optimizer's settled scale changes between iterations, since each change costs
+one extra transport.
+
+`fold="dense"` is the verification instrument (AGENTS.md 2.10), the unrounded fold the
+deposit fold is pinned against, and the call's own fallback when the deposit fold cannot
+keep its guarantee (see above); it is not a supported second configuration. For the record,
+at the first head and one to four beamlets of millions of histories on a small grid it
+measured up to ~8 % faster than the deposit fold. The default is the deposit fold because the
+study cases, which are what it is for, are 2.8-8.3x faster with it.
+
+**Not done, suggested.** Separate Warp structs for scoring and transport grids, so that the
+transport `GridInfo` loses its inert fold fields (the band array among them).
