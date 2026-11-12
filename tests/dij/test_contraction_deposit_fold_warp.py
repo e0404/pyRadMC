@@ -35,6 +35,9 @@ from pyradmc.geometry.grid import VoxelGrid
 from pyradmc.geometry.source import BeamletGridSource
 from pyradmc.scoring.grid import ScoringGrid
 from tests.conftest import SEED
+from tests.contraction_fixtures import engine as _engine
+from tests.contraction_fixtures import source as _source
+from tests.contraction_fixtures import weights as _weights
 
 wp = pytest.importorskip("warp", reason="warp-lang optional dependency not installed")
 
@@ -53,24 +56,6 @@ this is an order of magnitude above that, so the bound is safe, not tuned."""
 
 FLOAT_RTOL = 1e-12
 """float64 rounding of the dense path's per-voxel products and chunked sums."""
-
-
-def _engine(device: str, grid: VoxelGrid | None = None, xs=None):
-    if device.startswith("cuda") and not wp.is_cuda_available():
-        pytest.skip("no CUDA device")
-    grid = grid or VoxelGrid.uniform_water(shape=(10, 10, 8), spacing=(1.0, 1.0, 1.0))
-    xs = xs or AnalyticCrossSections(geometry_densities=grid.max_density_by_material())
-    return warp_engine.WarpEngine(grid=grid, cross_sections=xs, device=device)
-
-
-def _source() -> BeamletGridSource:
-    return BeamletGridSource(2.0, -1.0, (2.0, 8.0), (2.0, 8.0), 3, 3)
-
-
-def _weights(shape: tuple[int, int, int]) -> np.ndarray:
-    """Signed, so the contraction cancels in part, as an objective gradient does."""
-    x, y, z = np.meshgrid(*(np.arange(n) for n in shape), indexing="ij")
-    return np.sin(0.7 * x) + 0.3 * y - 0.1 * z
 
 
 def _scale(a: np.ndarray, scoring: ScoringGrid, per_batch: int, max_energy: float) -> float:
