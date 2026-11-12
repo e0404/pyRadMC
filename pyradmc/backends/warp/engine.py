@@ -2565,9 +2565,11 @@ class WarpEngine:
             to an integer, to an int64 accumulator of its beamlet (spread over
             sub-accumulators against contention, :func:`_fold_subslots`). Cost and
             memory follow the deposits, not ``beamlets x scoring voxels``: a beamlet
-            of a wide group holds 48 bytes (80 past two octave bands), so groups are
-            as wide as the history index allows and the scoring grid's size costs
-            only its coefficient and band arrays.
+            of a wide group holds 48 bytes (80 past two octave bands), so the auto
+            group on one device is every beamlet that the history index and the
+            int64 energy books allow (:func:`_book_safe_group_size`), on several
+            devices a few groups per device (:func:`_shard_group_size`), and the
+            scoring grid's size costs only its coefficient and band arrays.
             Deterministic on a device for any group size, lane count or arrival
             order, since integer addition is associative. ``K_0`` is a power of two
             chosen per call from the exact octave of ``max_v |a_v| / m_v``
