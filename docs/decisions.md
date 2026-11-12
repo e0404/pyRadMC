@@ -2219,7 +2219,8 @@ histories per batch and 6 MeV), or scales that would leave the normal float rang
 near 1e-300 wanted `K` near the top of the float64 range: `OverflowError` at 1e-305, silent
 zeros at 1e-302, a subnormal batch scale at 1e-300), run the dense fold for that call, logged
 at WARNING; at 1e-290 the deposit fold still runs. Cost: one `uint8` band load per weighted
-deposit and one more `GridInfo` array, neither timed yet.
+deposit and one more `GridInfo` array, timed with the other review fixes under "Re-measured,
+2026-11-12" below.
 
 **Headroom and guard.** Each sub-accumulator also keeps the positive and the negative tally
 quanta, so a batch closes with `sum |q|` per beamlet, and `|A| <= (K_0 2**e + 1/2) sum |q|`
@@ -2261,9 +2262,11 @@ whole-call group left every device but one idle. A group is also bounded so that
 unit-weight energy books (`total_q`, `escaped`, `unscored`, `deposited`, read once per group)
 stay within `2**60` quanta (`_book_safe_group_size`): 7020 edges of 1e6 histories absorbing
 about 1.3 MeV each book 9.1e18 quanta, at the int64 limit. The bound binds only past about
-1.9e8 histories per group at 6 MeV, so the study stays one group. Group size is bit-inert
-(test-pinned). The whole-call `emitted` and `dep_total` books keep an unguarded int64
-exposure on every path, the dense fold included (pre-existing; e.g. 7020 beamlets of 1e6
+1.9e8 histories per group at 6 MeV, so the study stays one group (at its 1000 histories per
+edge and the 5.76 MeV of its spectrum the bound allows 200 159 edges per group; it first
+splits 1THA232's 7020 edges at 30 000 histories per edge, measured below). Group size is
+bit-inert (test-pinned). The whole-call `emitted` and `dep_total` books keep an unguarded
+int64 exposure on every path, the dense fold included (pre-existing; e.g. 7020 beamlets of 1e6
 histories); it is documented in the `_BOOK` docstring and not changed here.
 
 **Devices, progress, provenance.** The fold sets up only on the devices listed in
@@ -2289,8 +2292,8 @@ at 4096 sub-accumulators in total, picked by the low bits of the scoring index. 
 block-level reduction was not tried: the deposits come from divergent threads deep in the
 transport loop.
 
-**Cost to the other runs** (measured at the first PR head; the band array added since is
-not timed). The fold lives in the transport kernels every run compiles. As a
+**Cost to the other runs** (measured at the first PR head; with the band array added since,
+re-measured below). The fold lives in the transport kernels every run compiles. As a
 separate branch around its own atomics it cost plain `run` and `run_dij` 1.3-1.7 % (64^3
 water, 6 MeV, alternating processes, best of 7; register use 223 -> 224, so not occupancy).
 A variant without the branch but with the new struct fields matched the branch point, so
@@ -2302,12 +2305,12 @@ segment Dij, device and host) were within their 10 % process-to-process noise. R
 residual would need two compiled variants of the transport kernels (struct-type overloads
 through every deposit helper); not done.
 
-**Measured** at the first PR head, before the review fixes (to be re-measured, see below;
-RTX 4070 Laptop at 2535 MHz with no throttle reason, before and after each
-process; old = the branch point in an alternating process; best of 5; 1000 histories per
-edge, 2 batches, as the pipeline runs; "deposit" alone in its process, as in the study's
-loop, and in parentheses interleaved with the dense instrument, where it pays the transport
-pool's refit to its wider groups each call):
+**Measured** at the first PR head, before the review fixes (a record of that head, kept as
+it was; re-measured below; RTX 4070 Laptop at 2535 MHz with no throttle reason, before and
+after each process; old = the branch point in an alternating process; best of 5; 1000
+histories per edge, 2 batches, as the pipeline runs; "deposit" alone in its process, as in
+the study's loop, and in parentheses interleaved with the dense instrument, where it pays the
+transport pool's refit to its wider groups each call):
 
 | case | edges | box voxels | old | dense | deposit | deposit, full grid |
 |---|---|---|---|---|---|---|
@@ -2324,29 +2327,127 @@ is the box's rebinned scoring geometry, not the fold. Deposit against dense on t
 grid: 5.6e-11 to 4.9e-10 of the largest value, at most 4.9e-5 of a sigma, energy books
 equal.
 
-Speed-up, by division from the table's own cells (ends of the old and dense ranges over the
-deposit column): against the old code 8.1-8.3x (1THA232, 4 deg), 7.4-8.0x (1THA232, 8 deg),
-2.8-3.5x (1THA210, 4 deg) and 3.8-4.5x (1THA210, 8 deg); against the dense fold 8.2x,
-7.5-7.9x, 2.8-3.1x and 3.6-4.0x. Over the four study cases that is **2.8-8.3x** faster than the
-old code and 2.8-8.2x than the dense fold. (An earlier draft of this entry said 3.4-8.2x,
-taking the top of 1THA210's old range, 0.28 s, as its figure.)
+Speed-up at the first head, by division from the table's own cells (ends of the old and
+dense ranges over the deposit column): against the old code 8.1-8.3x (1THA232, 4 deg),
+7.4-8.0x (1THA232, 8 deg), 2.8-3.5x (1THA210, 4 deg) and 3.8-4.5x (1THA210, 8 deg); against
+the dense fold 8.2x, 7.5-7.9x, 2.8-3.1x and 3.6-4.0x. Over the four study cases that is
+**2.8-8.3x** faster than the old code and 2.8-8.2x than the dense fold. (An earlier draft
+of this entry said 3.4-8.2x, taking the top of 1THA210's old range, 0.28 s, as its figure.)
 
-**Not re-measured.** Every timing, speed-up and agreement figure in this entry was taken at
-the first head of this PR (07f74e0), before the review fixes: the octave bands add one
-`uint8` band load per weighted deposit and one `GridInfo` array, and the exact octave
-changes `K_0` by up to one octave. They are a record of that head, not of the shipped code.
-**Open, to be re-measured before merge:** the single-device study table above (band load,
-changed `K_0`); the cost of the extra `GridInfo` array to plain `run`/`run_dij`; multi-device
-fold calls at four groups per device; a high-statistics fold that the book bound splits; and
-how often an optimizer's settled scale changes between iterations, since each change costs
-one extra transport.
+The figures above, and those under "Contention" and "Cost to the other runs", were taken at
+the first head of this PR (07f74e0), before the review fixes (octave bands: one `uint8` band
+load per weighted deposit and one `GridInfo` array; the exact octave moves `K_0` by up to one
+octave). They are a record of that head. The shipped code was re-measured as follows.
+
+**Re-measured, 2026-11-12** (after the review fixes, head 092920b; RTX 4070 Laptop, the
+table in one session; 2520 MHz under load in every clock sample taken during the calls
+without the idle reason, in every process, 1980 MHz idle; throttle reason idle (0x1) or none
+before and after every process, never the power cap). Three engine states: old = the
+branch point (b38708a), first head = 07f74e0, now = 092920b, the last both with the default
+deposit fold and with `fold="dense"`. Each case ran five rounds of alternating processes
+(old, first head, now, now dense); each process timed `run_beamlet_contraction` alone, five
+calls at fixed seeds after a first call (compile and set-up) and a clock-sampling stretch;
+1000 histories per edge, 2 batches. A cell is the range of the five per-process bests (best
+of 5 each); the lower end is the session's best. The benchmark script behind the first
+table was not kept, so the calls were rebuilt from the study (`study/option-c-mlcs`
+82ada8e: machine `y`, 6 MV, 0 T, the class-solution objectives): saved plans, a full
+forward run at the pipeline's 2M (8 deg) or 8M (4 deg) histories per segment, the objective
+gradient, and the study's gradient box. The edge counts are the table's; the boxes were
+padded with zero-weight voxels to the table's shapes where the plan's active voxels fit
+(1THA232 both, 1THA210 4 deg); 1THA210 8 deg keeps its own box, 133 590 voxels. The plan
+states differ from the first table's, so only same-session numbers compare:
+
+| case | edges | box voxels | old | first head | now | now, dense | now, full grid |
+|---|---|---|---|---|---|---|---|
+| 1THA232, 4 deg | 7020 | 628 524 | 1.2613-1.2628 s | 0.1509-0.1517 s | 0.1552-0.1566 s | 1.2613-1.2640 s | 0.1589-0.1600 s |
+| 1THA232, 8 deg | 3510 | 605 280 | 0.5942-0.5962 s | 0.0770-0.0776 s | 0.0796-0.0803 s | 0.5935-0.5952 s | 0.0813-0.0821 s |
+| 1THA210, 4 deg | 3060 | 128 340 | 0.1651-0.1657 s | 0.0631-0.0636 s | 0.0647-0.0659 s | 0.1659-0.1672 s | 0.0683-0.0685 s |
+| 1THA210, 8 deg | 1530 | 133 590 | 0.0848-0.0862 s | 0.0330-0.0336 s | 0.0344-0.0348 s | 0.0854-0.0860 s | 0.0365-0.0373 s |
+
+The full grid (1.22 M voxels on 1THA232, 1.42 M on 1THA210) ran in the same process as the
+box; at the first head it measured 0.1541-0.1548, 0.0790-0.0803, 0.0668-0.0670 and
+0.0353-0.0361 s. Against the old code the deposit fold is 8.05-8.14x faster (1THA232, 4 deg),
+7.40-7.49x (8 deg), 2.50-2.56x (1THA210, 4 deg) and 2.43-2.51x (8 deg); against the dense
+fold 8.05-8.14x, 7.39-7.48x, 2.52-2.58x and 2.45-2.50x. Over the four study cases that is
+**2.4-8.1x** faster than the old code (first head, same session: 2.5-8.4x). The dense fold
+runs as fast as the old code and returns its values bitwise.
+
+**The review fixes cost 1.2-5.7 %.** Against the first head the deposit fold is slower in
+every cell, with ranges that do not overlap: +2.3 to +3.8 % (1THA232, 4 deg), +2.6 to +4.3 %
+(8 deg), +1.8 to +4.5 % (1THA210, 4 deg) and +2.4 to +5.7 % (8 deg) on the box, +1.2 to
++5.6 % on the full grid. Which fix costs it (the band load, the band array, the changed
+`K_0`) was not isolated. Accepted or not is the maintainer's call; it does not change the
+default's case, the speed-up above being measured with it.
+
+Agreement at equal seeds (the first timed seed, all five rounds identical): deposit against
+dense 1.1e-10 (1THA232, 8 deg), 1.1e-9 (4 deg), 1.3e-10 (1THA210, 8 deg) and 1.1e-10 (4 deg)
+of the largest value (4 deg: at most 1.75e-9 of the largest sigma); energy books equal in
+every round. Per beamlet the difference is a small share of the beamlet's own sigma (99th
+percentile over beamlets with nonzero sigma: 3.2e-5 on 1THA232 and 8.8e-5 on 1THA210, 4
+deg) except on a few edges that see almost no weighted dose: three on 1THA232 and four on
+1THA210 (4 deg) exceed 0.01 of their sigma, up to 0.54 and 0.18, and their values are at most
+2.1e-11 and 3.7e-11 of the largest; the 8 deg maxima are 0.011 and 0.085. That is the
+per-deposit rounding bound (absolute, `|a/m| x 0.51 eV`) next to an edge's near-zero sigma,
+not a loss on the edges that matter. Full grid against box: 5.0e-7 to 1.4e-5 of the largest
+value. Repeated processes return bitwise the same values (each state). Provenance: scale
+exponent 2 (1THA232) and 1 (1THA210), two bands of width 25. **Every call took one
+transport**, the first call and every repeat, in every process.
+
+**Plain `run` and `run_dij`** (64^3 water, 6 MeV; `run` a 10 x 10 cm field, `run_dij` a 10 x
+10 lattice; alternating processes old, first head, now, best of 7 each; 2505-2520 MHz under
+load, except six samples at 1980 MHz and 4-51 % utilization between the short calls). At
+1e6 histories and 100 x 1e4 (7 rounds): `run` 0.0274-0.0288 s old, 0.0275-0.0287 first
+head, 0.0276-0.0287 now; `run_dij` 0.0554-0.0564, 0.0552-0.0564, 0.0555-0.0569 s. At
+ten times the histories (7 rounds): `run` 0.2077-0.2097, 0.2078-0.2107, 0.2108-0.2128 s;
+`run_dij` 0.2782-0.2820, 0.2801-0.2831, 0.2812-0.2869 s; a second such session (10 rounds,
+noisier host): `run` 0.2513-0.2613, 0.2525-0.2578, 0.2553-0.2866 s; `run_dij` 0.3649-0.3817,
+0.3730-0.4221, 0.3034-0.3830 s. So no measurable difference for `run_dij`, nor for `run` in
+two sessions of three; in the third, `run` at the current head sat above the old code by 0.5
+to 2.5 % and just above the first head's range (0.2108 against 0.2107 s). The extra band
+array costs plain runs at most of that order; the first head's 0.5 % / 0.3 % residual is
+below what these sessions resolve.
+
+**The book-bound split** (1THA232, 4 deg, box; one process, alternating; 2490-2520 MHz). The
+source's 5.76 MeV allows 8006 edges per group at 25 000 histories per edge and 6671 at
+30 000. At 25 000 (1.755e8 histories, one auto group) against `beamlet_group_size=3510` (two
+groups, the split the bound makes at 30 000): 3.76-3.84 s auto, 3.78-3.84 s split, three
+calls each, no measurable difference, values bitwise equal at all three seeds. At 30 000
+(2.106e8, auto split into 6671 + 349): 4.57-4.59 s (two calls), 21.7-21.8 ns per history
+against 21.4-21.9 ns unsplit at 25 000; an explicit 3510 split gave 4.57 s and the auto
+split's bits.
+
+**Settled scale in an optimizer** (transports counted per call from outside the engine).
+`examples/vmat_arc_dao.py` at its defaults: 150 iterations, 150 contraction calls, all one
+transport, all deposit fold, while the histories per edge grew from 500 to 10 000 (102
+changes) and the a-priori scale moved between 2**24 and 2**29 (59 changes, one or two bands).
+The study's device loop on 1THA232 (pipeline settings: dose steps of 30k histories per
+column, 1000 per edge; no MC segment-weight step first): 40 iterations at 8 deg from the
+beam's-eye-view start, scale 2**2 throughout, and 40 at 4 deg from the
+interpolated plan, scale 2**2 or 2**3 (4 changes): 80 calls, all one transport. No call in
+either loop exceeded the guard at its a-priori scale, so none reran, and the remembered scale
+was never used: these loops do not exercise it.
+
+**Several devices** (partial; only `["cuda:0", "cpu"]` exists here; 1THA210, 8 deg, one
+process, three alternating rounds): `["cuda:0"]` 0.039-0.044 s; `["cuda:0", "cpu"]`
+0.107-0.111 s at `_FOLD_GROUPS_PER_DEVICE = 4`, 0.107-0.120 s at 2 and 0.107-0.113 s at 8
+(monkeypatched). Counted per device, the cpu launched only the set-up kernels
+(`build_proposals`, `fold_coefficients`) and no transport: the GPU emptied the group queue
+before the cpu shard took a group, and the values are the GPU-only call's bits. The mixed set
+therefore times the cpu shard's set-up, not the group scheduling, and says nothing about two
+identical GPUs.
+
+**Open.** Two identical GPUs: the four groups per device and the scheduling they are for are
+unmeasured. Which review fix costs the 1.2-5.7 %. The remembered scale under a source that
+does exceed the guard at its a-priori scale (no measured loop did). The old code at the full
+grid (not run; it was not in the first table either).
 
 `fold="dense"` is the verification instrument (AGENTS.md 2.10), the unrounded fold the
 deposit fold is pinned against, and the call's own fallback when the deposit fold cannot
 keep its guarantee (see above); it is not a supported second configuration. For the record,
 at the first head and one to four beamlets of millions of histories on a small grid it
 measured up to ~8 % faster than the deposit fold. The default is the deposit fold because the
-study cases, which are what it is for, are 2.8-8.3x faster with it.
+study cases, which are what it is for, are 2.4-8.1x faster with it (re-measured after the
+review fixes; 2.8-8.3x at the first head, on other plan states).
 
 **Not done, suggested.** Separate Warp structs for scoring and transport grids, so that the
 transport `GridInfo` loses its inert fold fields (the band array among them).

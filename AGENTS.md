@@ -434,8 +434,9 @@ These outlive the work that produced them. Each is a live constraint, not histor
   bound from `2**-56` to `2**(h-56)` of `max|a/m| E_max`, the per-voxel guarantee holding;
   a call needing more than six bands, or scales outside normal float range, runs the dense
   fold, logged at WARNING. `fold="dense"` is the test instrument and that fallback (section
-  2.10), not a second configuration. Timings behind the default predate the review fixes
-  and are to be re-measured (`docs/decisions.md`, "Contraction by deposit fold").
+  2.10), not a second configuration. Timings behind the default were re-measured after the
+  review fixes on one GPU; two identical GPUs are unmeasured (`docs/decisions.md`,
+  "Contraction by deposit fold").
 
 ## 9. Git workflow and commit convention
 

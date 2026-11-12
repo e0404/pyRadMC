@@ -292,24 +292,32 @@ without a field, so results are not byte-identical to the previous release.
   the rounding of each weighted deposit. Voxels fall into up to six octave bands of `a/m`,
   each with its own power-of-two scale `K_b`, so that in every scoring voxel with mass and a
   nonzero weight a deposit's rounding is at most `|a/m| x 0.51 eV`; per deposit that is at
-  most `2**-56` of `max|a/m| * E_max` at the a-priori scale. Measured at the first PR head,
-  before the review fixes: 6e-11 to 5e-10 of the largest value and below 5e-5 of its sigma
-  on the TG-119 study's leaf edge gradients, ~1e-13 relative on the test phantoms. An int64
-  guard checks every pass and reruns a call at a smaller scale (at most three passes); the
+  most `2**-56` of `max|a/m| * E_max` at the a-priori scale. Measured after the review
+  fixes on the TG-119 study's leaf edge gradients: 1.1e-10 to 1.1e-9 of the largest value,
+  below 1e-4 of the edge's own sigma on 99 % of the edges with a nonzero sigma, and at most
+  0.54 of it on a few edges whose value is below 1e-10 of the largest (6e-11 to 5e-10 of the
+  largest value at the first PR head, on other plan states); ~1e-13 relative on the test
+  phantoms. An int64 guard checks every pass and reruns a call at a smaller scale (at most
+  three passes); the
   engine starts the next call of the same kind where the last one settled, which changes the
   number of transports and never the result. A weight range needing more than six bands or
   leaving the normal float range, or passes that never satisfy the guard, run the dense fold
   for that call, logged at WARNING. `fold="dense"` is the verification instrument and that
   fallback, not a second supported configuration. `RunProvenance` records `fold` (the fold
   that ran), `fold_requested`, `fold_scale_exponent`, `fold_bands` and `fold_band_width`.
-  Timings (RTX 4070 Laptop, 2535 MHz, 1000 histories per edge) were also taken at the first
-  PR head and **are to be re-measured before merge** (the fixes add a band load per weighted
-  deposit and change `K`): 1THA232 1.39-1.42 s -> 0.171 s (4 deg, 7020 edges) and
-  0.69-0.74 s -> 0.093 s (8 deg); 1THA210 0.23-0.28 s -> 0.081 s and 0.16-0.19 s ->
-  0.042 s, i.e. 2.8-8.3x faster than the former contraction. The uncropped scoring grid
-  then cost about the same as the gradient box (0.177 s and 0.095 s on 1THA232). The fold's
-  index choice in the shared deposit path cost plain `run`/`run_dij` about 0.5 % / 0.3 %
-  wall time at that head (docs/decisions.md); their results are byte-identical.
+  Timings after the review fixes (RTX 4070 Laptop, 2520 MHz under load, 1000 histories per
+  edge, alternating processes, ranges of per-process bests; docs/decisions.md): 1THA232
+  1.2613-1.2628 s -> 0.1552-0.1566 s (4 deg, 7020 edges) and 0.5942-0.5962 s ->
+  0.0796-0.0803 s (8 deg); 1THA210 0.1651-0.1657 s -> 0.0647-0.0659 s and 0.0848-0.0862 s
+  -> 0.0344-0.0348 s, i.e. 2.4-8.1x faster than the former contraction (2.8-8.3x at the
+  first PR head, on other plan states). The review fixes made the fold 1.2-5.7 % slower
+  than at the first head, measured in the same session. The uncropped scoring grid costs
+  about the same as the gradient box (0.1589-0.1600 s and 0.0813-0.0821 s on 1THA232).
+  Every measured call, in the study's optimizer loop and in `examples/vmat_arc_dao.py`,
+  took one transport. The fold's index choice in the shared deposit path cost plain
+  `run`/`run_dij` about 0.5 % / 0.3 % wall time at the first head; with the band array
+  added since, no measurable difference in two sessions of three, and up to 2.5 % for `run`
+  in the third; their results are byte-identical.
 
 - Warp queue drain: rounds are launched blind at queue capacity and the counts read back
   once per block instead of before every launch (`WarpEngine(drain_rounds=...)`; default
