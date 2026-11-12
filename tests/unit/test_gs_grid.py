@@ -36,7 +36,7 @@ from pyradmc.data.goudsmit_saunderson import (
 )
 from pyradmc.data.materials import WATER
 
-E_MAX = 21.0
+E_MAX = 20.0  # the analytic source's declared energy domain
 
 # One-column-pair test window: eta around exp(-11.5) ~ 1e-5, theta2 raised off
 # the production floor so the build stays a few dozen cheap Monte-Carlo tables.

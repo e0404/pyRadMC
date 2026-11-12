@@ -154,6 +154,17 @@ class AnalyticCrossSections(CrossSectionSource):
         return 1
 
     @property
+    def energy_max(self) -> float:
+        """20 MeV: the top of the calibration, and the domain this source declares.
+
+        The pair channel is least-squares calibrated to NIST/XCOM water totals at
+        anchors ending at 20 MeV, and the radiative fit's top ESTAR anchor is 20 MeV.
+        Above that both are extrapolations of fitted polynomials in ``ln E``, which
+        this source refuses rather than answers.
+        """
+        return _WATER_TOTAL_MU_OVER_RHO_ANCHORS[-1][0]
+
+    @property
     def provenance(self) -> str:
         """Name the parameterization, so an archived dose is not mistaken for data.
 

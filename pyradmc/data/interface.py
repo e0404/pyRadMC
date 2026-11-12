@@ -33,11 +33,21 @@ if TYPE_CHECKING:
 
     from pyradmc.data.tables import CrossSectionTables
 
-__all__ = ["CrossSectionSource", "PhotonProcess"]
+__all__ = ["DOMAIN_EDGE_RTOL", "CrossSectionSource", "PhotonProcess", "require_energy_domain"]
 
-_RANGE_GRID_E_MAX: float = 64.0
-"""Upper edge (MeV) of the cached restricted-range grid: comfortably above the
-1-20 MeV engine scope; queries clamp to it."""
+DOMAIN_EDGE_RTOL: float = 1.0e-5
+"""Relative slack admitted above a source's :attr:`CrossSectionSource.energy_max`.
+
+Covers the engines' practice of building tables a hair above the primary energy
+(the Warp engine's ``1 + 1e-6`` table margin) and float noise on a compiled grid's
+top node. It is a rounding allowance, not an extrapolation licence: five orders of
+magnitude below any cross-section variation over the same span."""
+
+_RANGE_GRID_E_REF: float = 64.0
+"""Reference top (MeV) of the restricted-range grid: with :data:`_RANGE_GRID_POINTS`
+it fixes the node spacing (:func:`~pyradmc.data.grids.extendable_log_grid`). A
+source whose domain reaches higher gets nodes *appended* at the same spacing, so
+every range below 64 MeV is bit-identical whatever the domain."""
 
 _GS_BINS_PER_LOG: float = 4.0
 """Goudsmit-Saunderson grid nodes per natural log of ``eta`` and ``<theta^2>``.
@@ -108,6 +118,25 @@ class CrossSectionSource(ABC):
         from pyradmc.data.materials import MATERIALS
 
         return len(MATERIALS)
+
+    @property
+    def energy_max(self) -> float:
+        """Highest particle energy, in MeV, this source's data is valid for.
+
+        The energy counterpart of :attr:`n_materials`, enforced the same way: fail
+        closed. Tables are refused above it
+        (:func:`~pyradmc.data.tables.build_cross_section_tables`), the engines refuse
+        a source whose ``max_energy`` exceeds it (:func:`require_energy_domain`),
+        and the restricted-range lookup raises above it instead of clamping. Every
+        secondary is born below its primary's energy, so one bound covers photons
+        and electrons alike.
+
+        The default — unbounded — is for material- and energy-independent test
+        instruments. A calibrated source overrides it with what its data actually
+        covers: the analytic source its 20 MeV calibration range, the tabulated
+        source its compiled grid top.
+        """
+        return math.inf
 
     @property
     def provenance(self) -> str:
@@ -368,7 +397,12 @@ class CrossSectionSource(ABC):
         round-trip tests).
         """
         log_e, cumulative = self._range_grid(material, delta_cut)
-        e = min(max(energy, delta_cut), _RANGE_GRID_E_MAX)
+        e = max(energy, delta_cut)
+        if e > self.energy_max * (1.0 + DOMAIN_EDGE_RTOL) or math.log(e) > log_e[-1]:
+            raise ValueError(
+                f"restricted range queried at {energy} MeV, outside the energy domain of "
+                f"{type(self).__name__} (energy_max={self.energy_max} MeV)"
+            )
         return float(np.interp(np.log(e), log_e, cumulative))
 
     def energy_after_mass_path(
@@ -400,7 +434,15 @@ class CrossSectionSource(ABC):
         key = (material, delta_cut)
         grids = cache.get(key)
         if grids is None:
-            energies = np.geomspace(delta_cut, _RANGE_GRID_E_MAX, _RANGE_GRID_POINTS)
+            from pyradmc.data.grids import extendable_log_grid
+
+            top = self.energy_max * (1.0 + DOMAIN_EDGE_RTOL)
+            energies = extendable_log_grid(
+                delta_cut,
+                _RANGE_GRID_E_REF,
+                _RANGE_GRID_POINTS,
+                e_top=top if math.isfinite(top) else _RANGE_GRID_E_REF,
+            )
             inv_s = np.array(
                 [
                     1.0 / self.restricted_stopping_power(float(e), material, delta_cut)
@@ -445,4 +487,21 @@ class CrossSectionSource(ABC):
             pcut=pcut,
             e_max=e_max,
             n_points=TABLE_POINTS if n_points is None else n_points,
+        )
+
+
+def require_energy_domain(cross_sections: CrossSectionSource, energy: float) -> None:
+    """Raise unless ``energy`` (MeV) lies inside the source's declared domain.
+
+    The single check every entry point uses — the table build on the source's
+    behalf, and the engines on a primary source's ``max_energy`` before anything
+    is transported — so that data never answers outside the range it was built or
+    calibrated for. :data:`DOMAIN_EDGE_RTOL` absorbs rounding at the edge.
+    """
+    limit = cross_sections.energy_max
+    if energy > limit * (1.0 + DOMAIN_EDGE_RTOL):
+        raise ValueError(
+            f"{energy} MeV lies outside the energy domain of {type(cross_sections).__name__} "
+            f"(energy_max={limit} MeV): its data would be extrapolated or clamped there. "
+            "Use a source compiled or calibrated to cover this energy."
         )

@@ -55,7 +55,7 @@ from pyradmc.backends.results import RunProvenance, TransportResult
 from pyradmc.backends.warp import kernels
 from pyradmc.backends.warp.dij import DeviceDijResult
 from pyradmc.backends.warp.kernels import ENERGY_QUANTUM_MEV, GridInfo, Queue, Tables
-from pyradmc.data.interface import CrossSectionSource
+from pyradmc.data.interface import CrossSectionSource, require_energy_domain
 from pyradmc.geometry.collimation import TransmissionMaskSource
 from pyradmc.geometry.exterior import (
     EXTERIOR_AUTO,
@@ -1073,6 +1073,7 @@ class WarpEngine:
         instrument. ``step_energy_fraction=None`` resolves to the selected
         model's validated fraction.
         """
+        require_energy_domain(self.cross_sections, source.max_energy)
         if n_histories < 1:
             raise ValueError(f"need at least one history, got {n_histories}")
         if concurrent_batches < 1:
@@ -1896,6 +1897,7 @@ class WarpEngine:
         only in where the per-group blocks end up (``device_blocks``) and how they
         are concatenated.
         """
+        require_energy_domain(self.cross_sections, source.max_energy)
         if truncation < 0.0:
             # The host assembler's own check, made before any transport so the
             # device path (which has no assembler) refuses it equally early.

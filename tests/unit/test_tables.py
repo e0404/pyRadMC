@@ -24,7 +24,7 @@ from pyradmc.data.interface import PhotonProcess
 from pyradmc.data.materials import MATERIALS, WATER
 from tests.conftest import SEED
 
-E_MAX = 21.0
+E_MAX = 20.0  # the analytic source's declared energy domain
 GEOMETRY = ((WATER, 1.2),)
 
 
