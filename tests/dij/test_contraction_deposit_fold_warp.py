@@ -23,6 +23,7 @@ compared exactly.
 from __future__ import annotations
 
 import dataclasses
+import itertools
 import logging
 import math
 from fractions import Fraction
@@ -880,3 +881,88 @@ def test_cuda_weights_on_a_cpu_call_set_up_on_the_cpu(monkeypatch) -> None:
     assert on_cuda <= {key for key, device in dense_launches if device != "cpu"}
     np.testing.assert_array_equal(result.values, expected.values)
     np.testing.assert_array_equal(result.sigma, expected.sigma)
+
+
+# -- the overflow guard checks every pass it returns ---------------------------------
+
+
+def _record_passes(monkeypatch, quanta_factor=lambda n: 1) -> list[int | None]:
+    """Record each transport pass of a contraction: its ``log2 K_0``, ``None`` if dense.
+
+    ``quanta_factor(n)`` multiplies the ``sum |q|`` the guard reads after pass ``n``
+    (counted over every call on the engine): what a source with larger weights, or
+    one whose rerun deposits more than its first pass (the device pre-solve is
+    order-nondeterministic at a fixed seed), shows the guard. Only the guard's input
+    changes; the values are the real transport's.
+    """
+    passes: list[int | None] = []
+    original = warp_engine.WarpEngine._compute_dij
+
+    def spy(self, source, **kwargs):
+        run = original(self, source, **kwargs)
+        contraction = kwargs.get("contraction")
+        fold = isinstance(contraction, warp_engine._FoldSpec)
+        if fold:
+            run.fold_abs_quanta_max *= quanta_factor(len(passes))
+        passes.append(contraction.scale_exponent if fold else None)
+        return run
+
+    monkeypatch.setattr(warp_engine.WarpEngine, "_compute_dij", spy)
+    return passes
+
+
+def _assert_reaches_the_total_once(events, total: int) -> None:
+    done = [e.histories_done for e in events]
+    assert done and all(x < y for x, y in itertools.pairwise(done))
+    assert done[-1] == total
+    assert all(e.histories_total == total for e in events)
+
+
+def test_a_rerun_past_the_guard_is_rescaled_again(monkeypatch, caplog) -> None:
+    """The rerun's own ``sum |q|`` is checked: a rerun past the bound is never returned.
+
+    ``_FOLD_SCALE_BITS = 74`` makes the first pass really wrap. The second pass's
+    bound is raised 2**4, a rerun that deposits more than the pass it was scaled for,
+    so its accumulators may have wrapped too: it must be rescaled and run again rather
+    than trusted on the claim "same histories". The third pass holds and is returned.
+    """
+    engine = _engine("cpu")
+    a = np.ones(engine.grid.shape)
+    kwargs = dict(n_histories_per_beamlet=400, n_batches=4, seed=SEED)
+    dense = engine.run_beamlet_contraction(_source(), a, fold="dense", **kwargs)
+    monkeypatch.setattr(warp_engine, "_FOLD_SCALE_BITS", 74)
+    passes = _record_passes(monkeypatch, lambda n: 2**4 if n == 1 else 1)
+    events: list = []
+    with caplog.at_level(logging.INFO, logger=warp_engine.__name__):
+        deposit = engine.run_beamlet_contraction(_source(), a, progress=events.append, **kwargs)
+    assert len(passes) == 3 and None not in passes
+    assert passes[0] > passes[1] > passes[2]
+    assert not _fallbacks(caplog)
+    mass = ScoringGrid.for_grid(engine.grid).voxel_mass
+    _assert_within(deposit, dense, _guaranteed(a, mass, mass > 0.0))
+    _assert_reaches_the_total_once(events, _source().n_beamlets * 400)
+
+
+def test_a_fold_that_never_holds_runs_the_dense_fold(monkeypatch, caplog) -> None:
+    """Passes that keep exceeding their guard end, bounded, in the dense fold: no wrap.
+
+    Each pass's bound is raised 2**8 over the last, so no rescale ever holds. After
+    ``_FOLD_PASSES_MAX`` deposit-fold passes the call runs the dense fold, logged,
+    and returns exactly what ``fold="dense"`` returns.
+    """
+    engine = _engine("cpu")
+    a = np.ones(engine.grid.shape)
+    kwargs = dict(n_histories_per_beamlet=400, n_batches=4, seed=SEED)
+    dense = engine.run_beamlet_contraction(_source(), a, fold="dense", **kwargs)
+    monkeypatch.setattr(warp_engine, "_FOLD_SCALE_BITS", 74)
+    passes = _record_passes(monkeypatch, lambda n: 2 ** (8 * n))
+    events: list = []
+    with caplog.at_level(logging.INFO, logger=warp_engine.__name__):
+        deposit = engine.run_beamlet_contraction(_source(), a, progress=events.append, **kwargs)
+    assert passes[-1] is None
+    n = warp_engine._FOLD_PASSES_MAX
+    assert len(passes) == n + 1 and None not in passes[:n]
+    assert len(_fallbacks(caplog)) == 1
+    np.testing.assert_array_equal(deposit.values, dense.values)
+    np.testing.assert_array_equal(deposit.sigma, dense.sigma)
+    _assert_reaches_the_total_once(events, _source().n_beamlets * 400)

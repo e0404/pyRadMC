@@ -390,6 +390,29 @@ _FOLD_GUARD_BITS = 62
 smaller ``K_0``. The bound holds for every band's accumulator, since each band's
 ``K_b`` times its top ratio is ``K_0 2**e``."""
 
+_FOLD_PASSES_MAX = 3
+"""Deposit-fold passes one contraction may transport before it runs the dense fold.
+
+Every pass is checked against its own guard (:func:`_fold_guard_holds`) and none
+that fails is returned. A deterministic source needs at most two: the rerun at the
+guard's rescale transports the same histories, so its ``sum |q|`` is the first
+pass's and it holds by construction. A source whose deposits change between passes
+(the device pre-solve is order-nondeterministic at a fixed seed) may need a third;
+past that the call runs the dense fold, logged, rather than transport again."""
+
+
+def _fold_guard_holds(scale_exponent: int, ratio_exponent: int | None, quanta_max: int) -> bool:
+    """Whether ``(K_0 2**e + 1/2) Q`` stays below the guard at ``K_0 = 2**k``.
+
+    ``Q`` is the largest per-beamlet, per-batch ``sum |q|`` a pass measured: the
+    tally quanta before weighting, so it does not depend on ``K_0``. Zero weights
+    (``e is None``) cannot reach the guard.
+    """
+    ratio_bound = 0.0 if ratio_exponent is None else math.ldexp(1.0, ratio_exponent)
+    bound = (math.ldexp(1.0, scale_exponent) * ratio_bound + 0.5) * float(quanta_max)
+    return bound < math.ldexp(1.0, _FOLD_GUARD_BITS)
+
+
 _FOLD_RESOLUTION_BITS = 10
 """The deposit fold's resolution guarantee: ``K_b |a_v| / m_v >= 2**-10`` in *every*
 scoring voxel with mass and a nonzero weight, ``K_b`` the scale of its octave band.
@@ -908,6 +931,16 @@ class _FoldSpec:
             return plan
         return cls(weights, scale_exponent, ratio_exponent, min_exponent, *plan)
 
+    def rescaled(self, scale_exponent: int, per_batch: int) -> _FoldSpec | str:
+        """Return the same weights at ``K_0 = 2**scale_exponent``, re-banded, or why not."""
+        return _FoldSpec.banded(
+            self.weights, scale_exponent, self.ratio_exponent, self.min_exponent, per_batch
+        )
+
+    def guard_holds(self, quanta_max: int) -> bool:
+        """Whether a pass at this scale measuring ``quanta_max`` passed its guard."""
+        return _fold_guard_holds(self.scale_exponent, self.ratio_exponent, quanta_max)
+
     @property
     def scale(self) -> float:
         """``K_0``, band 0's weighted-quanta scale."""
@@ -950,6 +983,12 @@ class _DijRun:
     energy_escaped: float
     energy_unscored: float
     fold_abs_quanta_max: int = 0
+    fold_spec: _FoldSpec | None = None
+    """The deposit fold a contraction's result came from (scale, bands): set by
+    :meth:`WarpEngine.run_beamlet_contraction` on the pass it returns; ``None`` for
+    the dense fold and for every Dij."""
+    fold_passes: int = 0
+    """Transport passes the contraction ran in all, the returned one included."""
 
 
 class _Ticker(Protocol):
@@ -960,7 +999,7 @@ class _Ticker(Protocol):
 
 
 class _CallProgress:
-    """Progress over a call that may transport its histories twice (the fold's guard rerun).
+    """Progress over a call that may transport its histories more than once (guard reruns).
 
     One :class:`~pyradmc.progress.ProgressEmitter` serves the whole call, so the
     callback keeps the emitter's promises — serialized, strictly increasing
@@ -2591,7 +2630,11 @@ class WarpEngine:
             guard measures each beamlet's per-batch ``sum |q|``; should a call's
             weights push ``(K_0 2**e + 1/2) sum |q|`` to ``2**62``, the whole call is
             rerun (same seeds, same histories) at the largest safe scale, re-banded,
-            and logged. Energy books are the same integers as the dense fold's.
+            and logged. Every rerun is checked against its own guard in turn, since a
+            source need not deposit the same on a rerun (the device pre-solve is
+            order-nondeterministic): no pass whose guard failed is returned, and a call
+            none of whose :data:`_FOLD_PASSES_MAX` passes holds runs the dense fold,
+            logged. Energy books are the same integers as the dense fold's.
 
             ``"dense"``: each batch's group of dense quanta maps
             (``group x n_scoring_voxels``) is contracted with the weights per
@@ -2608,9 +2651,9 @@ class WarpEngine:
             nothing until the call returned (one whole-call group ticks as the
             reference engine does, once per batch). ``"dense"`` (and a call that
             falls back to it) ticks once per group, as :meth:`run_dij`. Should the
-            overflow guard rerun the call, only work that stands is reported: the
-            rerun's histories count once they pass what the first pass reported, so
-            progress pauses during the rerun, and the last tick, reaching the total
+            overflow guard rerun the call (once or more), only work that stands is
+            reported: a rerun's histories count once they pass what earlier passes
+            reported, so progress pauses during a rerun, and the last tick, reaching the total
             exactly once, is sent when the result is complete; ``histories_done``
             stays strictly increasing throughout.
         """
@@ -2664,37 +2707,9 @@ class WarpEngine:
             spec = self._fold_spec(weights, scoring, per_batch, source, devices)
         if spec is None:  # fold="dense", or a ratio range beyond the bands
             run = run_pass(weights)
+            run.fold_passes = 1
         else:
-            run = run_pass(spec)
-            bound = (spec.scale * spec.ratio_bound + 0.5) * float(run.fold_abs_quanta_max)
-            logger.debug(
-                "deposit fold: scale 2**%d, %d octave bands of %d, largest beamlet-batch "
-                "bound 2**%.1f",
-                spec.scale_exponent,
-                spec.n_bands,
-                spec.band_width,
-                math.log2(bound) if bound > 0.0 else -math.inf,
-            )
-            if bound >= math.ldexp(1.0, _FOLD_GUARD_BITS):
-                assert spec.ratio_exponent is not None  # zero weights cannot reach the guard
-                k = _fold_rescale_exponent(spec.ratio_exponent, run.fold_abs_quanta_max)
-                rescaled = _FoldSpec.banded(
-                    spec.weights, k, spec.ratio_exponent, spec.min_exponent, per_batch
-                )
-                if isinstance(rescaled, _FoldSpec):
-                    logger.info(
-                        "deposit fold: a beamlet batch's weighted sum could reach 2**%.1f of "
-                        "the int64 range at scale 2**%d; rescaling to 2**%d (%d octave "
-                        "bands) and rerunning the call",
-                        math.log2(bound),
-                        spec.scale_exponent,
-                        k,
-                        rescaled.n_bands,
-                    )
-                    run = run_pass(rescaled)
-                else:
-                    _log_dense_fallback(f"after rescaling to 2**{k}: {rescaled}")
-                    run = run_pass(weights)
+            run = self._settle_fold(spec, per_batch, run_pass, weights)
         call_progress.finish()
         return ContractionResult(
             values=np.concatenate([run.blocks[gs][0] for gs in run.group_starts]),
@@ -2708,6 +2723,72 @@ class WarpEngine:
             energy_unscored=run.energy_unscored,
             provenance=run.provenance,
         )
+
+    def _settle_fold(
+        self,
+        spec: _FoldSpec,
+        per_batch: int,
+        run_pass: Callable[[np.ndarray | wp.array | _FoldSpec], _DijRun],
+        weights: np.ndarray | wp.array,
+    ) -> _DijRun:
+        """Run the deposit fold until a pass holds its own overflow guard; return that pass.
+
+        No pass whose guard failed is ever returned: a failing pass is rerun at the
+        guard's rescale from the largest ``sum |q|`` any pass of the call measured
+        (:func:`_fold_rescale_exponent`), re-banded, and that rerun is checked in
+        turn. After :data:`_FOLD_PASSES_MAX` failing passes, or when a rescale cannot
+        be banded (:func:`_fold_plan`), the call runs the dense fold, logged.
+        """
+        current = spec
+        quanta_max = 0
+        for attempt in range(1, _FOLD_PASSES_MAX + 1):
+            run = run_pass(current)
+            quanta_max = max(quanta_max, run.fold_abs_quanta_max)
+            holds = current.guard_holds(run.fold_abs_quanta_max)
+            logger.debug(
+                "deposit fold pass %d: scale 2**%d, %d octave bands of %d, largest "
+                "beamlet-batch sum |q| %d, guard %s",
+                attempt,
+                current.scale_exponent,
+                current.n_bands,
+                current.band_width,
+                run.fold_abs_quanta_max,
+                "holds" if holds else "exceeded",
+            )
+            if holds:
+                run.fold_spec, run.fold_passes = current, attempt
+                return run
+            if attempt == _FOLD_PASSES_MAX:
+                break
+            assert current.ratio_exponent is not None  # zero weights cannot reach the guard
+            k = _fold_rescale_exponent(current.ratio_exponent, quanta_max)
+            rescaled = current.rescaled(k, per_batch)
+            if isinstance(rescaled, str):
+                _log_dense_fallback(f"after rescaling to 2**{k}: {rescaled}")
+                run = run_pass(weights)
+                run.fold_passes = attempt + 1
+                return run
+            logger.info(
+                "deposit fold: a beamlet batch's weighted sum could reach 2**%.1f of the "
+                "int64 range at scale 2**%d; rescaling to 2**%d (%d octave bands) and "
+                "rerunning the call",
+                math.log2(current.scale * current.ratio_bound + 0.5)
+                + math.log2(run.fold_abs_quanta_max),
+                current.scale_exponent,
+                k,
+                rescaled.n_bands,
+            )
+            current = rescaled
+        logger.warning(
+            "deposit fold: %d passes each exceeded the int64 guard (the source's deposits "
+            "changed between passes of the same histories, largest beamlet-batch sum |q| "
+            "%d); running the dense fold for this call",
+            _FOLD_PASSES_MAX,
+            quanta_max,
+        )
+        run = run_pass(weights)
+        run.fold_passes = _FOLD_PASSES_MAX + 1
+        return run
 
     def _call_devices(self, devices: Sequence[str] | None) -> list[str]:
         """Return the devices a Dij-family call runs on: de-duplicated, in order, not empty."""
