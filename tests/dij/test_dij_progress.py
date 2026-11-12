@@ -166,6 +166,78 @@ def test_warp_run_dij_multi_device_shares_one_emitter() -> None:
     _assert_well_formed(events, source.n_beamlets * N_PER)
 
 
+def _contract(engine: WarpEngine, source, events: list[ProgressEvent], **kwargs) -> None:
+    import numpy as np
+
+    engine.run_beamlet_contraction(
+        source,
+        np.ones(engine.grid.shape),
+        n_histories_per_beamlet=N_PER,
+        n_batches=N_BATCHES,
+        seed=SEED,
+        progress=events.append,
+        **kwargs,
+    )
+
+
+@pytest.mark.parametrize("group", [None, GROUP])
+def test_warp_contraction_deposit_fold_ticks_once_per_batch_of_each_group(group) -> None:
+    """The deposit fold's group may be the whole call: it ticks per batch, not per group.
+
+    Ticking per group reported nothing until the call returned when the auto group took
+    every beamlet. Per batch, one whole-call group ticks exactly as the reference engine
+    does (``test_ref_run_dij_ticks_once_per_batch``).
+    """
+    source = _lattice()
+    events: list[ProgressEvent] = []
+    _contract(_warp_engine(), source, events, beamlet_group_size=group)
+    _assert_well_formed(events, source.n_beamlets * N_PER)
+    groups = 1 if group is None else math.ceil(source.n_beamlets / group)
+    assert len(events) == groups * N_BATCHES
+
+
+def test_warp_contraction_dense_fold_ticks_once_per_beamlet_group() -> None:
+    source = _lattice()
+    events: list[ProgressEvent] = []
+    _contract(_warp_engine(), source, events, beamlet_group_size=GROUP, fold="dense")
+    _assert_well_formed(events, source.n_beamlets * N_PER)
+    assert len(events) == math.ceil(source.n_beamlets / GROUP)
+
+
+def test_warp_contraction_rerun_reaches_the_total_once(monkeypatch, caplog) -> None:
+    """An overflow-guard rerun must not restart the count or reach the total twice.
+
+    ``_FOLD_SCALE_BITS = 74`` forces the guard (as in the fold's rescale test): the
+    first pass is discarded and the call rerun at a safe scale. Progress counts only
+    work that stands: the rerun's histories are reported once they pass what the
+    first pass reported, and the total is reached once, when the call's result does.
+    """
+    import logging
+
+    from pyradmc.backends.warp import engine as warp_engine
+
+    source = _lattice()
+    events: list[ProgressEvent] = []
+    monkeypatch.setattr(warp_engine, "_FOLD_SCALE_BITS", 74)
+    with caplog.at_level(logging.INFO, logger=warp_engine.__name__):
+        _contract(_warp_engine(), source, events, beamlet_group_size=GROUP)
+    assert any("rerunning the call" in r.getMessage() for r in caplog.records)
+    _assert_well_formed(events, source.n_beamlets * N_PER)
+
+
+@pytest.mark.gpu
+def test_warp_contraction_lanes_tick_once_per_batch() -> None:
+    if not wp.is_cuda_available():
+        pytest.skip("no CUDA device")
+    source = _lattice()
+    events: list[ProgressEvent] = []
+    _contract(
+        _warp_engine("cuda:0"), source, events, beamlet_group_size=GROUP, concurrent_batches=2
+    )
+    _assert_well_formed(events, source.n_beamlets * N_PER)
+    assert len(events) == math.ceil(source.n_beamlets / GROUP) * N_BATCHES
+
+
 @pytest.mark.gpu
 def test_warp_run_dij_concurrent_batches_ticks_once_per_group() -> None:
     """Lanes must not tick individually — only the shard's per-group point does."""

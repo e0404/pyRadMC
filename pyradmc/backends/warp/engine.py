@@ -39,7 +39,7 @@ import threading
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 import numpy as np
 import warp as wp
@@ -950,6 +950,59 @@ class _DijRun:
     energy_escaped: float
     energy_unscored: float
     fold_abs_quanta_max: int = 0
+
+
+class _Ticker(Protocol):
+    """Where a Dij shard reports progress: a ``ProgressEmitter`` or a :class:`_CallProgress`."""
+
+    def tick(self, histories: int) -> None:
+        """Record that ``histories`` more histories completed."""
+
+
+class _CallProgress:
+    """Progress over a call that may transport its histories twice (the fold's guard rerun).
+
+    One :class:`~pyradmc.progress.ProgressEmitter` serves the whole call, so the
+    callback keeps the emitter's promises — serialized, strictly increasing
+    ``histories_done``, one ``histories_total`` — across passes. A pass reports to
+    :meth:`tick` after :meth:`begin_pass`; only work that stands is forwarded:
+
+    - histories beyond what earlier passes already reported (a rerun covers the same
+      histories again, so progress pauses until it passes the first pass's mark);
+    - never the tick that would reach the total: that is held until :meth:`finish`,
+      which the caller sends once it knows the pass stands, so the total is reached
+      exactly once, when the call's result exists.
+
+    ``rate_hz`` of a forwarded tick is therefore the rate of standing work: after a
+    rerun's pause it is lower than the transport's.
+    """
+
+    def __init__(self, callback: ProgressCallback | None, histories_total: int) -> None:
+        self._emitter = ProgressEmitter(callback, histories_total)
+        self._total = histories_total
+        self._lock = threading.Lock()
+        self._pass_done = 0
+        self._reported = 0
+
+    def begin_pass(self) -> None:
+        """Start counting a (re)run of the call's histories from zero."""
+        with self._lock:
+            self._pass_done = 0
+
+    def tick(self, histories: int) -> None:
+        """Record ``histories`` more of this pass; forward what passes the reported mark."""
+        with self._lock:
+            self._pass_done += histories
+            if self._reported < self._pass_done < self._total:
+                self._emitter.tick(self._pass_done - self._reported)
+                self._reported = self._pass_done
+
+    def finish(self) -> None:
+        """Report the rest once the call's last pass stands, reaching the total once."""
+        with self._lock:
+            if self._reported < self._total:
+                self._emitter.tick(self._total - self._reported)
+                self._reported = self._total
 
 
 @dataclass
@@ -2544,6 +2597,20 @@ class WarpEngine:
             a device. A verification instrument (AGENTS.md 2.10): it is the
             unrounded fold the deposit fold is pinned against, at a cost that
             scales with ``beamlets x scoring voxels``.
+        progress
+            Optional callback, as in :meth:`run_dij` (see :mod:`pyradmc.progress`):
+            one emitter for the whole call, shared by every device shard. The
+            deposit fold ticks once per *batch* of each beamlet group, each tick
+            covering that batch's ``group * n_histories_per_beamlet / n_batches``
+            histories: its group may be every beamlet, and per-group ticks then said
+            nothing until the call returned (one whole-call group ticks as the
+            reference engine does, once per batch). ``"dense"`` (and a call that
+            falls back to it) ticks once per group, as :meth:`run_dij`. Should the
+            overflow guard rerun the call, only work that stands is reported: the
+            rerun's histories count once they pass what the first pass reported, so
+            progress pauses during the rerun, and the last tick, reaching the total
+            exactly once, is sent when the result is complete; ``histories_done``
+            stays strictly increasing throughout.
         """
         if fold not in ("deposit", "dense"):
             raise ValueError(f"unknown fold {fold!r}; expected 'deposit' or 'dense'")
@@ -2576,17 +2643,27 @@ class WarpEngine:
             msc_model=msc_model,
             devices=devices,
             concurrent_batches=concurrent_batches,
-            progress=progress,
+            progress=None,
             device_blocks=False,
         )
+        # One progress over every pass: a guard rerun must neither restart the count
+        # nor reach the total twice (see _CallProgress).
+        call_progress = _CallProgress(progress, source.n_beamlets * n_histories_per_beamlet)
+
+        def run_pass(contraction: np.ndarray | wp.array | _FoldSpec) -> _DijRun:
+            call_progress.begin_pass()
+            return self._compute_dij(
+                source, **common, contraction=contraction, emitter=call_progress
+            )
+
         spec = None
         per_batch = n_histories_per_beamlet // max(n_batches, 1)
         if fold == "deposit":
             spec = self._fold_spec(weights, scoring, per_batch, source, devices)
         if spec is None:  # fold="dense", or a ratio range beyond the bands
-            run = self._compute_dij(source, **common, contraction=weights)
+            run = run_pass(weights)
         else:
-            run = self._compute_dij(source, **common, contraction=spec)
+            run = run_pass(spec)
             bound = (spec.scale * spec.ratio_bound + 0.5) * float(run.fold_abs_quanta_max)
             logger.debug(
                 "deposit fold: scale 2**%d, %d octave bands of %d, largest beamlet-batch "
@@ -2612,10 +2689,11 @@ class WarpEngine:
                         k,
                         rescaled.n_bands,
                     )
-                    run = self._compute_dij(source, **common, contraction=rescaled)
+                    run = run_pass(rescaled)
                 else:
                     _log_dense_fallback(f"after rescaling to 2**{k}: {rescaled}")
-                    run = self._compute_dij(source, **common, contraction=weights)
+                    run = run_pass(weights)
+        call_progress.finish()
         return ContractionResult(
             values=np.concatenate([run.blocks[gs][0] for gs in run.group_starts]),
             sigma=np.concatenate([run.blocks[gs][1] for gs in run.group_starts]),
@@ -2787,8 +2865,12 @@ class WarpEngine:
         progress: ProgressCallback | None,
         device_blocks: bool,
         contraction: np.ndarray | wp.array | _FoldSpec | None = None,
+        emitter: _Ticker | None = None,
     ) -> _DijRun:
         """Validate, schedule and run every beamlet group; merge shards and books.
+
+        ``emitter`` replaces the call's own ``ProgressEmitter(progress, ...)``, for a
+        caller that spans several runs with one progress (``progress`` is then unused).
 
         Everything :meth:`run_dij`, :meth:`run_dij_device` and
         :meth:`run_beamlet_contraction` share. The Dij paths differ only in where
@@ -2881,7 +2963,8 @@ class WarpEngine:
             devices=device_list,
         )
 
-        emitter = ProgressEmitter(progress, n_beamlets * n_histories_per_beamlet)
+        if emitter is None:
+            emitter = ProgressEmitter(progress, n_beamlets * n_histories_per_beamlet)
         args = dict(
             source=source,
             n_histories_per_beamlet=n_histories_per_beamlet,
@@ -2981,7 +3064,7 @@ class WarpEngine:
         scoring: ScoringGrid,
         dose_to_water: int,
         concurrent_batches: int,
-        emitter: ProgressEmitter,
+        emitter: _Ticker,
         device_blocks: bool = False,
         contraction: np.ndarray | wp.array | _FoldSpec | None = None,
     ) -> _DijShard:
@@ -3210,6 +3293,12 @@ class WarpEngine:
         elif fold_buffers is not None:
             column_sums = fold_buffers[:2]
 
+        # The deposit fold ticks once per batch of a group (its ``block_histories``),
+        # the other folds once per group: a fold group may be the whole call, which
+        # then ticked only on return. After a fold batch only its close (one launch,
+        # a thread per beamlet) remains, so a tick there is not early.
+        batch_emitter = emitter if fold_spec is not None else None
+
         while (group_start := next_group()) is not None:
             group = min(beamlet_group_size, n_beamlets - group_start)
             block_histories = group * per_batch  # one batch's block
@@ -3259,6 +3348,8 @@ class WarpEngine:
                         **route_args,
                     )
                     self._fold_dij_batch(res.edep, group, None, **fold_args)
+                    if batch_emitter is not None:
+                        batch_emitter.tick(block_histories)
             else:
                 self._run_dij_group_lanes(
                     lane_resources,
@@ -3272,6 +3363,7 @@ class WarpEngine:
                     shard,
                     route_args,
                     fold_args,
+                    batch_emitter,
                 )
 
             if lanes > 1:
@@ -3302,7 +3394,8 @@ class WarpEngine:
                 unscored_quanta += books["unscored"]
                 shard.fold_abs_quanta_max = books["fold_q_max"]  # whole-call maximum
                 shard.blocks[group_start] = (mean, sigma)
-                emitter.tick(group * n_histories_per_beamlet)
+                if batch_emitter is None:  # the dense contraction ticks per group
+                    emitter.tick(group * n_histories_per_beamlet)
                 continue
             # Turn the group's accumulated sums into per-column dose mean and sigma,
             # in place: each thread reads s1[tid]/s2[tid] and writes only its own
@@ -3796,6 +3889,7 @@ class WarpEngine:
         shard,
         route_args,
         fold_args,
+        batch_emitter: _Ticker | None = None,
     ) -> None:
         """Transport up to ``len(lane_resources)`` batches of one group concurrently.
 
@@ -3817,6 +3911,10 @@ class WarpEngine:
         The pre-sampled route's host-side emitted sums are collected per batch and
         folded into the shard in batch order after the join, so that float sum
         cannot depend on lane timing either.
+
+        ``batch_emitter`` (the deposit fold) gets ``block_histories`` per batch once
+        that batch is folded, outside the fold turn so that a slow progress callback
+        cannot hold up the other lanes' folds.
         """
         device = route_args["device"]
         lanes = len(lane_resources)
@@ -3856,6 +3954,8 @@ class WarpEngine:
                         wp.synchronize_stream(fold_stream)
                         state["next_fold"] = b + 1
                         cond.notify_all()
+                    if batch_emitter is not None:
+                        batch_emitter.tick(block_histories)
             except BaseException:
                 with cond:
                     state["failed"] = True
