@@ -491,9 +491,39 @@ def _fold_bands(
     return width, count
 
 
+def _fold_plan(
+    scale_exponent: int, ratio_exponent: int | None, min_exponent: int | None, per_batch: int
+) -> tuple[int, int] | str:
+    """Return the bands ``(W, n)`` at ``K_0 = 2**k``, or why the call must run dense.
+
+    :func:`_fold_bands`, plus the float64 range every scale must stay in: ``K_0`` and
+    the top band's ``K_{n-1} = 2**(k+(n-1)W)`` normal floats, and the smallest batch
+    scale ``quantum / (K_{n-1} per_batch)`` too (the close multiplies band 0's batch
+    scale down by ``2**-W`` per band, which is exact only while it stays normal).
+    Extreme weights break this — ``|a/m|`` near 1e-300 wants ``K`` near the top of
+    the float range, and near 1e-302 ``K * per_batch`` overflowed and the values
+    silently became zero — and are then the dense fold's to fold. Integer and IEEE
+    host arithmetic only: the same decision on every target.
+    """
+    bands = _fold_bands(scale_exponent, ratio_exponent, min_exponent)
+    if bands is None:
+        return f"needs more than {_FOLD_BANDS_MAX} octave bands"
+    width, count = bands
+    top = scale_exponent + (count - 1) * width
+    if scale_exponent < -1022 or top > 1023:
+        return f"scales 2**{scale_exponent} to 2**{top} leave the float64 range"
+    if ENERGY_QUANTUM_MEV / (math.ldexp(1.0, top) * per_batch) < sys.float_info.min:
+        return f"the batch scale at 2**{top} would be subnormal"
+    return bands
+
+
 def _fold_stride(n_bands: int) -> int:
     """int64 elements per sub-accumulator for ``n_bands`` bands."""
     return _FOLD_SLOT_STRIDE if n_bands <= 2 else _FOLD_SLOT_STRIDE_WIDE
+
+
+class _FoldRangeError(Exception):
+    """A deposit fold whose scales would leave the float64 normal range: run dense."""
 
 
 _FOLD_SEED_CHUNK = 256
@@ -571,15 +601,16 @@ def _fold_ratio_octaves(
     a seed within an ulp of the truth takes one launch and a seed on the wrong side
     of a power of two two, and every seed (any target's quotient) ends on the same
     ``(e, f)``. Ratios outside the window in which the comparisons are exact
-    (:func:`_octave_window`, about ``2**+-1000`` for ordinary masses) are refused.
+    (:func:`_octave_window`, about ``2**+-1000`` for ordinary masses) raise
+    :class:`_FoldRangeError`, on which the engine runs the dense fold.
     """
     seed = _fold_ratio_seed(flat, voxel_mass, device)
     if not seed.weighted:
         return None
     k_lo, k_hi = _octave_window(seed.mass_min, seed.mass_max)
-    out_of_range = ValueError(
-        "the voxel weights' |a/m| range lies outside the deposit fold's float64 range; "
-        "use fold='dense'"
+    out_of_range = _FoldRangeError(
+        "|a/m| over the weighted voxels reaches outside the range in which its octaves "
+        "can be decided exactly"
     )
     if k_lo + 1 > k_hi:
         raise out_of_range
@@ -660,16 +691,12 @@ def _fold_coefficients(
     return coef, band
 
 
-def _log_dense_fallback(ratio_exponent: int, min_exponent: int, scale_exponent: int) -> None:
-    """Say that a call's ratio range is beyond the bands and that it runs the dense fold."""
+def _log_dense_fallback(reason: str) -> None:
+    """Say why a call cannot keep the deposit fold's guarantee and runs the dense fold."""
     logger.warning(
-        "deposit fold: |a/m| over the weighted voxels spans 2**%d to 2**%d, more than %d "
-        "octave bands can carry at scale 2**%d and a weighted quantum of at most 2**%d "
-        "energy quanta per weighted voxel; running the dense fold for this call",
-        min_exponent - 1,
-        ratio_exponent,
-        _FOLD_BANDS_MAX,
-        scale_exponent,
+        "deposit fold: %s (a weighted quantum of at most 2**%d energy quanta in every "
+        "weighted voxel, within the float64 range); running the dense fold for this call",
+        reason,
         _FOLD_RESOLUTION_BITS,
     )
 
@@ -813,12 +840,13 @@ class _FoldSpec:
         scale_exponent: int,
         ratio_exponent: int | None,
         min_exponent: int | None,
-    ) -> _FoldSpec | None:
-        """Return the spec at ``K_0 = 2**scale_exponent``, ``None`` past the band limits."""
-        bands = _fold_bands(scale_exponent, ratio_exponent, min_exponent)
-        if bands is None:
-            return None
-        return cls(weights, scale_exponent, ratio_exponent, min_exponent, *bands)
+        per_batch: int,
+    ) -> _FoldSpec | str:
+        """Return the spec at ``K_0 = 2**scale_exponent``, or why not (:func:`_fold_plan`)."""
+        plan = _fold_plan(scale_exponent, ratio_exponent, min_exponent, per_batch)
+        if isinstance(plan, str):
+            return plan
+        return cls(weights, scale_exponent, ratio_exponent, min_exponent, *plan)
 
     @property
     def scale(self) -> float:
@@ -2483,10 +2511,9 @@ class WarpEngine:
             device_blocks=False,
         )
         spec = None
+        per_batch = n_histories_per_beamlet // max(n_batches, 1)
         if fold == "deposit":
-            spec = self._fold_spec(
-                weights, scoring, n_histories_per_beamlet // max(n_batches, 1), source
-            )
+            spec = self._fold_spec(weights, scoring, per_batch, source)
         if spec is None:  # fold="dense", or a ratio range beyond the bands
             run = self._compute_dij(source, **common, contraction=weights)
         else:
@@ -2503,8 +2530,10 @@ class WarpEngine:
             if bound >= math.ldexp(1.0, _FOLD_GUARD_BITS):
                 assert spec.ratio_exponent is not None  # zero weights cannot reach the guard
                 k = _fold_rescale_exponent(spec.ratio_exponent, run.fold_abs_quanta_max)
-                rescaled = _FoldSpec.banded(spec.weights, k, spec.ratio_exponent, spec.min_exponent)
-                if rescaled is not None:
+                rescaled = _FoldSpec.banded(
+                    spec.weights, k, spec.ratio_exponent, spec.min_exponent, per_batch
+                )
+                if isinstance(rescaled, _FoldSpec):
                     logger.info(
                         "deposit fold: a beamlet batch's weighted sum could reach 2**%.1f of "
                         "the int64 range at scale 2**%d; rescaling to 2**%d (%d octave "
@@ -2516,8 +2545,7 @@ class WarpEngine:
                     )
                     run = self._compute_dij(source, **common, contraction=rescaled)
                 else:
-                    assert spec.min_exponent is not None
-                    _log_dense_fallback(spec.ratio_exponent, spec.min_exponent, k)
+                    _log_dense_fallback(f"after rescaling to 2**{k}: {rescaled}")
                     run = self._compute_dij(source, **common, contraction=weights)
         return ContractionResult(
             values=np.concatenate([run.blocks[gs][0] for gs in run.group_starts]),
@@ -2551,7 +2579,8 @@ class WarpEngine:
 
         The octave of the smallest ratio sets the band count (:func:`_fold_bands`);
         returns ``None`` (logged) when the range needs more than
-        :data:`_FOLD_BANDS_MAX` bands: the caller then runs the dense fold.
+        :data:`_FOLD_BANDS_MAX` bands or a scale would leave the float64 normal
+        range (:func:`_fold_plan`): the caller then runs the dense fold.
         """
         if isinstance(weights, wp.array):
             flat, device = weights, str(weights.device)
@@ -2559,14 +2588,22 @@ class WarpEngine:
             device = self.device
             flat = wp.array(weights.reshape(-1), dtype=wp.float64, device=device)
         _, voxel_mass = self._upload_scoring(scoring, device)
-        octaves = _fold_ratio_octaves(flat, voxel_mass, device)
+        try:
+            octaves = _fold_ratio_octaves(flat, voxel_mass, device)
+        except _FoldRangeError as exc:
+            _log_dense_fallback(str(exc))
+            return None
         if octaves is None:
-            return _FoldSpec.banded(flat, 0, None, None)  # every coefficient is zero
+            zero = _FoldSpec.banded(flat, 0, None, None, per_batch)  # all coefficients 0
+            assert isinstance(zero, _FoldSpec)
+            return zero
         e, f = octaves
         k = _fold_scale_exponent(e, per_batch, source.max_energy)
-        spec = _FoldSpec.banded(flat, k, e, f)
-        if spec is None:
-            _log_dense_fallback(e, f, k)
+        spec = _FoldSpec.banded(flat, k, e, f, per_batch)
+        if isinstance(spec, str):
+            span = f"|a/m| over the weighted voxels spans 2**{f - 1} to 2**{e}"
+            _log_dense_fallback(f"{span}: {spec}")
+            return None
         return spec
 
     def _compute_dij(

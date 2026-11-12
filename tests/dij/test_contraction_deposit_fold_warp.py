@@ -243,6 +243,26 @@ def test_zero_weights_contract_to_exactly_zero(device: str) -> None:
     assert deposit.energy_deposited == dense.energy_deposited > 0.0
 
 
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("magnitude", [1e-290, 1e-300, 1e-302, 1e-305, 1e-310])
+def test_tiny_weights_fold_like_the_dense_fold(device: str, magnitude: float) -> None:
+    """Tiny finite weights: no exception and no silent zero, the dense fold's values.
+
+    Tiny weights need ``K`` near or past the float64 range: ``2**1031`` at 1e-305
+    (``math.ldexp`` raised), and near 1e-302 ``K * per_batch`` overflowed, the batch
+    scale became zero and every value with it; at 1e-300 the batch scale was a
+    subnormal with a few significant bits. Where ``K``, the band scales and the
+    batch scales cannot all stay normal floats, the call runs the dense fold.
+    """
+    engine = _engine(device)
+    a = np.full(engine.grid.shape, magnitude)
+    kwargs = dict(n_histories_per_beamlet=800, n_batches=8, seed=SEED)
+    deposit, dense = _both(engine, _source(), a, **kwargs)
+    assert np.all(dense.values != 0.0)
+    np.testing.assert_allclose(deposit.values, dense.values, rtol=1e-9, atol=0.0)
+    np.testing.assert_allclose(deposit.sigma, dense.sigma, rtol=1e-6, atol=0.0)
+
+
 def test_an_unknown_fold_is_refused() -> None:
     engine = _engine("cpu")
     with pytest.raises(ValueError, match="fold"):
