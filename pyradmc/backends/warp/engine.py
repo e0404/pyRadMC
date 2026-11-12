@@ -2428,7 +2428,8 @@ class WarpEngine:
         ``voxel_weights`` may also be a ``wp.float64`` Warp array (Warp only; see
         :func:`~pyradmc.backends.warp.dij.device_voxel_weights`), of the scoring
         grid's shape or flat: it is validated on its device and used there without
-        a host copy (copied device to device if it lies on another one), for an
+        a host copy (copied device to device to a device the call runs on, if it
+        lies on another one; no device outside ``devices`` is touched), for an
         optimizer that forms the objective gradient on the GPU. The result is
         bit-identical to passing the same values as a NumPy array (test-pinned).
 
@@ -2513,7 +2514,7 @@ class WarpEngine:
         spec = None
         per_batch = n_histories_per_beamlet // max(n_batches, 1)
         if fold == "deposit":
-            spec = self._fold_spec(weights, scoring, per_batch, source)
+            spec = self._fold_spec(weights, scoring, per_batch, source, devices)
         if spec is None:  # fold="dense", or a ratio range beyond the bands
             run = self._compute_dij(source, **common, contraction=weights)
         else:
@@ -2560,17 +2561,29 @@ class WarpEngine:
             provenance=run.provenance,
         )
 
+    def _call_devices(self, devices: Sequence[str] | None) -> list[str]:
+        """Return the devices a Dij-family call runs on: de-duplicated, in order, not empty."""
+        device_list = [self.device] if devices is None else list(dict.fromkeys(devices))
+        if not device_list:
+            raise ValueError("devices must name at least one device")
+        return device_list
+
     def _fold_spec(
         self,
         weights: np.ndarray | wp.array,
         scoring: ScoringGeometry,
         per_batch: int,
         source: BeamletSource,
+        devices: Sequence[str] | None = None,
     ) -> _FoldSpec | None:
         """Put the weights on a device and derive the deposit fold's scale ``K`` there.
 
-        Host weights go to the engine's device (a shard there reads them in place),
-        device weights stay where they are. ``K`` depends on the weights only through
+        Only a device the call runs on (``devices``, resolved as the call resolves it)
+        is touched, as on the dense fold: host weights go to the first listed device
+        (a shard there reads them in place), device weights stay where they are if
+        that device is listed and are copied to the first listed device otherwise.
+        The engine's own device is used only when ``devices`` is ``None``, where it
+        is the call's device. ``K`` depends on the weights only through
         the exact octave of ``max |a_v| / m_v`` (:func:`_fold_ratio_octaves`), which is
         decided by exact comparisons rather than by this module's fast_math division,
         so host weights and device weights — on whichever device — give the same
@@ -2582,10 +2595,13 @@ class WarpEngine:
         :data:`_FOLD_BANDS_MAX` bands or a scale would leave the float64 normal
         range (:func:`_fold_plan`): the caller then runs the dense fold.
         """
+        listed = self._call_devices(devices)
         if isinstance(weights, wp.array):
-            flat, device = weights, str(weights.device)
+            device = next((d for d in listed if wp.get_device(d) == weights.device), listed[0])
+            same = wp.get_device(device) == weights.device
+            flat = weights if same else wp.clone(weights, device=device)
         else:
-            device = self.device
+            device = listed[0]
             flat = wp.array(weights.reshape(-1), dtype=wp.float64, device=device)
         _, voxel_mass = self._upload_scoring(scoring, device)
         try:
@@ -2672,9 +2688,7 @@ class WarpEngine:
         n_beamlets = source.n_beamlets
         per_batch = n_histories_per_beamlet // n_batches
 
-        device_list = [self.device] if devices is None else list(dict.fromkeys(devices))
-        if not device_list:
-            raise ValueError("devices must name at least one device")
+        device_list = self._call_devices(devices)
 
         if beamlet_group_size is None:
             # One shared size for every device: group_starts partitions the beamlet

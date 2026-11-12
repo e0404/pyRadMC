@@ -656,3 +656,66 @@ class TestFoldSubslots:
             n_sub = warp_engine._fold_subslots(group)
             assert n_sub & (n_sub - 1) == 0  # a power of two: the kernels mask with it
             assert n_sub == 1 or n_sub * group <= target
+
+
+def _launches(monkeypatch) -> set[tuple[str, str]]:
+    """Record ``(kernel key, device)`` of every kernel launch (a stream names its device)."""
+    seen: set[tuple[str, str]] = set()
+    real = wp.launch
+
+    def spy(kernel, *args, **kwargs):
+        stream = kwargs.get("stream")
+        device = stream.device if stream is not None else kwargs.get("device")
+        seen.add((kernel.key, str(wp.get_device(device))))
+        return real(kernel, *args, **kwargs)
+
+    monkeypatch.setattr(wp, "launch", spy)
+    return seen
+
+
+def test_fold_setup_stays_on_the_listed_devices(monkeypatch) -> None:
+    """An engine on cuda:0 called with ``devices=['cpu']`` touches only the cpu.
+
+    The fold's set-up (weights upload, scoring masses, the ratio and band kernels)
+    used to run on the engine's own device even when ``devices`` excluded it.
+    Building the engine touches no device, so this runs without CUDA too (where the
+    old set-up raised).
+    """
+    grid = VoxelGrid.uniform_water(shape=(10, 10, 8), spacing=(1.0, 1.0, 1.0))
+    xs = AnalyticCrossSections(geometry_densities=grid.max_density_by_material())
+    engine = warp_engine.WarpEngine(grid=grid, cross_sections=xs, device="cuda:0")
+    a = _weights(grid.shape)
+    kwargs = dict(n_histories_per_beamlet=400, n_batches=4, seed=SEED)
+    expected = _engine("cpu").run_beamlet_contraction(_source(), a, **kwargs)
+    seen = _launches(monkeypatch)
+    result = engine.run_beamlet_contraction(_source(), a, devices=["cpu"], **kwargs)
+    assert {device for _, device in seen} == {"cpu"}
+    assert set(engine._resident) == {"cpu"}
+    np.testing.assert_array_equal(result.values, expected.values)
+    np.testing.assert_array_equal(result.sigma, expected.sigma)
+
+
+@pytest.mark.gpu
+def test_cuda_weights_on_a_cpu_call_set_up_on_the_cpu(monkeypatch) -> None:
+    """Weights on a device the call does not run on are copied to one it does.
+
+    The weights are validated where they lie (``device_voxel_weights``, one small
+    launch, on either fold); beyond that the deposit fold launches nothing on cuda:0
+    that the dense fold does not, where it used to run its whole set-up there.
+    """
+    if not wp.is_cuda_available():
+        pytest.skip("no CUDA device")
+    engine = _engine("cpu")
+    a = _weights(engine.grid.shape)
+    kwargs = dict(n_histories_per_beamlet=400, n_batches=4, seed=SEED)
+    expected = engine.run_beamlet_contraction(_source(), a, **kwargs)
+    weights = wp.array(a, dtype=wp.float64, device="cuda:0")
+    with monkeypatch.context() as patch:
+        dense_launches = _launches(patch)
+        engine.run_beamlet_contraction(_source(), weights, fold="dense", **kwargs)
+    seen = _launches(monkeypatch)
+    result = engine.run_beamlet_contraction(_source(), weights, **kwargs)
+    on_cuda = {key for key, device in seen if device != "cpu"}
+    assert on_cuda <= {key for key, device in dense_launches if device != "cpu"}
+    np.testing.assert_array_equal(result.values, expected.values)
+    np.testing.assert_array_equal(result.sigma, expected.sigma)
