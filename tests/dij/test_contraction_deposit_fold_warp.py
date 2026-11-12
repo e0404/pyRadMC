@@ -658,6 +658,110 @@ class TestFoldSubslots:
             assert n_sub == 1 or n_sub * group <= target
 
 
+class TestFoldShardGroups:
+    """Several groups per device on a multi-device call; one device keeps every beamlet."""
+
+    def test_one_device_keeps_the_group(self) -> None:
+        assert warp_engine._shard_group_size(7020, 7020, 1) == 7020
+
+    def test_a_smaller_group_is_kept(self) -> None:
+        assert warp_engine._shard_group_size(3, 7020, 2) == 3
+
+    @pytest.mark.parametrize("n_devices", [2, 3, 4])
+    def test_every_device_has_a_group_to_pull(self, n_devices: int) -> None:
+        per_device = warp_engine._FOLD_GROUPS_PER_DEVICE
+        for n in range(1, 400):
+            group = warp_engine._shard_group_size(n, n, n_devices)
+            groups = -(-n // group)
+            assert group >= 1
+            assert groups >= min(n, n_devices)
+            if n >= per_device * n_devices:
+                assert groups >= 2 * n_devices
+
+
+def _plan(engine, contraction, devices, n_beamlets: int, n_per: int = 8) -> int:
+    return engine._plan_group_size(
+        None,
+        device_list=devices,
+        n_beamlets=n_beamlets,
+        n_histories_per_beamlet=n_per,
+        n_batches=2,
+        concurrent_batches=1,
+        n_voxels=ScoringGrid.for_grid(engine.grid).n_voxels,
+        contraction=contraction,
+    )
+
+
+def test_the_planner_shards_the_fold_over_every_device() -> None:
+    """The fold's one whole-call group is cut for several devices; the dense plan is not."""
+    engine = _engine("cpu")
+    a = _weights(engine.grid.shape)
+    spec = engine._fold_spec(a, ScoringGrid.for_grid(engine.grid), 4, _source())
+    assert _plan(engine, spec, ["cpu"], 400) == 400  # one device: one group, as before
+    group = _plan(engine, spec, ["cpu", "cpu"], 400)
+    assert -(-400 // group) >= 2 * warp_engine._FOLD_GROUPS_PER_DEVICE
+    dense = _plan(engine, a, ["cpu"], 400)
+    assert _plan(engine, a, ["cpu", "cpu"], 400) == dense
+
+
+def _record_pulls(monkeypatch, barrier=None) -> list[tuple[str, int]]:
+    """Record every group a shard pulls, as ``(device, group_start)``.
+
+    With ``barrier``, each shard's first pull waits there after pulling, so no shard
+    can take every group before the others have pulled once.
+    """
+    pulls: list[tuple[str, int]] = []
+    original = warp_engine.WarpEngine._run_dij_shard
+
+    def spy(self, device, next_group, **kwargs):
+        first = [barrier is not None]
+
+        def pull():
+            group_start = next_group()
+            if group_start is not None:
+                pulls.append((device, group_start))
+            if first[0]:
+                first[0] = False
+                barrier.wait()
+            return group_start
+
+        return original(self, device, pull, **kwargs)
+
+    monkeypatch.setattr(warp_engine.WarpEngine, "_run_dij_shard", spy)
+    return pulls
+
+
+SHARD_DEVICES = ["cuda:0", "cpu"]
+
+
+@pytest.mark.gpu
+def test_a_multi_device_fold_gives_every_device_work(monkeypatch) -> None:
+    """With ``devices=[cuda, cpu]`` both shards pull groups, each column its device's bits.
+
+    With the fold's former single whole-call group the second shard's pull found
+    nothing and that device idled. Ownership is timing-dependent, so each value must
+    bit-match the whole run of *some* device (``test_dij_multi_device``'s contract).
+    """
+    if not wp.is_cuda_available():
+        pytest.skip("no CUDA device")
+    import threading
+
+    engine = _engine("cuda:0")
+    a = _weights(engine.grid.shape)
+    source = BeamletGridSource(2.0, -1.0, (2.0, 8.0), (2.0, 8.0), 4, 4)
+    kwargs = dict(n_histories_per_beamlet=400, n_batches=4, seed=SEED)
+    whole = [
+        engine.run_beamlet_contraction(source, a, devices=[d], **kwargs) for d in SHARD_DEVICES
+    ]
+    pulls = _record_pulls(monkeypatch, threading.Barrier(2, timeout=120))
+    sharded = engine.run_beamlet_contraction(source, a, devices=SHARD_DEVICES, **kwargs)
+    assert {d for d, _ in pulls} == set(SHARD_DEVICES)
+    for j in range(source.n_beamlets):
+        assert any(
+            sharded.values[j] == w.values[j] and sharded.sigma[j] == w.sigma[j] for w in whole
+        ), f"beamlet {j} matches neither device's whole run"
+
+
 def _launches(monkeypatch) -> set[tuple[str, str]]:
     """Record ``(kernel key, device)`` of every kernel launch (a stream names its device)."""
     seen: set[tuple[str, str]] = set()

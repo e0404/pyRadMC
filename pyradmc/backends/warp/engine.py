@@ -725,7 +725,8 @@ def _auto_fold_group_size(
     :data:`_GROUP_SIZE_CAP`: that cap stops dense maps growing past the point where
     wider launches stop paying, but here a wider group costs nothing and fills the
     chunk (a batch block of ``group * per_batch`` histories) where a narrow one
-    launches under-filled. Unknown free memory (cpu) takes every beamlet.
+    launches under-filled. Unknown free memory (cpu) takes every beamlet. This is
+    one device's fit; a multi-device call then cuts it (:func:`_shard_group_size`).
     """
     if free_bytes <= 0:
         return max(1, n_beamlets)
@@ -733,6 +734,32 @@ def _auto_fold_group_size(
     budget -= lanes * _FOLD_SUBSLOT_TARGET * stride * 8
     sized = max(0, int(budget)) // _fold_beamlet_bytes(lanes, stride)
     return max(1, min(sized, n_beamlets))
+
+
+_FOLD_GROUPS_PER_DEVICE = 4
+"""Groups per device a multi-device deposit fold cuts its auto group into
+(:func:`_shard_group_size`). Chosen, not measured (no multi-GPU machine was at hand):
+several per device so that a device that finishes early keeps pulling, few so that
+each group's batch blocks stay wide."""
+
+
+def _shard_group_size(group: int, n_beamlets: int, n_devices: int) -> int:
+    """Largest group ``<= group`` giving each of ``n_devices`` devices groups to pull.
+
+    Devices pull groups from one shared queue, so the deposit fold's auto group
+    (every beamlet, :func:`_auto_fold_group_size`) left every device but one idle,
+    and on a mixed set the whole call ran on whichever device pulled first. On
+    several devices the group is therefore at most ``ceil(n_beamlets / (n_devices *
+    _FOLD_GROUPS_PER_DEVICE))``, at least one beamlet: at least ``n_devices`` groups
+    whenever there are that many beamlets, and at least ``2 n_devices`` from
+    ``_FOLD_GROUPS_PER_DEVICE * n_devices`` beamlets on. One device keeps ``group``:
+    a single-device call launches exactly as before. Group size is bit-inert
+    (test-pinned), so this is scheduling only.
+    """
+    if n_devices <= 1:
+        return group
+    share = -(-n_beamlets // (n_devices * _FOLD_GROUPS_PER_DEVICE))
+    return max(1, min(group, share))
 
 
 def _index_safe_group_size(group: int, per_batch: int) -> int:
@@ -2622,6 +2649,72 @@ class WarpEngine:
             return None
         return spec
 
+    def _plan_group_size(
+        self,
+        beamlet_group_size: int | None,
+        *,
+        device_list: Sequence[str],
+        n_beamlets: int,
+        n_histories_per_beamlet: int,
+        n_batches: int,
+        concurrent_batches: int,
+        n_voxels: int,
+        contraction: np.ndarray | wp.array | _FoldSpec | None,
+    ) -> int:
+        """Return the beamlet group size a call runs at: scheduling only, bit-inert.
+
+        ``None`` auto-sizes from device memory (:func:`_auto_group_size`, or
+        :func:`_auto_fold_group_size` for the deposit fold, whose group is otherwise
+        every beamlet); on several devices the fold's auto group is then cut so that
+        each device has groups to pull (:func:`_shard_group_size`). Auto-sized or
+        explicit, a batch block stays inside the int32 history index
+        (:func:`_index_safe_group_size`).
+        """
+        per_batch = n_histories_per_beamlet // n_batches
+        fold = isinstance(contraction, _FoldSpec)
+        if beamlet_group_size is None:
+            # One shared size for every device: group_starts partitions the beamlet
+            # axis once, so a multi-device set takes the tightest device's fit. The
+            # queues are charged before the dense budget: they scale with the chunk
+            # size and, at the auto chunk size, are the same order as the dense maps.
+            # ``n_beamlets * per_batch`` bounds the block a group can ever launch, so
+            # this over- rather than under-states the queue cost.
+            def _fit(d: str) -> int:
+                lanes_d = min(concurrent_batches, n_batches) if wp.get_device(d).is_cuda else 1
+                chunk_d = min(self._chunk_histories(d), n_beamlets * per_batch)
+                free = _device_free_bytes(d)
+                if free > 0:
+                    # The shard refits the engine's idle pooled queues to its own
+                    # size (releasing the rest) before allocating, so they budget
+                    # as free: the group size a fresh engine gets.
+                    free += self._idle_workspace_bytes(d)
+                if isinstance(contraction, _FoldSpec):
+                    return _auto_fold_group_size(
+                        free,
+                        n_beamlets,
+                        lanes_d,
+                        _queue_bytes(chunk_d, self.queue_factor, lanes_d),
+                        contraction.stride,
+                    )
+                return _auto_group_size(
+                    free,
+                    n_voxels,
+                    n_beamlets,
+                    lanes_d,
+                    _queue_bytes(chunk_d, self.queue_factor, lanes_d),
+                )
+
+            beamlet_group_size = min(_fit(d) for d in device_list)
+            if fold:
+                beamlet_group_size = _shard_group_size(
+                    beamlet_group_size, n_beamlets, len(device_list)
+                )
+
+        # Auto-sized or explicit, one batch's block must stay inside the generators'
+        # int32 history index; past it the index wraps and histories land in other
+        # columns with no error. Bit-inert, like every grouping.
+        return _index_safe_group_size(beamlet_group_size, per_batch)
+
     def _compute_dij(
         self,
         source: BeamletSource,
@@ -2690,50 +2783,22 @@ class WarpEngine:
 
         device_list = self._call_devices(devices)
 
-        if beamlet_group_size is None:
-            # One shared size for every device: group_starts partitions the beamlet
-            # axis once, so a multi-device set takes the tightest device's fit. The
-            # queues are charged before the dense budget: they scale with the chunk
-            # size and, at the auto chunk size, are the same order as the dense maps.
-            # ``n_beamlets * per_batch`` bounds the block a group can ever launch, so
-            # this over- rather than under-states the queue cost.
-            def _fit(d: str) -> int:
-                lanes_d = min(concurrent_batches, n_batches) if wp.get_device(d).is_cuda else 1
-                chunk_d = min(self._chunk_histories(d), n_beamlets * per_batch)
-                free = _device_free_bytes(d)
-                if free > 0:
-                    # The shard refits the engine's idle pooled queues to its own
-                    # size (releasing the rest) before allocating, so they budget
-                    # as free: the group size a fresh engine gets.
-                    free += self._idle_workspace_bytes(d)
-                if isinstance(contraction, _FoldSpec):
-                    return _auto_fold_group_size(
-                        free,
-                        n_beamlets,
-                        lanes_d,
-                        _queue_bytes(chunk_d, self.queue_factor, lanes_d),
-                        contraction.stride,
-                    )
-                return _auto_group_size(
-                    free,
-                    scoring.n_voxels,
-                    n_beamlets,
-                    lanes_d,
-                    _queue_bytes(chunk_d, self.queue_factor, lanes_d),
-                )
-
-            beamlet_group_size = min(_fit(d) for d in device_list)
-
-        # Auto-sized or explicit, one batch's block must stay inside the generators'
-        # int32 history index; past it the index wraps and histories land in other
-        # columns with no error. Bit-inert, like every grouping.
         if n_histories_per_beamlet > _MAX_BLOCK_HISTORIES:
             raise ValueError(
                 f"{n_histories_per_beamlet} histories per beamlet exceed the kernels' "
                 f"int32 history index ({_MAX_BLOCK_HISTORIES}); split the run into "
                 "independently seeded calls"
             )
-        beamlet_group_size = _index_safe_group_size(beamlet_group_size, per_batch)
+        beamlet_group_size = self._plan_group_size(
+            beamlet_group_size,
+            device_list=device_list,
+            n_beamlets=n_beamlets,
+            n_histories_per_beamlet=n_histories_per_beamlet,
+            n_batches=n_batches,
+            concurrent_batches=concurrent_batches,
+            n_voxels=scoring.n_voxels,
+            contraction=contraction,
+        )
 
         # Beamlet groups are independent — no cross-group reduction — so sharding them
         # over devices needs no communication at all. Assignment is greedy from a
