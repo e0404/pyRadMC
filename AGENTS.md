@@ -423,6 +423,19 @@ These outlive the work that produced them. Each is a live constraint, not histor
   lateral voxels leave it at -1.1 to -1.3 %, so it is neither wall leakage nor that voxel
   size. Cause not established; do not gate new work on field against field-free on a cavity
   this size without resolving it, and do not loosen the base gate because of it.
+- **The beamlet contraction rounds every deposit, by default, and that is a named
+  approximation.** `run_beamlet_contraction` (Warp) defaults to `fold="deposit"`: each
+  deposit's tally quanta are weighted by `K_b a_v / m_v` and rounded to an int64 before
+  they are summed, where the dense fold sums float64. Guarantee, enforced in code by
+  `_FOLD_RESOLUTION_BITS = 10`: in every scoring voxel with mass and a nonzero weight a
+  deposit is rounded by at most `|a/m| x 0.51 eV` (up to six octave bands, each with its
+  own power-of-two `K_b`), and the values agree with `fold="dense"` to ~1e-10 relative,
+  not bitwise. Limits: a rescale after the int64 guard coarsens the global per-deposit
+  bound from `2**-56` to `2**(h-56)` of `max|a/m| E_max`, the per-voxel guarantee holding;
+  a call needing more than six bands, or scales outside normal float range, runs the dense
+  fold, logged at WARNING. `fold="dense"` is the test instrument and that fallback (section
+  2.10), not a second configuration. Timings behind the default predate the review fixes
+  and are to be re-measured (`docs/decisions.md`, "Contraction by deposit fold").
 
 ## 9. Git workflow and commit convention
 
