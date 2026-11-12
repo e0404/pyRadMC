@@ -396,8 +396,10 @@ _FOLD_PASSES_MAX = 3
 Every pass is checked against its own guard (:func:`_fold_guard_holds`) and none
 that fails is returned. A deterministic source needs at most two: the rerun at the
 guard's rescale transports the same histories, so its ``sum |q|`` is the first
-pass's and it holds by construction. A source whose deposits change between passes
-(the device pre-solve is order-nondeterministic at a fixed seed) may need a third;
+pass's and it holds by construction (likewise a remembered start that missed and the
+scale it then settles at, :meth:`WarpEngine._settle_fold`). A source whose deposits
+change between passes (the device pre-solve is order-nondeterministic at a fixed
+seed) may need a third;
 past that the call runs the dense fold, logged, rather than transport again."""
 
 
@@ -411,6 +413,43 @@ def _fold_guard_holds(scale_exponent: int, ratio_exponent: int | None, quanta_ma
     ratio_bound = 0.0 if ratio_exponent is None else math.ldexp(1.0, ratio_exponent)
     bound = (math.ldexp(1.0, scale_exponent) * ratio_bound + 0.5) * float(quanta_max)
     return bound < math.ldexp(1.0, _FOLD_GUARD_BITS)
+
+
+def _fold_settled_exponent(a_priori: _FoldSpec, quanta_max: int) -> int:
+    """Return the ``log2 K_0`` a fresh engine's call settles at for a pass measuring ``Q``.
+
+    The a-priori scale if its guard holds for ``Q``, else the guard's rescale
+    (:func:`_fold_rescale_exponent`): the scale a call returns from when its passes
+    measure the same ``Q``, as a deterministic source's do. ``Q`` is the tally quanta
+    before weighting, so it is the same whatever scale the pass ran at.
+    """
+    if a_priori.guard_holds(quanta_max):
+        return a_priori.scale_exponent
+    assert a_priori.ratio_exponent is not None  # zero weights cannot reach the guard
+    return _fold_rescale_exponent(a_priori.ratio_exponent, quanta_max)
+
+
+_FOLD_MEMORY_KEYS = 8
+"""Source kinds whose settled fold headroom an engine remembers, least recently used
+evicted (:meth:`WarpEngine._settle_fold`)."""
+
+
+def _fold_memory_key(
+    source: BeamletSource, scoring_mode: str, transport_electrons: bool
+) -> tuple[object, ...]:
+    """Return what a remembered fold headroom is kept under: the kind of call, not its inputs.
+
+    The headroom is how far a call's ``sum |q|`` pushed its settled scale below the
+    a-priori one: a property of the source's particle weights (edge derivatives,
+    MU-scaled weights), the dose-to-water factor and what is transported, not of the
+    voxel weights (the a-priori ``K_0 2**e`` does not depend on them) nor, to first
+    order, of the history count (both ``sum |q|`` and the a-priori budget scale with
+    the histories per batch). An optimizer loop rebuilds its source every iteration,
+    so the key is the source's type and beamlet count, not its identity. Only a start
+    guess hangs on it (every call verifies it), so a wrong match costs a transport,
+    never a bit.
+    """
+    return (type(source), source.n_beamlets, scoring_mode, transport_electrons)
 
 
 _FOLD_RESOLUTION_BITS = 10
@@ -1441,7 +1480,9 @@ class WarpEngine:
     counters) per batch lane, refitted exactly to each call by ``run`` and
     ``run_dij`` alike. A loop of equal calls — a plan optimization — therefore pays
     the uploads and allocations once. This is bitwise inert (test-pinned against
-    fresh engines). The engine-level keys are frozen fields, so treat ``grid``,
+    fresh engines), and so is the one piece of call history it keeps besides: the
+    deposit fold's settled scale per kind of contraction, a start guess every call
+    verifies (:meth:`_settle_fold`). The engine-level keys are frozen fields, so treat ``grid``,
     ``cross_sections`` and ``magnetic_field`` as immutable (a mutated array is not
     re-uploaded — build a new engine); the per-call scoring grid and spectrum are
     matched by identity, and their arrays are read-only for that reason.
@@ -1528,6 +1569,13 @@ class WarpEngine:
         default_factory=threading.Lock, init=False, repr=False, compare=False
     )
     _default_scoring: dict = field(default_factory=dict, init=False, repr=False, compare=False)
+    # The deposit fold's settled headroom (bits below the a-priori scale) per kind of
+    # call (_fold_memory_key): only the next call's start guess, which that call
+    # verifies (see _settle_fold), so bitwise inert like the rest of the engine's state.
+    _fold_headroom: dict = field(default_factory=dict, init=False, repr=False, compare=False)
+    _fold_headroom_lock: threading.Lock = field(
+        default_factory=threading.Lock, init=False, repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
         """Refuse a negative drain block, a field map missing the grid, a foreign map."""
@@ -2634,7 +2682,17 @@ class WarpEngine:
             source need not deposit the same on a rerun (the device pre-solve is
             order-nondeterministic): no pass whose guard failed is returned, and a call
             none of whose :data:`_FOLD_PASSES_MAX` passes holds runs the dense fold,
-            logged. Energy books are the same integers as the dense fold's.
+            logged. A rescale by ``2**-h`` coarsens the ``2**-56`` bound above to
+            ``2**(h-56)``; the per-voxel ``2**-10`` guarantee holds at every scale a
+            pass runs at, since each is re-banded (or the call runs dense). The
+            engine remembers how far below the a-priori ``K_0`` a call settled, per
+            kind of call (source type and beamlet count, scoring and transport
+            mode), and starts the next such call there: an optimizer whose source
+            trips the guard every iteration then transports once per call, not twice.
+            That start is only a guess, held to the scale the call's own ``sum |q|``
+            gives a fresh engine and rerun there if it differs, so the result does not
+            depend on the engine's call history (test-pinned; see
+            :meth:`_settle_fold`). Energy books are the same integers as the dense fold's.
 
             ``"dense"``: each batch's group of dense quanta maps
             (``group x n_scoring_voxels``) is contracted with the weights per
@@ -2709,7 +2767,8 @@ class WarpEngine:
             run = run_pass(weights)
             run.fold_passes = 1
         else:
-            run = self._settle_fold(spec, per_batch, run_pass, weights)
+            key = _fold_memory_key(source, scoring_mode, transport_electrons)
+            run = self._settle_fold(spec, per_batch, run_pass, weights, key)
         call_progress.finish()
         return ContractionResult(
             values=np.concatenate([run.blocks[gs][0] for gs in run.group_starts]),
@@ -2730,64 +2789,142 @@ class WarpEngine:
         per_batch: int,
         run_pass: Callable[[np.ndarray | wp.array | _FoldSpec], _DijRun],
         weights: np.ndarray | wp.array,
+        key: tuple[object, ...],
     ) -> _DijRun:
         """Run the deposit fold until a pass holds its own overflow guard; return that pass.
 
-        No pass whose guard failed is ever returned: a failing pass is rerun at the
-        guard's rescale from the largest ``sum |q|`` any pass of the call measured
+        ``spec`` is the call's a-priori fold (:meth:`_fold_spec`). No pass whose guard
+        failed is ever returned: a failing pass is rerun at the guard's rescale from
+        the largest ``sum |q|`` any pass of the call measured
         (:func:`_fold_rescale_exponent`), re-banded, and that rerun is checked in
         turn. After :data:`_FOLD_PASSES_MAX` failing passes, or when a rescale cannot
         be banded (:func:`_fold_plan`), the call runs the dense fold, logged.
+
+        **The settled scale carries to the next call of the same kind** (``key``,
+        :func:`_fold_memory_key`), as a start guess only. A source whose weights trip
+        the guard on every call (one contraction per optimizer iteration) otherwise
+        transports every call twice. The engine keeps how many octaves below the
+        a-priori ``K_0`` the last call settled (relative, so new voxel weights move it
+        with their octave), and the next call's first pass runs there. That pass is
+        then held to the scale a fresh engine would settle on from the same pass's
+        ``sum |q|`` (:func:`_fold_settled_exponent`; ``sum |q|`` is the tally quanta
+        before weighting, independent of ``K_0``): if it is the guess the pass is
+        returned, otherwise the call reruns there. A deterministic source therefore
+        returns exactly a fresh engine's bits, in one transport when the guess holds
+        and in two when it does not: the memory changes how often a call transports,
+        never its result, and never makes a pass less safe (the guess is never above
+        the a-priori scale and every returned pass held its guard). It follows the
+        last call only, so one outlier costs the call after it one extra transport
+        and no resolution; a call that settles at the a-priori scale, or runs dense,
+        clears it. Zero weights neither use nor change it.
         """
-        current = spec
+        a_priori = spec
+        guess = self._fold_guess(a_priori, key, per_batch)
+        current = guess or a_priori
         quanta_max = 0
         for attempt in range(1, _FOLD_PASSES_MAX + 1):
             run = run_pass(current)
             quanta_max = max(quanta_max, run.fold_abs_quanta_max)
             holds = current.guard_holds(run.fold_abs_quanta_max)
             logger.debug(
-                "deposit fold pass %d: scale 2**%d, %d octave bands of %d, largest "
+                "deposit fold pass %d: scale 2**%d%s, %d octave bands of %d, largest "
                 "beamlet-batch sum |q| %d, guard %s",
                 attempt,
                 current.scale_exponent,
+                " (remembered)" if current is guess else "",
                 current.n_bands,
                 current.band_width,
                 run.fold_abs_quanta_max,
                 "holds" if holds else "exceeded",
             )
-            if holds:
-                run.fold_spec, run.fold_passes = current, attempt
-                return run
-            if attempt == _FOLD_PASSES_MAX:
+            if current is guess:
+                # Only a guess: settle where a fresh engine would on this sum |q|.
+                k = _fold_settled_exponent(a_priori, run.fold_abs_quanta_max)
+                if k == current.scale_exponent:
+                    return self._fold_settled(run, current, a_priori, key, attempt)
+                why = (
+                    f"this call settles at scale 2**{k}, not at the 2**"
+                    f"{current.scale_exponent} its kind's last call settled at"
+                )
+            elif holds:
+                return self._fold_settled(run, current, a_priori, key, attempt)
+            elif attempt == _FOLD_PASSES_MAX:
                 break
-            assert current.ratio_exponent is not None  # zero weights cannot reach the guard
-            k = _fold_rescale_exponent(current.ratio_exponent, quanta_max)
-            rescaled = current.rescaled(k, per_batch)
+            else:
+                assert current.ratio_exponent is not None  # zero weights cannot reach it
+                k = _fold_rescale_exponent(current.ratio_exponent, quanta_max)
+                reach = math.log2(current.scale * current.ratio_bound + 0.5) + math.log2(
+                    run.fold_abs_quanta_max
+                )
+                why = (
+                    f"a beamlet batch's weighted sum could reach 2**{reach:.1f} of the "
+                    f"int64 range at scale 2**{current.scale_exponent}"
+                )
+            same = k == a_priori.scale_exponent
+            rescaled = a_priori if same else a_priori.rescaled(k, per_batch)
             if isinstance(rescaled, str):
                 _log_dense_fallback(f"after rescaling to 2**{k}: {rescaled}")
-                run = run_pass(weights)
-                run.fold_passes = attempt + 1
-                return run
+                return self._fold_dense(run_pass, weights, key, attempt + 1)
             logger.info(
-                "deposit fold: a beamlet batch's weighted sum could reach 2**%.1f of the "
-                "int64 range at scale 2**%d; rescaling to 2**%d (%d octave bands) and "
-                "rerunning the call",
-                math.log2(current.scale * current.ratio_bound + 0.5)
-                + math.log2(run.fold_abs_quanta_max),
-                current.scale_exponent,
+                "deposit fold: %s; rescaling to 2**%d (%d octave bands) and rerunning the call",
+                why,
                 k,
                 rescaled.n_bands,
             )
             current = rescaled
         logger.warning(
-            "deposit fold: %d passes each exceeded the int64 guard (the source's deposits "
-            "changed between passes of the same histories, largest beamlet-batch sum |q| "
-            "%d); running the dense fold for this call",
+            "deposit fold: %d passes, none of them returnable at the int64 guard (the "
+            "source's deposits changed between passes of the same histories, largest "
+            "beamlet-batch sum |q| %d); running the dense fold for this call",
             _FOLD_PASSES_MAX,
             quanta_max,
         )
+        return self._fold_dense(run_pass, weights, key, _FOLD_PASSES_MAX + 1)
+
+    def _fold_guess(
+        self, a_priori: _FoldSpec, key: tuple[object, ...], per_batch: int
+    ) -> _FoldSpec | None:
+        """Return the remembered start for a call of this kind, or ``None``."""
+        if a_priori.ratio_exponent is None:
+            return None
+        with self._fold_headroom_lock:
+            headroom = _lru_get(self._fold_headroom, key)
+        if not headroom:
+            return None
+        guess = a_priori.rescaled(a_priori.scale_exponent - headroom, per_batch)
+        return guess if isinstance(guess, _FoldSpec) else None
+
+    def _fold_settled(
+        self,
+        run: _DijRun,
+        spec: _FoldSpec,
+        a_priori: _FoldSpec,
+        key: tuple[object, ...],
+        passes: int,
+    ) -> _DijRun:
+        """Record the pass a call returns and remember where it settled (zero weights: not)."""
+        run.fold_spec, run.fold_passes = spec, passes
+        if a_priori.ratio_exponent is not None:
+            headroom = a_priori.scale_exponent - spec.scale_exponent
+            with self._fold_headroom_lock:
+                if headroom > 0:
+                    _lru_put(self._fold_headroom, key, headroom, _FOLD_MEMORY_KEYS)
+                else:
+                    self._fold_headroom.pop(key, None)
+        return run
+
+    def _fold_dense(
+        self,
+        run_pass: Callable[[np.ndarray | wp.array | _FoldSpec], _DijRun],
+        weights: np.ndarray | wp.array,
+        key: tuple[object, ...],
+        passes: int,
+    ) -> _DijRun:
+        """Run a call's dense-fold fallback; a call that ran dense leaves no memory."""
+        with self._fold_headroom_lock:
+            self._fold_headroom.pop(key, None)
         run = run_pass(weights)
-        run.fold_passes = _FOLD_PASSES_MAX + 1
+        run.fold_passes = passes
         return run
 
     def _call_devices(self, devices: Sequence[str] | None) -> list[str]:

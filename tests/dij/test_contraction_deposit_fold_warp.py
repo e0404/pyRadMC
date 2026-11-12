@@ -966,3 +966,99 @@ def test_a_fold_that_never_holds_runs_the_dense_fold(monkeypatch, caplog) -> Non
     np.testing.assert_array_equal(deposit.values, dense.values)
     np.testing.assert_array_equal(deposit.sigma, dense.sigma)
     _assert_reaches_the_total_once(events, _source().n_beamlets * 400)
+
+
+# -- the settled scale carries to the engine's next call -----------------------------
+
+HEAVY = 2**12
+"""``sum |q|`` factor of a source whose weights trip the guard at the a-priori scale."""
+
+
+def _heavy(monkeypatch) -> tuple[list[int | None], dict[str, int]]:
+    """Every pass's guard sees ``factor['q']`` times its ``sum |q|`` (``HEAVY`` at first)."""
+    factor = {"q": HEAVY}
+    return _record_passes(monkeypatch, lambda n: factor["q"]), factor
+
+
+def _fold_logs(caplog) -> list[str]:
+    return [
+        r.getMessage()
+        for r in caplog.records
+        if r.name == warp_engine.__name__ and r.levelno >= logging.INFO
+    ]
+
+
+def test_a_settled_rescale_carries_to_the_next_call(monkeypatch, caplog) -> None:
+    """An optimizer loop's next call starts where the last one settled: one transport.
+
+    A source whose weights trip the guard at the a-priori scale used to transport
+    every call twice and log each time, because each call started again from the
+    a-priori scale. The engine now remembers how far below the a-priori scale the
+    last call settled; the next call starts there and transports once. It settles
+    where a fresh engine would, so its bits are the first call's; and the memory is
+    relative to the a-priori scale, so new weights (twice as large: one octave up)
+    start one octave lower, again where they settle.
+    """
+    engine = _engine("cpu")
+    a = _weights(engine.grid.shape)
+    kwargs = dict(n_histories_per_beamlet=400, n_batches=4, seed=SEED)
+    passes, _ = _heavy(monkeypatch)
+    first = engine.run_beamlet_contraction(_source(), a, **kwargs)
+    assert len(passes) == 2 and passes[0] > passes[1]
+    settled = passes[1]
+    with caplog.at_level(logging.INFO, logger=warp_engine.__name__):
+        second = engine.run_beamlet_contraction(_source(), a, **kwargs)
+    assert passes[2:] == [settled]
+    assert not _fold_logs(caplog)
+    np.testing.assert_array_equal(second.values, first.values)
+    np.testing.assert_array_equal(second.sigma, first.sigma)
+    doubled = engine.run_beamlet_contraction(_source(), 2.0 * a, **kwargs)
+    assert passes[3:] == [settled - 1]
+    np.testing.assert_array_equal(doubled.values, 2.0 * first.values)
+
+
+def test_a_remembered_scale_never_changes_a_result(monkeypatch) -> None:
+    """The memory is a guess each call verifies, never a scale it is held to.
+
+    After a tripping call, the same source with weights that no longer trip settles
+    at the a-priori scale, as a fresh engine does: the remembered start is checked
+    against the scale the call's own ``sum |q|`` gives and rerun there, so the result
+    is a fresh engine's bit for bit, not the coarser remembered one. One outlier call
+    therefore costs at most one extra transport and no resolution, and the memory is
+    then cleared: the call after transports once, at the a-priori scale.
+    """
+    a = _weights((10, 10, 8))
+    kwargs = dict(n_histories_per_beamlet=400, n_batches=4, seed=SEED)
+    fresh = _engine("cpu").run_beamlet_contraction(_source(), a, **kwargs)
+    engine = _engine("cpu")
+    passes, factor = _heavy(monkeypatch)
+    engine.run_beamlet_contraction(_source(), a, **kwargs)
+    a_priori, settled = passes
+    factor["q"] = 1
+    light = engine.run_beamlet_contraction(_source(), a, **kwargs)
+    assert passes[2:] == [settled, a_priori]
+    np.testing.assert_array_equal(light.values, fresh.values)
+    np.testing.assert_array_equal(light.sigma, fresh.sigma)
+    engine.run_beamlet_contraction(_source(), a, **kwargs)
+    assert passes[4:] == [a_priori]
+
+
+def test_a_remembered_scale_stays_with_its_source(monkeypatch) -> None:
+    """Another source, or the same one in KERMA mode, starts from the a-priori scale.
+
+    The memory is kept per source type, beamlet count, scoring mode and transport
+    mode, so a loop alternating two contractions keeps one start for each.
+    """
+    engine = _engine("cpu")
+    a = _weights(engine.grid.shape)
+    kwargs = dict(n_histories_per_beamlet=400, n_batches=4, seed=SEED)
+    passes, _ = _heavy(monkeypatch)
+    engine.run_beamlet_contraction(_source(), a, **kwargs)
+    a_priori, settled = passes
+    other = BeamletGridSource(2.0, -1.0, (2.0, 8.0), (2.0, 8.0), 2, 2)
+    engine.run_beamlet_contraction(other, a, **kwargs)
+    assert passes[2] == a_priori and len(passes) == 4
+    engine.run_beamlet_contraction(_source(), a, transport_electrons=False, **kwargs)
+    assert passes[4] == a_priori and len(passes) == 6
+    engine.run_beamlet_contraction(_source(), a, **kwargs)
+    assert passes[6:] == [settled]
