@@ -206,16 +206,15 @@ def compile_materials(
                 for m in materials
             ]
         )
-        radiative_rows = []
-        for m in materials:
-            coefficients = berger_seltzer.radiative_fit_coefficients(m.radiative_anchors)
-            radiative_rows.append(
+        radiative = np.stack(
+            [
                 _evaluate(
-                    lambda e, c=coefficients: berger_seltzer.radiative_stopping(e, c),
+                    lambda e, m=m: berger_seltzer.radiative_stopping_power(e, m),
                     electron_energies,
                 )
-            )
-        radiative = np.stack(radiative_rows)
+                for m in materials
+            ]
+        )
         stopping_provenance = "Berger-Seltzer ICRU-37 per material on grid"
 
     return TabulatedData(
@@ -297,8 +296,12 @@ def compiled_grids(
 
 
 def _csda_on_grid(material: MaterialData, energies: np.ndarray) -> np.ndarray:
-    """Interpolate the material's CSDA range table onto the compile grid."""
-    log_energies, ranges = berger_seltzer.csda_range_table(material)
+    """Interpolate the material's CSDA range table onto the compile grid.
+
+    The range table is extended (append-only) to the grid's top, so no node here
+    is ever a clamped lookup.
+    """
+    log_energies, ranges = berger_seltzer.csda_range_table(material, e_top=float(energies[-1]))
     return np.asarray(np.interp(np.log(energies), log_energies, ranges), dtype=np.float64)
 
 

@@ -136,9 +136,6 @@ class AnalyticCrossSections(CrossSectionSource):
                 raise ValueError(f"non-positive density {density} for material {material}")
         self._geometry_densities = geometry_densities
         self._pair_coeffs = self._fit_pair_coefficients()
-        self._radiative_coeffs = berger_seltzer.radiative_fit_coefficients(
-            MATERIALS[WATER].radiative_anchors
-        )
         self._range_log_energies, self._range_values = berger_seltzer.csda_range_table(
             MATERIALS[WATER]
         )
@@ -231,15 +228,18 @@ class AnalyticCrossSections(CrossSectionSource):
         return berger_seltzer.restricted_collision_stopping(energy, MATERIALS[material], delta_cut)
 
     def radiative_stopping_power(self, energy: float, material: int) -> float:
-        """Radiative stopping power, in MeV cm^2/g: a log-quadratic ESTAR fit.
+        """Radiative stopping power, in MeV cm^2/g: a calibration to ESTAR.
 
-        Like the pair channel, this is a calibration, not a theory: an exact
-        log-quadratic (:func:`pyradmc.data.berger_seltzer.radiative_stopping`)
-        through the material's transcribed NIST ESTAR anchors at 1, 10 and 20 MeV
-        (Berger & Seltzer's data behind ESTAR; ICRU Report 37 (1984)).
+        Like the pair channel, this is a calibration, not a theory: within this
+        source's 20 MeV domain it is the exact log-quadratic
+        (:func:`pyradmc.data.berger_seltzer.radiative_stopping`) through the
+        material's transcribed NIST ESTAR anchors at 1, 10 and 20 MeV (Berger &
+        Seltzer's data behind ESTAR; ICRU Report 37 (1984)). Delegates to
+        :func:`pyradmc.data.berger_seltzer.radiative_stopping_power`, whose
+        high-energy piece is unreachable here while the domain ends at 20 MeV.
         """
         self._check_electron_args(energy, material)
-        return berger_seltzer.radiative_stopping(energy, self._radiative_coeffs)
+        return berger_seltzer.radiative_stopping_power(energy, MATERIALS[material])
 
     def moller_cross_section(self, energy: float, material: int, delta_cut: float) -> float:
         """Restricted Moller cross-section per unit mass, in cm^2/g.
