@@ -38,7 +38,7 @@ import sys
 import threading
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -205,10 +205,16 @@ def _fill_no_fold(gi: GridInfo, n_voxels: int, device: str) -> None:
     gi.fold_mask = 0
     gi.fold_stride = 1
     gi.fold_coef = wp.zeros(1, dtype=wp.float64, device=device)
+    gi.fold_band = wp.zeros(1, dtype=wp.uint8, device=device)
 
 
 def _fold_scoring_info(
-    scoring: ScoringGeometry, coef: wp.array, device: str, n_sub: int, stride: int
+    scoring: ScoringGeometry,
+    coef: wp.array,
+    band: wp.array,
+    device: str,
+    n_sub: int,
+    stride: int,
 ) -> GridInfo:
     """Build a fresh scoring struct routing deposits into the deposit fold's accumulators.
 
@@ -221,6 +227,7 @@ def _fold_scoring_info(
     si.fold_mask = n_sub - 1
     si.fold_stride = stride
     si.fold_coef = coef
+    si.fold_band = band
     return si
 
 
@@ -344,12 +351,24 @@ def _fold_subslots(group: int) -> int:
 
 
 _FOLD_SLOT_STRIDE = 4
-"""int64 elements per sub-accumulator: weighted sum, positive and negative tally
-quanta, and one pad to a 32-byte sector."""
+"""int64 elements per sub-accumulator of a one- or two-band fold: band 0's weighted
+sum, positive and negative tally quanta, and band 1's weighted sum in the pad of a
+32-byte sector (``kernels._fold_band_slot``)."""
+
+_FOLD_SLOT_STRIDE_WIDE = 8
+"""int64 elements per sub-accumulator of a fold with three to :data:`_FOLD_BANDS_MAX`
+bands: the four above and bands 2-5, one 64-byte line."""
+
+_FOLD_BANDS_MAX = 6
+"""Most octave bands a deposit fold uses (:func:`_fold_bands`); a ratio range that
+needs more runs the dense fold. At the study's 500 histories per batch and 6 MeV a
+band spans 25 octaves, so six cover ``|a/m|`` over about 2**150."""
 
 _FOLD_SCALE_BITS = 56
 """``K`` puts ``2**(e-1) * per_batch * E_max / quantum`` in ``[2**55, 2**56)``, where
-``max |a/m|`` lies in ``[2**(e-1), 2**e)`` (its exact octave, :func:`_fold_ratio_octave`).
+``max |a/m|`` lies in ``[2**(e-1), 2**e)`` (its exact octave, :func:`_fold_ratio_octaves`);
+this is band 0's scale ``K_0``, and every further band's top reaches the same budget
+(:func:`_fold_bands`).
 The largest weighted sum a unit-weight batch could reach, ``max |a/m| * per_batch *
 E_max / quantum`` (every history's full energy in the voxel of largest ``|a/m|``),
 therefore sits in ``[2**55, 2**57)``.
@@ -367,8 +386,27 @@ product beyond ``2**53``, where float64 rounding of the product takes over)."""
 
 _FOLD_GUARD_BITS = 62
 """The overflow guard: a call whose per-beamlet, per-batch bound
-``(K max|a/m| + 1/2) * sum |q|`` reaches ``2**62`` (half the int64 range) is rerun
-at a smaller ``K``."""
+``(K_0 2**e + 1/2) * sum |q|`` reaches ``2**62`` (half the int64 range) is rerun at a
+smaller ``K_0``. The bound holds for every band's accumulator, since each band's
+``K_b`` times its top ratio is ``K_0 2**e``."""
+
+_FOLD_RESOLUTION_BITS = 10
+"""The deposit fold's resolution guarantee: ``K_b |a_v| / m_v >= 2**-10`` in *every*
+scoring voxel with mass and a nonzero weight, ``K_b`` the scale of its octave band.
+
+One weighted quantum ``1/K_b`` is then worth at most ``2**10`` energy quanta (1.02 eV)
+of deposit in that voxel, so the fold's rounding of a deposit (at most half a
+weighted quantum) is at most the voxel's ``|a/m|`` times 0.51 eV: about the float32
+spacing of a 6 MeV energy, the precision the transport carries its energies in, and
+a relative 5e-4 of a 1 keV deposit, 5e-6 of a 100 keV one. A single ``K`` cannot
+give this: it serves the voxel of largest ``|a/m|`` only. One near-massless voxel with
+a nonzero weight (a rounding residue of a rebinned scoring grid, ``a/m`` 1e14 times
+the phantom's) weighted every other deposit below half a quantum and the call
+returned exact zeros; and a signed weight passing near zero (``5.6e-17`` in the
+tests' own weights) spans 2**56 by itself. Hence the bands (:func:`_fold_bands`);
+zero weights score nothing at any mass and do not count. This bounds an existing
+rounding and introduces no approximation; a range beyond :data:`_FOLD_BANDS_MAX`
+bands runs the dense fold, the deposit fold's own reference."""
 
 
 def _fold_scale(ratio: float, per_batch: int, max_energy: float) -> float:
@@ -419,6 +457,45 @@ def _fold_rescale_exponent(ratio_exponent: int, abs_quanta_max: int) -> int:
     return exponent - 1 - ratio_exponent
 
 
+def _fold_bands(
+    scale_exponent: int, ratio_exponent: int | None, min_exponent: int | None
+) -> tuple[int, int] | None:
+    """Return ``(W, n)``: octaves per band and band count; ``None`` if past the limits.
+
+    ``K_0 = 2**k`` (``scale_exponent``) is band 0's scale, ``max |a/m|`` lies in
+    ``[2**(e-1), 2**e)`` and ``min |a/m|`` over the weighted voxels in
+    ``[2**(f-1), 2**f)``. Band ``b`` holds ``|a/m|`` in ``[2**(e-(b+1)W),
+    2**(e-bW))`` (the last band everything below) at ``K_b = K_0 2**(bW)``, so
+
+    - every band's top reaches the same int64 budget, ``K_b 2**(e-bW) = K_0 2**e``,
+      and the overflow guard's bound covers all of them;
+    - every band's floor keeps the resolution, ``K_b 2**(e-(b+1)W) = 2**(k+e-W) >=
+      2**-R`` with ``W = k + e + R`` (:data:`_FOLD_RESOLUTION_BITS`), so each
+      weighted voxel has ``K_b |a/m| >= 2**-R``;
+    - ``n`` is the fewest bands reaching ``2**(f-1)``.
+
+    All integer arithmetic on exact exponents: the same on every target. ``None``
+    when one band cannot hold even an octave (``W < 1``: the budget leaves no room
+    for the resolution) or more than :data:`_FOLD_BANDS_MAX` bands are needed.
+    Zero weights (``e is None``) take one band.
+    """
+    if ratio_exponent is None or min_exponent is None:
+        return 1, 1
+    width = scale_exponent + ratio_exponent + _FOLD_RESOLUTION_BITS
+    if width < 1:
+        return None
+    span = ratio_exponent - min_exponent + 1  # octaves from 2**(f-1) up to 2**e
+    count = max(1, -(-span // width))
+    if count > _FOLD_BANDS_MAX:
+        return None
+    return width, count
+
+
+def _fold_stride(n_bands: int) -> int:
+    """int64 elements per sub-accumulator for ``n_bands`` bands."""
+    return _FOLD_SLOT_STRIDE if n_bands <= 2 else _FOLD_SLOT_STRIDE_WIDE
+
+
 _FOLD_SEED_CHUNK = 256
 """Voxels per thread in the fold's ratio reductions (:func:`_fold_ratio_octave`)."""
 
@@ -427,11 +504,12 @@ _FOLD_SEED_CHUNK = 256
 class _RatioSeed:
     """What :func:`_fold_ratio_seed` reads back: where the exact ratio search starts.
 
-    ``ratio_max`` is the fast_math quotient's maximum (approximate); the mass
-    extremes, over the voxels with mass and a nonzero weight, are exact.
+    ``ratio_max``/``ratio_min`` are the fast_math quotient's extremes (approximate);
+    the mass extremes, over the voxels with mass and a nonzero weight, are exact.
     """
 
     ratio_max: float
+    ratio_min: float
     mass_min: float
     mass_max: float
     weighted: bool
@@ -440,7 +518,8 @@ class _RatioSeed:
 def _fold_ratio_seed(flat: wp.array, voxel_mass: wp.array, device: str) -> _RatioSeed:
     """Launch :func:`~pyradmc.backends.warp.kernels.fold_ratio_seed` and read it back."""
     n_voxels = flat.shape[0]
-    extremes = wp.array([0.0, sys.float_info.max, 0.0], dtype=wp.float64, device=device)
+    big = sys.float_info.max
+    extremes = wp.array([0.0, big, big, 0.0], dtype=wp.float64, device=device)
     weighted = wp.zeros(1, dtype=wp.int32, device=device)
     wp.launch(
         kernels.fold_ratio_seed,
@@ -449,7 +528,9 @@ def _fold_ratio_seed(flat: wp.array, voxel_mass: wp.array, device: str) -> _Rati
         device=device,
     )
     ext = extremes.numpy()
-    return _RatioSeed(float(ext[0]), float(ext[1]), float(ext[2]), bool(weighted.numpy()[0]))
+    return _RatioSeed(
+        float(ext[0]), float(ext[1]), float(ext[2]), float(ext[3]), bool(weighted.numpy()[0])
+    )
 
 
 def _octave_window(mass_min: float, mass_max: float) -> tuple[int, int]:
@@ -475,17 +556,22 @@ def _seed_exponent(value: float, k_lo: int, k_hi: int) -> int:
     return min(max(e, k_lo + 1), k_hi)
 
 
-def _fold_ratio_octave(flat: wp.array, voxel_mass: wp.array, device: str) -> int | None:
-    """Return ``e`` with ``max |a_v| / m_v`` in ``[2**(e-1), 2**e)``, decided without dividing.
+def _fold_ratio_octaves(
+    flat: wp.array, voxel_mass: wp.array, device: str
+) -> tuple[int, int] | None:
+    """Return the exact octaves ``(e, f)`` of the largest and smallest ``|a_v| / m_v``.
 
-    Over the voxels with mass and a nonzero weight; ``None`` if there is none (the
-    contraction is zero). The fast_math quotient seeds the search
-    (:func:`_fold_ratio_seed`); each step then asks the device, exactly, whether the
-    maximum reaches ``2**e`` or ``2**(e-1)``
-    (:func:`~pyradmc.backends.warp.kernels.fold_ratio_octave`) and moves ``e`` one
-    octave toward the answer. The steps are monotone, so a seed within an ulp of the
-    truth takes one launch and a seed on the wrong side of a power of two two, and
-    every seed — any target's quotient — ends on the same ``e``.
+    ``max |a_v| / m_v`` lies in ``[2**(e-1), 2**e)`` and ``min`` in ``[2**(f-1),
+    2**f)``, over the voxels with mass and a nonzero weight, decided without
+    dividing; ``None`` if there is no such voxel (the contraction is zero). The
+    fast_math quotients seed the search (:func:`_fold_ratio_seed`); each step then
+    asks the device, exactly, where both extremes lie against ``2**e``, ``2**(e-1)``,
+    ``2**(f-1)`` and ``2**f`` (:func:`~pyradmc.backends.warp.kernels.fold_ratio_octave`)
+    and moves each exponent one octave toward the answer. The steps are monotone, so
+    a seed within an ulp of the truth takes one launch and a seed on the wrong side
+    of a power of two two, and every seed (any target's quotient) ends on the same
+    ``(e, f)``. Ratios outside the window in which the comparisons are exact
+    (:func:`_octave_window`, about ``2**+-1000`` for ordinary masses) are refused.
     """
     seed = _fold_ratio_seed(flat, voxel_mass, device)
     if not seed.weighted:
@@ -498,9 +584,10 @@ def _fold_ratio_octave(flat: wp.array, voxel_mass: wp.array, device: str) -> int
     if k_lo + 1 > k_hi:
         raise out_of_range
     e = _seed_exponent(seed.ratio_max, k_lo, k_hi)
+    f = _seed_exponent(seed.ratio_min, k_lo, k_hi)
     n_voxels = flat.shape[0]
-    flags = wp.zeros(2, dtype=wp.int32, device=device)
-    for _ in range(k_hi - k_lo + 1):
+    flags = wp.zeros(4, dtype=wp.int32, device=device)
+    for _ in range(2 * (k_hi - k_lo) + 2):
         flags.zero_()
         wp.launch(
             kernels.fold_ratio_octave,
@@ -512,36 +599,97 @@ def _fold_ratio_octave(flat: wp.array, voxel_mass: wp.array, device: str) -> int
                 _FOLD_SEED_CHUNK,
                 math.ldexp(1.0, e),
                 math.ldexp(1.0, e - 1),
+                math.ldexp(1.0, f),
+                math.ldexp(1.0, f - 1),
                 flags,
             ],
             device=device,
         )
-        above, reached = (bool(f) for f in flags.numpy())
+        above, reached, below, under = (bool(x) for x in flags.numpy())
+        settled = True
         if above:  # max >= 2**e
             if e == k_hi:
                 raise out_of_range
-            e += 1
+            e, settled = e + 1, False
         elif not reached:  # max < 2**(e-1)
             if e - 1 == k_lo:
                 raise out_of_range
-            e -= 1
-        else:
-            return e
+            e, settled = e - 1, False
+        if below:  # min < 2**(f-1)
+            if f - 1 == k_lo:
+                raise out_of_range
+            f, settled = f - 1, False
+        elif not under:  # min >= 2**f
+            if f == k_hi:
+                raise out_of_range
+            f, settled = f + 1, False
+        if settled:
+            return e, f
     raise AssertionError("unreachable: the octave search is monotone within its window")
 
 
-def _fold_beamlet_bytes(lanes: int) -> int:
+def _fold_coefficients(
+    spec: _FoldSpec, weights: wp.array, voxel_mass: wp.array, device: str
+) -> tuple[wp.array, wp.array]:
+    """Return each scoring voxel's ``K_b a_v / m_v`` and octave band ``b`` on ``device``.
+
+    :func:`~pyradmc.backends.warp.kernels.fold_coefficients` with the spec's band
+    floors and scales: powers of two that stay normal against every weighted mass,
+    since the floors run from ``2**(e-W)`` down to ``2**(e-(n-1)W) > 2**(f-1)``,
+    inside the octave search's exact window.
+    """
+    n_voxels = weights.shape[0]
+    coef = wp.empty(n_voxels, dtype=wp.float64, device=device)
+    band = wp.empty(n_voxels, dtype=wp.uint8, device=device)
+    wp.launch(
+        kernels.fold_coefficients,
+        dim=n_voxels,
+        inputs=[
+            weights,
+            voxel_mass,
+            spec.scale,
+            spec.band_floor,
+            math.ldexp(1.0, -spec.band_width),
+            math.ldexp(1.0, spec.band_width),
+            spec.n_bands,
+            coef,
+            band,
+        ],
+        device=device,
+    )
+    return coef, band
+
+
+def _log_dense_fallback(ratio_exponent: int, min_exponent: int, scale_exponent: int) -> None:
+    """Say that a call's ratio range is beyond the bands and that it runs the dense fold."""
+    logger.warning(
+        "deposit fold: |a/m| over the weighted voxels spans 2**%d to 2**%d, more than %d "
+        "octave bands can carry at scale 2**%d and a weighted quantum of at most 2**%d "
+        "energy quanta per weighted voxel; running the dense fold for this call",
+        min_exponent - 1,
+        ratio_exponent,
+        _FOLD_BANDS_MAX,
+        scale_exponent,
+        _FOLD_RESOLUTION_BITS,
+    )
+
+
+def _fold_beamlet_bytes(lanes: int, stride: int = _FOLD_SLOT_STRIDE) -> int:
     """Return the device bytes per beamlet of a wide deposit-fold group.
 
     One sub-accumulator a lane plus the running sums g1/g2. A narrow group's extra
     sub-accumulators total at most :data:`_FOLD_SUBSLOT_TARGET` per lane, which
     :func:`_auto_fold_group_size` charges up front.
     """
-    return lanes * _FOLD_SLOT_STRIDE * 8 + 16
+    return lanes * stride * 8 + 16
 
 
 def _auto_fold_group_size(
-    free_bytes: int, n_beamlets: int, lanes: int, queue_bytes: int = 0
+    free_bytes: int,
+    n_beamlets: int,
+    lanes: int,
+    queue_bytes: int = 0,
+    stride: int = _FOLD_SLOT_STRIDE,
 ) -> int:
     """Largest beamlet group whose deposit-fold accumulators fit the memory budget.
 
@@ -555,8 +703,8 @@ def _auto_fold_group_size(
     if free_bytes <= 0:
         return max(1, n_beamlets)
     budget = max(0, free_bytes - queue_bytes) * _GROUP_MEMORY_FRACTION
-    budget -= lanes * _FOLD_SUBSLOT_TARGET * _FOLD_SLOT_STRIDE * 8
-    sized = max(0, int(budget)) // _fold_beamlet_bytes(lanes)
+    budget -= lanes * _FOLD_SUBSLOT_TARGET * stride * 8
+    sized = max(0, int(budget)) // _fold_beamlet_bytes(lanes, stride)
     return max(1, min(sized, n_beamlets))
 
 
@@ -640,22 +788,59 @@ class _DijShard:
 
 @dataclass
 class _FoldSpec:
-    """A deposit-fold contraction's weights and its per-call weighted-quanta scale.
+    """A deposit-fold contraction's weights, scales and octave bands for one call.
 
     ``weights`` is the flat float64 weight array on some device (each shard reads it
-    there or copies it, as the dense contraction does); ``scale`` is ``K``
-    (:func:`_fold_scale_exponent`) and ``ratio_exponent`` the exact octave ``e`` of
-    ``max |a_v| / m_v`` it came from, ``None`` when no voxel with mass is weighted.
+    there or copies it, as the dense contraction does); ``scale_exponent`` is
+    ``log2 K_0`` (:func:`_fold_scale_exponent`, or the guard's rescale),
+    ``ratio_exponent`` and ``min_exponent`` the exact octaves ``e`` and ``f`` of the
+    largest and smallest ``|a_v| / m_v`` over the weighted voxels (``None`` when no
+    voxel with mass is weighted), and ``band_width``/``n_bands`` the bands
+    :func:`_fold_bands` derives from the three. Build with :meth:`banded`.
     """
 
     weights: wp.array
-    scale: float
+    scale_exponent: int
     ratio_exponent: int | None
+    min_exponent: int | None
+    band_width: int
+    n_bands: int
+
+    @classmethod
+    def banded(
+        cls,
+        weights: wp.array,
+        scale_exponent: int,
+        ratio_exponent: int | None,
+        min_exponent: int | None,
+    ) -> _FoldSpec | None:
+        """Return the spec at ``K_0 = 2**scale_exponent``, ``None`` past the band limits."""
+        bands = _fold_bands(scale_exponent, ratio_exponent, min_exponent)
+        if bands is None:
+            return None
+        return cls(weights, scale_exponent, ratio_exponent, min_exponent, *bands)
+
+    @property
+    def scale(self) -> float:
+        """``K_0``, band 0's weighted-quanta scale."""
+        return math.ldexp(1.0, self.scale_exponent)
 
     @property
     def ratio_bound(self) -> float:
         """``2**e``: the exact power of two above ``max |a_v| / m_v`` (0 for zero weights)."""
         return 0.0 if self.ratio_exponent is None else math.ldexp(1.0, self.ratio_exponent)
+
+    @property
+    def stride(self) -> int:
+        """int64 elements per sub-accumulator (:func:`_fold_stride`)."""
+        return _fold_stride(self.n_bands)
+
+    @property
+    def band_floor(self) -> float:
+        """``2**(e-W)``: band 0's lowest ratio (1.0, unused, for one band)."""
+        if self.ratio_exponent is None or self.n_bands == 1:
+            return 1.0
+        return math.ldexp(1.0, self.ratio_exponent - self.band_width)
 
 
 @dataclass
@@ -2226,27 +2411,34 @@ class WarpEngine:
             engine's estimator (per-batch values, their mean and standard error).
 
             ``"deposit"`` (default): each deposit's tally quanta ``q`` are weighted
-            at the deposit by its scoring voxel's ``K a_v / m_v`` and added, rounded
+            at the deposit by its scoring voxel's ``K_b a_v / m_v`` and added, rounded
             to an integer, to an int64 accumulator of its beamlet (spread over
             sub-accumulators against contention, :func:`_fold_subslots`). Cost and
             memory follow the deposits, not ``beamlets x scoring voxels``: a beamlet
-            of a wide group holds 48 bytes, so groups are as wide as the history
-            index allows and the scoring grid's size costs only its coefficient
-            array.
+            of a wide group holds 48 bytes (80 past two octave bands), so groups are
+            as wide as the history index allows and the scoring grid's size costs
+            only its coefficient and band arrays.
             Deterministic on a device for any group size, lane count or arrival
-            order, since integer addition is associative. ``K`` is a power of two
+            order, since integer addition is associative. ``K_0`` is a power of two
             chosen per call from the exact octave of ``max_v |a_v| / m_v``
             (:func:`_fold_scale_exponent`, decided without dividing, so host and
-            device weights get the same ``K`` on any device) so that a unit-weight
-            batch's largest possible weighted sum sits in ``[2**55, 2**57)``, and
-            beyond float64 rounding the only difference from the dense fold is the
-            rounding of each weighted deposit: at most half a weighted quantum, i.e.
+            device weights get the same ``K_0`` on any device) so that a unit-weight
+            batch's largest possible weighted sum sits in ``[2**55, 2**57)``. Voxels
+            of smaller ``|a/m|`` fall into lower octave bands, each with its own
+            accumulator and scale ``K_b = K_0 2**(bW)`` (:func:`_fold_bands`), so that
+            every voxel with mass and a nonzero weight keeps ``K_b |a_v| / m_v >=
+            2**-10`` (:data:`_FOLD_RESOLUTION_BITS`). Beyond float64 rounding the only
+            difference from the dense fold is the rounding of each weighted deposit:
+            at most half a weighted quantum, which is at most ``|a_v| / m_v`` times
+            ``2**9`` energy quanta (0.51 eV) in the deposit's voxel, and at most
             ``2**-56`` of ``max_v |a_v| / m_v * E_max`` per deposit on a per-history
             value (test-pinned against ``"dense"``; see :data:`_FOLD_SCALE_BITS` and
-            the measurements in the changelog). An int64
+            the measurements in the changelog). A ratio range needing more than
+            :data:`_FOLD_BANDS_MAX` bands (about ``2**150`` at the study's settings)
+            runs the dense fold for the call, logged. An int64
             guard measures each beamlet's per-batch ``sum |q|``; should a call's
-            weights push ``(K max|a/m| + 1/2) sum |q|`` to ``2**62``, the whole
-            call is rerun (same seeds, same histories) at the largest safe scale,
+            weights push ``(K_0 2**e + 1/2) sum |q|`` to ``2**62``, the whole call is
+            rerun (same seeds, same histories) at the largest safe scale, re-banded,
             and logged. Energy books are the same integers as the dense fold's.
 
             ``"dense"``: each batch's group of dense quanta maps
@@ -2290,31 +2482,43 @@ class WarpEngine:
             progress=progress,
             device_blocks=False,
         )
-        if fold == "dense":
-            run = self._compute_dij(source, **common, contraction=weights)
-        else:
+        spec = None
+        if fold == "deposit":
             spec = self._fold_spec(
                 weights, scoring, n_histories_per_beamlet // max(n_batches, 1), source
             )
+        if spec is None:  # fold="dense", or a ratio range beyond the bands
+            run = self._compute_dij(source, **common, contraction=weights)
+        else:
             run = self._compute_dij(source, **common, contraction=spec)
             bound = (spec.scale * spec.ratio_bound + 0.5) * float(run.fold_abs_quanta_max)
             logger.debug(
-                "deposit fold: scale 2**%d, largest beamlet-batch bound 2**%.1f",
-                int(math.log2(spec.scale)),
+                "deposit fold: scale 2**%d, %d octave bands of %d, largest beamlet-batch "
+                "bound 2**%.1f",
+                spec.scale_exponent,
+                spec.n_bands,
+                spec.band_width,
                 math.log2(bound) if bound > 0.0 else -math.inf,
             )
             if bound >= math.ldexp(1.0, _FOLD_GUARD_BITS):
                 assert spec.ratio_exponent is not None  # zero weights cannot reach the guard
                 k = _fold_rescale_exponent(spec.ratio_exponent, run.fold_abs_quanta_max)
-                logger.info(
-                    "deposit fold: a beamlet batch's weighted sum could reach 2**%.1f of the "
-                    "int64 range at scale 2**%d; rescaling to 2**%d and rerunning the call",
-                    math.log2(bound),
-                    int(math.log2(spec.scale)),
-                    k,
-                )
-                spec = replace(spec, scale=math.ldexp(1.0, k))
-                run = self._compute_dij(source, **common, contraction=spec)
+                rescaled = _FoldSpec.banded(spec.weights, k, spec.ratio_exponent, spec.min_exponent)
+                if rescaled is not None:
+                    logger.info(
+                        "deposit fold: a beamlet batch's weighted sum could reach 2**%.1f of "
+                        "the int64 range at scale 2**%d; rescaling to 2**%d (%d octave "
+                        "bands) and rerunning the call",
+                        math.log2(bound),
+                        spec.scale_exponent,
+                        k,
+                        rescaled.n_bands,
+                    )
+                    run = self._compute_dij(source, **common, contraction=rescaled)
+                else:
+                    assert spec.min_exponent is not None
+                    _log_dense_fallback(spec.ratio_exponent, spec.min_exponent, k)
+                    run = self._compute_dij(source, **common, contraction=weights)
         return ContractionResult(
             values=np.concatenate([run.blocks[gs][0] for gs in run.group_starts]),
             sigma=np.concatenate([run.blocks[gs][1] for gs in run.group_starts]),
@@ -2334,16 +2538,20 @@ class WarpEngine:
         scoring: ScoringGeometry,
         per_batch: int,
         source: BeamletSource,
-    ) -> _FoldSpec:
+    ) -> _FoldSpec | None:
         """Put the weights on a device and derive the deposit fold's scale ``K`` there.
 
         Host weights go to the engine's device (a shard there reads them in place),
         device weights stay where they are. ``K`` depends on the weights only through
-        the exact octave of ``max |a_v| / m_v`` (:func:`_fold_ratio_octave`), which is
+        the exact octave of ``max |a_v| / m_v`` (:func:`_fold_ratio_octaves`), which is
         decided by exact comparisons rather than by this module's fast_math division,
         so host weights and device weights — on whichever device — give the same
         ``K``. The per-voxel coefficients are then formed on each transporting
         device from the same weights, so the results are bit-identical.
+
+        The octave of the smallest ratio sets the band count (:func:`_fold_bands`);
+        returns ``None`` (logged) when the range needs more than
+        :data:`_FOLD_BANDS_MAX` bands: the caller then runs the dense fold.
         """
         if isinstance(weights, wp.array):
             flat, device = weights, str(weights.device)
@@ -2351,11 +2559,15 @@ class WarpEngine:
             device = self.device
             flat = wp.array(weights.reshape(-1), dtype=wp.float64, device=device)
         _, voxel_mass = self._upload_scoring(scoring, device)
-        e = _fold_ratio_octave(flat, voxel_mass, device)
-        if e is None:
-            return _FoldSpec(flat, 1.0, None)  # every coefficient is zero
+        octaves = _fold_ratio_octaves(flat, voxel_mass, device)
+        if octaves is None:
+            return _FoldSpec.banded(flat, 0, None, None)  # every coefficient is zero
+        e, f = octaves
         k = _fold_scale_exponent(e, per_batch, source.max_energy)
-        return _FoldSpec(flat, math.ldexp(1.0, k), e)
+        spec = _FoldSpec.banded(flat, k, e, f)
+        if spec is None:
+            _log_dense_fallback(e, f, k)
+        return spec
 
     def _compute_dij(
         self,
@@ -2449,6 +2661,7 @@ class WarpEngine:
                         n_beamlets,
                         lanes_d,
                         _queue_bytes(chunk_d, self.queue_factor, lanes_d),
+                        contraction.stride,
                     )
                 return _auto_group_size(
                     free,
@@ -2638,17 +2851,11 @@ class WarpEngine:
         n_sub = 1
         if fold_spec is not None:
             n_sub = _fold_subslots(min(beamlet_group_size, n_beamlets))
-            column = n_sub * _FOLD_SLOT_STRIDE
+            column = n_sub * fold_spec.stride
             same = fold_spec.weights.device == wp.get_device(device)
             weights_dev = fold_spec.weights if same else wp.clone(fold_spec.weights, device=device)
-            coef = wp.empty(n_voxels, dtype=wp.float64, device=device)
-            wp.launch(
-                kernels.fold_coefficients,
-                dim=n_voxels,
-                inputs=[weights_dev, voxel_mass, float(fold_spec.scale), coef],
-                device=device,
-            )
-            si = _fold_scoring_info(scoring, coef, device, n_sub, _FOLD_SLOT_STRIDE)
+            coef, band = _fold_coefficients(fold_spec, weights_dev, voxel_mass, device)
+            si = _fold_scoring_info(scoring, coef, band, device, n_sub, fold_spec.stride)
         # Route by capability: the built-in lattice generates in-kernel from analytic
         # bounds; the exact spectral beamlet type generates in-kernel from its
         # uploaded spectrum tables (a subclass keeps pre-sampling — exact-type check,
@@ -2762,6 +2969,9 @@ class WarpEngine:
                 float(ENERGY_QUANTUM_MEV) / (fold_spec.scale * float(per_batch)),
                 counters.book("fold_q_max"),
                 n_sub,
+                fold_spec.stride,
+                fold_spec.n_bands,
+                math.ldexp(1.0, -fold_spec.band_width),
             )
         elif contraction is not None:
             if isinstance(contraction, wp.array):
@@ -3346,15 +3556,17 @@ class WarpEngine:
         on the same stream and in the same batch order.
         """
         if fold is not None:
-            g1, g2, batch_scale, abs_max, n_sub = fold
+            g1, g2, batch_scale, abs_max, n_sub, stride, n_bands, step_down = fold
             _launch(
                 kernels.close_fold_batch,
                 group,
                 [
                     edep,
                     n_sub,
-                    _FOLD_SLOT_STRIDE,
+                    stride,
+                    n_bands,
                     float(batch_scale),
+                    float(step_down),
                     g1,
                     g2,
                     total_q,

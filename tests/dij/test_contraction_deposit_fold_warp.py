@@ -8,14 +8,16 @@ same histories folded through the dense per-batch quanta map, as before.
 
 The two folds see the same transport (same routes, seeds, history mapping) and the
 same per-deposit energy quanta; they differ only in where the weighting happens.
-The deposit fold rounds each weighted deposit to its call's weighted quantum
-``1 / K`` (``K`` a power of two, :func:`pyradmc.backends.warp.engine._fold_scale`),
-an error of at most half a weighted quantum per deposit, which on a per-history
-value is ``0.5 * ENERGY_QUANTUM_MEV / K`` per deposit. Bounding the deposits by
-``DEPOSITS_PER_HISTORY`` per history gives the agreement tolerance used here
-(:func:`_resolution`); float64 ordering of the dense contraction adds the
-``1e-12`` relative term. The energy books are the same integers on both paths and
-are compared exactly.
+The deposit fold rounds each weighted deposit to its octave band's weighted quantum
+``1 / K_b`` (powers of two, :func:`pyradmc.backends.warp.engine._fold_bands`), an
+error of at most half a weighted quantum per deposit, which on a per-history value
+is at most ``0.5 * ENERGY_QUANTUM_MEV / K_0`` per deposit (band 0's quantum is the
+coarsest). Bounding the deposits by ``DEPOSITS_PER_HISTORY`` per history gives the
+agreement tolerance used here (:func:`_resolution`); float64 ordering of the dense
+contraction adds the ``1e-12`` relative term. Where band 0 is set by a voxel the
+histories do not reach, the per-voxel guarantee is the tighter bound
+(:func:`_guaranteed`). The energy books are the same integers on both paths and are
+compared exactly.
 """
 
 from __future__ import annotations
@@ -89,8 +91,25 @@ def _both(engine, source, a, **kwargs):
     return deposit, dense
 
 
+def _guaranteed(a: np.ndarray, mass: np.ndarray, reached: np.ndarray) -> float:
+    """Largest per-history error under the per-voxel resolution guarantee.
+
+    Half a weighted quantum per deposit is at most ``2**(R-1)`` energy quanta times
+    the ``|a/m|`` of the deposit's voxel; ``reached`` are the voxels deposits can land
+    in.
+    """
+    sel = reached & (mass > 0.0) & (a != 0.0)
+    bits = warp_engine._FOLD_RESOLUTION_BITS
+    ratio = float(np.max(np.abs(a[sel]) / mass[sel]))
+    return DEPOSITS_PER_HISTORY * 2.0 ** (bits - 1) * ENERGY_QUANTUM_MEV * ratio
+
+
 def _assert_agree(deposit, dense, scale: float) -> None:
-    tol = _resolution(scale) + FLOAT_RTOL * np.max(np.abs(dense.values))
+    _assert_within(deposit, dense, _resolution(scale))
+
+
+def _assert_within(deposit, dense, bound: float) -> None:
+    tol = bound + FLOAT_RTOL * np.max(np.abs(dense.values))
     np.testing.assert_allclose(deposit.values, dense.values, rtol=0.0, atol=tol)
     # sigma is the spread of batch values each carrying the same error bound; relative
     # to a batch spread of a few percent that is far below this.
@@ -237,11 +256,14 @@ def test_an_unknown_fold_is_refused() -> None:
         )
 
 
-def _exact_octave(a: np.ndarray, mass: np.ndarray) -> int:
-    """``e`` with ``max |a_v| / m_v`` in ``[2**(e-1), 2**e)``, in exact rational arithmetic."""
+def _exact_octave(a: np.ndarray, mass: np.ndarray, extreme=max) -> int:
+    """``e`` with ``max |a_v| / m_v`` in ``[2**(e-1), 2**e)``, in exact rational arithmetic.
+
+    Over the voxels with mass and a nonzero weight; ``extreme=min`` for the minimum.
+    """
     covered = (mass > 0.0) & (a != 0.0)
     pairs = zip(a[covered], mass[covered], strict=True)
-    ratio = max(Fraction(abs(float(x))) / Fraction(float(m)) for x, m in pairs)
+    ratio = extreme(Fraction(abs(float(x))) / Fraction(float(m)) for x, m in pairs)
     e = 0
     while ratio >= Fraction(2) ** e:
         e += 1
@@ -303,6 +325,233 @@ def test_fold_scale_does_not_depend_on_the_quotient_seed(
     result = engine.run_beamlet_contraction(_source(), a, **kwargs)
     np.testing.assert_array_equal(result.values, expected.values)
     np.testing.assert_array_equal(result.sigma, expected.sigma)
+
+
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("factor", [1.0, 1.0 - 2.0**-52, 1.0 + 2.0**-52, 0.125, 8.0, 0.0])
+def test_smallest_ratio_octave_is_exact_and_seed_independent(
+    device: str, factor: float, monkeypatch
+) -> None:
+    """The resolution check reads the exact octave of ``min |a/m|`` over the weighted voxels.
+
+    Zero weights are not in it (they score nothing whatever their mass); the minimum
+    here sits exactly on a power of two, where a one-ulp quotient would misplace it.
+    """
+    engine = _engine(device)
+    scoring = ScoringGrid.for_grid(engine.grid)
+    a = _weights(engine.grid.shape) + 5.0  # |a| in [~2, ~9]
+    a[0, 0, :] = 0.0
+    a[2, 3, 4] = 0.25 * scoring.voxel_mass[2, 3, 4]  # min |a/m| is exactly 1/4
+    seed = warp_engine._fold_ratio_seed
+
+    def perturbed(*args, **kw):
+        s = seed(*args, **kw)
+        return dataclasses.replace(s, ratio_min=s.ratio_min * factor)
+
+    monkeypatch.setattr(warp_engine, "_fold_ratio_seed", perturbed)
+    spec = engine._fold_spec(a, scoring, 100, _source())
+    assert spec.min_exponent == _exact_octave(a, scoring.voxel_mass, min) == -1
+    assert spec.ratio_exponent == _exact_octave(a, scoring.voxel_mass)
+
+
+SLIVER_ORIGIN_X = -15.983
+"""A transport-grid x origin (0.9 cm voxels) whose scoring grid, padded by one voxel,
+keeps an outer layer of float-overlap mass ~1.8e-15 g: the rebin's overlap of the
+padding voxel with the grid is a rounding residue, not zero (found by a search over
+origins; the test asserts the sliver is there)."""
+
+
+def _sliver_setup(device: str):
+    n, s = 12, 0.9
+    grid = VoxelGrid.uniform_water(
+        shape=(n, 10, 8), spacing=(s, 1.0, 1.0), origin=(SLIVER_ORIGIN_X, 0.0, 0.0)
+    )
+    engine = _engine(device, grid)
+    padded = ScoringGrid.rebin(grid, (n + 2, 10, 8), (s, 1.0, 1.0), (SLIVER_ORIGIN_X - s, 0.0, 0.0))
+    mass = padded.voxel_mass
+    assert 0.0 < mass[0].max() < 1e-12 * mass.max()  # the sliver this is about
+    x0 = SLIVER_ORIGIN_X + 2.0
+    source = BeamletGridSource(2.0, -1.0, (x0, x0 + 6.0), (2.0, 8.0), 3, 3)
+    return engine, padded, source
+
+
+def _fallbacks(caplog) -> list[str]:
+    return [r.getMessage() for r in caplog.records if "dense fold for this call" in r.getMessage()]
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_a_sliver_voxel_does_not_zero_the_deposit_fold(device: str, caplog) -> None:
+    """One near-massless weighted voxel must not collapse ``K`` for every other voxel.
+
+    The sliver's ``a/m`` is ~5e14 times the phantom's; a single ``K`` sized for it
+    weighted every real deposit to well below half a quantum, which rounded to an
+    exact zero for all nine beamlets. The phantom now sits in a lower octave band
+    with its own scale, so every weighted voxel keeps the per-voxel resolution, and
+    the call stays on the deposit fold.
+    """
+    engine, padded, source = _sliver_setup(device)
+    a = np.ones(padded.shape)
+    kwargs = dict(n_histories_per_beamlet=800, n_batches=8, seed=SEED, scoring_grid=padded)
+    with caplog.at_level(logging.WARNING, logger=warp_engine.__name__):
+        deposit, dense = _both(engine, source, a, **kwargs)
+    assert not _fallbacks(caplog)
+    assert engine._fold_spec(a, padded, 100, source).n_bands >= 2
+    # No deposit reached the sliver (one would put ~1e9 into a value): the phantom's
+    # voxels are where the bound applies.
+    assert np.all((dense.values > 0.1) & (dense.values < 1.0))
+    mass = padded.voxel_mass
+    _assert_within(deposit, dense, _guaranteed(a, mass, mass > 1e-6 * mass.max()))
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_zero_weights_on_a_sliver_keep_one_band(device: str, caplog) -> None:
+    """A zero weight scores nothing at any mass, so it does not count against the range."""
+    engine, padded, source = _sliver_setup(device)
+    a = np.where(padded.voxel_mass > 1e-6 * padded.voxel_mass.max(), 1.0, 0.0)
+    kwargs = dict(n_histories_per_beamlet=800, n_batches=8, seed=SEED, scoring_grid=padded)
+    with caplog.at_level(logging.WARNING, logger=warp_engine.__name__):
+        deposit, dense = _both(engine, source, a, **kwargs)
+    assert not _fallbacks(caplog)
+    assert engine._fold_spec(a, padded, 100, source).n_bands == 1
+    assert np.all(dense.values > 0.1)
+    _assert_agree(deposit, dense, _scale(a, padded, 100, source.max_energy))
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_signed_weights_through_zero_fold_in_bands(device: str) -> None:
+    """The tests' own signed weights cancel to 5.6e-17 in one voxel: a 2**56 range.
+
+    One ``K`` resolves 29 octaves at this budget, so that takes two bands, and the
+    result agrees with the dense fold to band 0's resolution (the coarsest), as
+    every test here asserts.
+    """
+    engine = _engine(device)
+    scoring = ScoringGrid.for_grid(engine.grid)
+    a = _weights(engine.grid.shape)
+    assert np.min(np.abs(a[a != 0.0])) < 1e-15
+    spec = engine._fold_spec(a, scoring, 100, _source())
+    assert (spec.band_width, spec.n_bands) == (29, 2)
+    kwargs = dict(n_histories_per_beamlet=800, n_batches=8, seed=SEED)
+    deposit, dense = _both(engine, _source(), a, **kwargs)
+    _assert_agree(deposit, dense, _scale(a, scoring, 100, _source().max_energy))
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_a_range_beyond_the_bands_runs_the_dense_fold(device: str, caplog) -> None:
+    """Past ``_FOLD_BANDS_MAX`` bands the call is the dense fold itself, and says so."""
+    engine = _engine(device)
+    a = np.ones(engine.grid.shape)
+    a[5, 5, 2] = 2.0**-400  # in the field, far below every band one call can hold
+    kwargs = dict(n_histories_per_beamlet=400, n_batches=4, seed=SEED)
+    dense = engine.run_beamlet_contraction(_source(), a, fold="dense", **kwargs)
+    with caplog.at_level(logging.WARNING, logger=warp_engine.__name__):
+        deposit = engine.run_beamlet_contraction(_source(), a, **kwargs)
+    assert len(_fallbacks(caplog)) == 1
+    np.testing.assert_array_equal(deposit.values, dense.values)
+    np.testing.assert_array_equal(deposit.sigma, dense.sigma)
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_a_rescale_rebands_the_fold(device: str, monkeypatch, caplog) -> None:
+    """The overflow guard's smaller ``K_0`` narrows the bands; the rerun takes more of them.
+
+    ``_FOLD_SCALE_BITS = 74`` forces the guard (as in the rescale test above); the
+    weights span 2**40 in ``a/m``, one band at the a-priori ``K_0`` and more at the
+    rescaled one. The rerun keeps the per-voxel resolution, so it agrees with the
+    dense fold to the guarantee (``K_0`` itself is coarser than the default here).
+    """
+    engine = _engine(device)
+    a = np.ones(engine.grid.shape)
+    a[5, 5, 2] = 2.0**-40  # in the field: it does receive deposits
+    kwargs = dict(n_histories_per_beamlet=800, n_batches=8, seed=SEED)
+    dense = engine.run_beamlet_contraction(_source(), a, fold="dense", **kwargs)
+    monkeypatch.setattr(warp_engine, "_FOLD_SCALE_BITS", 74)
+    assert engine._fold_spec(a, ScoringGrid.for_grid(engine.grid), 100, _source()).n_bands == 1
+    with caplog.at_level(logging.INFO, logger=warp_engine.__name__):
+        deposit = engine.run_beamlet_contraction(_source(), a, **kwargs)
+    rescales = [r.getMessage() for r in caplog.records if "rescaling" in r.getMessage()]
+    assert len(rescales) == 1 and "(1 octave bands)" not in rescales[0]
+    assert not _fallbacks(caplog)
+    mass = ScoringGrid.for_grid(engine.grid).voxel_mass
+    _assert_within(deposit, dense, _guaranteed(a, mass, mass > 0.0))
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_band_assignment_is_exact_on_the_floors(device: str) -> None:
+    """Each voxel's band and coefficient, against exact host arithmetic.
+
+    Ratios placed exactly on band floors (where a one-ulp quotient would pick the
+    wrong band) and just below them; the band is decided by exact comparisons.
+    """
+    engine = _engine(device)
+    scoring = ScoringGrid.for_grid(engine.grid)
+    mass = scoring.voxel_mass
+    a = np.ones(engine.grid.shape)
+    a[5, 5, 2] = 2.0**-100  # spans several bands
+    spec = engine._fold_spec(a, scoring, 100, _source())
+    width, n, e = spec.band_width, spec.n_bands, spec.ratio_exponent
+    assert n >= 3
+    floors = [2.0 ** (e - (b + 1) * width) for b in range(n - 1)]
+    flat = a.reshape(-1).copy()
+    m = mass.reshape(-1)
+    for i, floor in enumerate(floors):
+        flat[10 + 2 * i] = floor * m[10 + 2 * i]  # exactly on the floor: band i
+        flat[11 + 2 * i] = -np.nextafter(floor, 0.0) * m[11 + 2 * i]  # just below: band i + 1
+    a = flat.reshape(a.shape)
+    spec = engine._fold_spec(a, scoring, 100, _source())
+    assert (spec.band_width, spec.n_bands) == (width, n)
+    weights = wp.array(flat, dtype=wp.float64, device=device)
+    _, voxel_mass = engine._upload_scoring(scoring, device)
+    coef, band = warp_engine._fold_coefficients(spec, weights, voxel_mass, device)
+    expected_band = np.array(
+        [
+            sum(Fraction(abs(float(x))) < Fraction(t) * Fraction(float(mv)) for t in floors)
+            for x, mv in zip(flat, m, strict=True)
+        ]
+    )
+    np.testing.assert_array_equal(band.numpy(), expected_band)
+    for i in range(len(floors)):
+        assert band.numpy()[10 + 2 * i] == i and band.numpy()[11 + 2 * i] == i + 1
+    k_b = spec.scale * 2.0 ** (width * expected_band.astype(float))
+    np.testing.assert_allclose(coef.numpy(), flat / m * k_b, rtol=4e-16, atol=0.0)
+    # every weighted voxel keeps the resolution, and no band top exceeds the budget
+    ratio = np.abs(flat) / m
+    assert np.all(k_b * ratio >= 2.0**-warp_engine._FOLD_RESOLUTION_BITS)
+    assert np.all(k_b * ratio < spec.scale * spec.ratio_bound)
+
+
+class TestFoldBands:
+    """One weighted quantum is worth at most ``2**R`` energy quanta in every weighted voxel."""
+
+    @pytest.mark.parametrize("k", [-40, 0, 17, 300])
+    @pytest.mark.parametrize("e", [-3, 0, 5])
+    def test_every_band_keeps_the_resolution_and_the_budget(self, k: int, e: int) -> None:
+        r = warp_engine._FOLD_RESOLUTION_BITS
+        for f in range(e, e - 200, -7):
+            bands = warp_engine._fold_bands(k, e, f)
+            if bands is None:
+                assert k + e + r < 1 or -(-(e - f + 1) // (k + e + r)) > 6
+                continue
+            width, n = bands
+            for b in range(n):
+                k_b = k + b * width
+                assert k_b + e - b * width == k + e  # each band's top: the same budget
+                assert k_b + e - (b + 1) * width >= -r  # each band's floor: resolved
+            assert e - n * width <= f - 1  # the last band reaches the smallest ratio
+            assert n == 1 or e - (n - 1) * width > f - 1  # and no band is spare
+
+    def test_zero_weights_take_one_band(self) -> None:
+        assert warp_engine._fold_bands(0, None, None) == (1, 1)
+
+    def test_a_single_octave_is_one_band_at_the_budget_rule(self) -> None:
+        for per_batch, energy in ((1, 0.5), (500, 6.0), (10**6, 20.0)):
+            for e in (-20, 0, 3):
+                k = warp_engine._fold_scale_exponent(e, per_batch, energy)
+                assert warp_engine._fold_bands(k, e, e) == (k + e + 10, 1)
+
+    def test_the_stride_grows_past_two_bands(self) -> None:
+        assert warp_engine._fold_stride(1) == warp_engine._fold_stride(2) == 4
+        assert warp_engine._fold_stride(3) == warp_engine._fold_stride(6) == 8
 
 
 class TestFoldScale:
