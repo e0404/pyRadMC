@@ -32,6 +32,22 @@ This biases the low-dose tail, which is where NTCP and LET-guided objectives ope
 It is tested against DVH endpoints, never against a matrix norm.
 """
 
+HIGH_ENERGY_PHYSICS_THRESHOLD_MEV: float = 30.0
+"""Maximum source energy above which ``"auto"`` physics selects the high-energy models.
+
+Read by :func:`pyradmc.physics_options.resolve_physics`: a run whose source can emit
+above this resolves each ``"auto"`` process to its high-energy model, a run at or
+below it to its clinical model. Accuracy-defining in the sense of AGENTS.md 2.8: it
+decides which physics a run near it computes.
+
+**Provisional.** 30 MeV is the ceiling the default tabulated data is compiled to,
+i.e. the edge of what the clinical models are validated over; it has not been
+derived from a dosimetric comparison of the two model sets, and until a second
+model is registered for a process both sides resolve to the same physics, so the
+value has no effect on any result yet. The maintainer confirms or replaces it,
+with that comparison, when the first high-energy model lands.
+"""
+
 # --- variance-reduction parameters -------------------------------------
 # Russian roulette on low-energy photons (see pyradmc.physics.roulette and the
 # transport loops). Unbiased by construction — these change realizations and
@@ -176,6 +192,7 @@ if TYPE_CHECKING:
         SpectralBeamSource,
     )
     from pyradmc.geometry.spectrum import ALI_ROGERS_BEAMS, Spectrum, ali_rogers_mv
+    from pyradmc.physics_options import PhysicsOptions
     from pyradmc.rng.host import HostRNG
     from pyradmc.scoring.cylinder import (
         CylindricalScoringGrid,
@@ -212,6 +229,7 @@ _LAZY_EXPORTS: dict[str, str] = {
     "PencilBeamSource": "pyradmc.geometry.source",
     "PhaseSpaceSource": "pyradmc.geometry.phasespace",
     "PhotonProcess": "pyradmc.data.interface",
+    "PhysicsOptions": "pyradmc.physics_options",
     "Primary": "pyradmc.geometry.source",
     "PrimaryFluenceBeamSource": "pyradmc.geometry.source",
     "PrimaryFluenceBeamletSource": "pyradmc.geometry.source",
@@ -274,6 +292,7 @@ __all__ = [
     "ECUT_MEV",
     "ELECTRON_MASS_MEV",
     "GY_PER_MEV_PER_G",
+    "HIGH_ENERGY_PHYSICS_THRESHOLD_MEV",
     "LUNG",
     "MATERIALS",
     "MEV_C_PER_TESLA_CM",
@@ -304,6 +323,7 @@ __all__ = [
     "PencilBeamSource",
     "PhaseSpaceSource",
     "PhotonProcess",
+    "PhysicsOptions",
     "Primary",
     "PrimaryFluenceBeamSource",
     "PrimaryFluenceBeamletSource",
