@@ -31,6 +31,7 @@ import numpy as np
 if TYPE_CHECKING:
     import numpy.typing as npt
 
+    from pyradmc.data.bethe_heitler import BremsScreening
     from pyradmc.data.tables import CrossSectionTables
 
 __all__ = ["DOMAIN_EDGE_RTOL", "CrossSectionSource", "PhotonProcess", "require_energy_domain"]
@@ -455,6 +456,112 @@ class CrossSectionSource(ABC):
             grids = (np.log(energies), cumulative)
             cache[key] = grids
         return grids
+
+    # -- screened Bethe-Heitler bremsstrahlung (concrete: derived from the above) --
+
+    def bremsstrahlung_screening(self, material: int) -> BremsScreening:
+        """Screening parameters of the screened Bethe-Heitler photon spectrum.
+
+        The per-material numbers that select the *shape* the sampler in
+        :mod:`pyradmc.physics.brems_bh` draws from; computed from the material's
+        elemental composition by
+        :func:`pyradmc.data.bethe_heitler.screening_parameters` (compound rule and
+        its measured error there). Concrete on the interface for the reason
+        :meth:`elastic_screening` is: no implementation can silently omit it, and
+        the analytic and tabulated backends cannot drift apart on the shape. A
+        source carrying real differential bremsstrahlung data would override the
+        three methods of this block together.
+        """
+        from pyradmc.data.bethe_heitler import screening_parameters
+        from pyradmc.data.materials import MATERIALS
+
+        if not 0 <= material < self.n_materials:
+            raise ValueError(f"material index {material} beyond this source")
+        cache: dict[int, BremsScreening] | None = getattr(self, "_brems_screening_cache", None)
+        if cache is None:
+            cache = {}
+            self._brems_screening_cache = cache
+        screening = cache.get(material)
+        if screening is None:
+            screening = screening_parameters(MATERIALS[material].composition)
+            cache[material] = screening
+        return screening
+
+    def bremsstrahlung_cross_section(self, energy: float, material: int, k_cut: float) -> float:
+        r"""Cross-section for emitting a photon above ``k_cut``, per unit mass, in cm^2/g.
+
+        The discrete channel of the screened Bethe-Heitler model,
+
+        .. math::
+
+            \frac{\sigma}{\rho} = \frac{S_{rad}}{\rho}\,
+                \frac{\int_{k_{cut}}^{T} G(k)/k\, dk}{\int_0^{T} G(k)\, dk},
+
+        i.e. the model's spectral shape ``G`` normalized so that its radiated
+        energy is exactly :meth:`radiative_stopping_power` (see
+        :mod:`pyradmc.data.bethe_heitler`). Zero for ``energy <= k_cut``.
+
+        Consistency contract (tested): this times the mean photon energy of the
+        shape on ``[k_cut, T]``, plus
+        :meth:`restricted_radiative_stopping_power`, equals
+        :meth:`radiative_stopping_power`. A transport loop using this channel must
+        therefore charge the electron the *restricted* radiative stopping power
+        continuously, never the total — the total would double-count every
+        photon above ``k_cut``.
+
+        Evaluated by quadrature on every call (no cache): exact, and cheap enough
+        for the reference loop; kernels read the flattened
+        :class:`~pyradmc.data.bethe_heitler.BetheHeitlerTables`.
+        """
+        return self._bremsstrahlung_split(energy, material, k_cut)[0]
+
+    def restricted_radiative_stopping_power(
+        self, energy: float, material: int, k_cut: float
+    ) -> float:
+        r"""Radiative stopping power from photons below ``k_cut``, in MeV cm^2/g.
+
+        .. math::
+
+            \frac{S_{rad}^{<}}{\rho} = \frac{S_{rad}}{\rho}\,
+                \frac{\int_0^{k_{cut}} G(k)\, dk}{\int_0^{T} G(k)\, dk},
+
+        the part of the radiative loss that stays continuous (and, the photons
+        being below the transport cutoff, local) when photons above ``k_cut`` are
+        sampled as discrete events with :meth:`bremsstrahlung_cross_section`.
+        Equals :meth:`radiative_stopping_power` for ``energy <= k_cut``.
+        """
+        return self._bremsstrahlung_split(energy, material, k_cut)[1]
+
+    def _bremsstrahlung_split(
+        self, energy: float, material: int, k_cut: float
+    ) -> tuple[float, float]:
+        """``(discrete cross-section, restricted stopping power)`` for one query.
+
+        The last answer is remembered: a transport step asks for both halves at the
+        same ``(energy, material, k_cut)``, and they share one quadrature.
+        """
+        from pyradmc.data.bethe_heitler import shape_integrals
+
+        if energy <= 0.0:
+            raise ValueError(f"non-positive electron kinetic energy {energy} MeV")
+        if k_cut <= 0.0:
+            raise ValueError(f"non-positive photon threshold {k_cut} MeV")
+        key = (energy, material, k_cut)
+        last: tuple[tuple[float, int, float], tuple[float, float]] | None = getattr(
+            self, "_brems_split_last", None
+        )
+        if last is not None and last[0] == key:
+            return last[1]
+        screening = self.bremsstrahlung_screening(material)
+        total = self.radiative_stopping_power(energy, material)
+        if energy <= k_cut:
+            split = (0.0, total)
+        else:
+            below, above, count = shape_integrals(energy, k_cut, screening)
+            norm = total / (below + above)
+            split = (norm * count, norm * below)
+        self._brems_split_last = (key, split)
+        return split
 
     # -- construction -------------------------------------------------------
 
