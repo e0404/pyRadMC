@@ -24,6 +24,7 @@ from pyradmc.data.berger_seltzer import CLASSICAL_ELECTRON_RADIUS_CM
 from pyradmc.data.interface import CrossSectionSource
 from pyradmc.data.materials import (
     AVOGADRO,
+    CORTICAL_BONE,
     MATERIALS,
     STANDARD_ATOMIC_WEIGHT,
     TUNGSTEN,
@@ -276,6 +277,21 @@ class TestSharingDcs:
         above = pair_sharing_dcs(PAIR_COULOMB_ENERGY_MEV, 0.5, params)
         expected_drop = 0.5 * (params.coulomb_high - params.coulomb_low) * (0.5 + 1.0 / 6.0)
         assert below - above == pytest.approx(expected_drop, rel=1e-6)
+
+    @pytest.mark.parametrize(
+        ("material", "drop"),
+        [(WATER, 1.201e-3), (CORTICAL_BONE, 4.143e-3), (TUNGSTEN, 9.439e-2)],
+    )
+    def test_size_of_the_50_mev_step(self, material: int, drop: float) -> None:
+        """Relative drop of the DCS at equal sharing across the switch, per medium.
+
+        The number the module docstring quotes for the stated approximation: a
+        per-mille effect in water and bone, nine percent in tungsten.
+        """
+        params = pair_screening_parameters(MATERIALS[material].composition)
+        below = pair_sharing_dcs(PAIR_COULOMB_ENERGY_MEV * (1 - 1e-12), 0.5, params)
+        above = pair_sharing_dcs(PAIR_COULOMB_ENERGY_MEV, 0.5, params)
+        assert 1.0 - above / below == pytest.approx(drop, rel=1e-3)
 
     def test_integrable(self) -> None:
         total, _ = integrate.quad(

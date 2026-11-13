@@ -59,8 +59,15 @@ Stated approximations
 - **Symmetric sharing.** The Born approximation does not distinguish the charges;
   the true low-energy asymmetry (the positron is repelled by the nucleus) is
   neglected.
-- The Coulomb correction is applied only at and above 50 MeV, a step in the shape
-  that is negligible for low-Z media and several percent of the DCS in tungsten.
+- The Coulomb correction is applied only at and above 50 MeV (the EGS4
+  convention), which puts a step in the DCS there. Measured at 50 MeV, with and
+  without :math:`f_c`: the unnormalised DCS drops by 0.12 to 0.17 % in water,
+  0.41 to 0.57 % in cortical bone and 9.4 to 12.6 % in tungsten (centre to
+  :math:`\varepsilon = 0.1`; the centre values are test-pinned). Only the
+  *shape* is sampled, and the normalised sharing density moves by far less: at
+  most 0.08 %, 0.27 % and 6.3 % for :math:`0.05 \le \varepsilon \le 0.95`
+  (+1.9 % at the centre in tungsten), a total-variation distance of 0.013 %,
+  0.046 % and 1.1 %.
 - **Triplet production is not distinguished** (existing approximation of the
   photon channels): the field-of-the-electron contribution enters only through the
   :math:`Z(Z+\xi)` element weights of the mixture rule.
