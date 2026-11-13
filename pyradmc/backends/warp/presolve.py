@@ -787,6 +787,15 @@ class DevicePhaseSpace:
         """Highest energy in the stored population (MeV), for the table upload."""
         return self._max_energy
 
+    @property
+    def particle_kinds(self) -> frozenset[str]:
+        """The kinds the pre-solve can leave in the buffer: photons and electrons.
+
+        Every kind the kernel emits, not a scan of the buffer — a read-back is
+        what this handle exists to avoid. Mirrors ``Source.particle_kinds``.
+        """
+        return frozenset({"photon", "electron"})
+
     def __len__(self) -> int:
         """Return the number of stored exit-plane particles."""
         return self.count

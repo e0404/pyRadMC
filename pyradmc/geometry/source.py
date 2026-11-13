@@ -131,6 +131,19 @@ class Source(ABC):
     def max_energy(self) -> float:
         """Highest primary energy in MeV, for cross-section table sizing."""
 
+    @property
+    def particle_kinds(self) -> frozenset[str] | None:
+        """The primary kinds this source emits, when it sets ``Primary.kind`` itself.
+
+        ``None`` (the default) means the source leaves ``kind`` unset and the
+        engine's ``primary_kind`` decides. A source that sets the kind per record
+        — a phase space — overrides this with the kinds it holds, so the run
+        configuration can be read without sampling it (the ``"auto"`` physics
+        selection does; see :func:`pyradmc.physics_options.run_primary_kinds`).
+        Descriptive only: transport never consults it.
+        """
+        return None
+
     @abstractmethod
     def emit(self, rng_state: RNGState) -> Primary:
         """Emit one primary, drawing from the per-history RNG ``state``."""
@@ -229,6 +242,18 @@ class CompositeSource(Source):
     def max_energy(self) -> float:
         """Highest energy any component can emit, for cross-section table sizing."""
         return self._max_energy
+
+    @property
+    def particle_kinds(self) -> frozenset[str] | None:
+        """Union of the components' declared kinds; ``None`` unless every one declares.
+
+        A component that leaves the kind to the engine makes the mixture's kinds
+        depend on ``primary_kind``, which this source cannot know.
+        """
+        declared = [source.particle_kinds for source in self._sources]
+        if any(kinds is None for kinds in declared):
+            return None
+        return frozenset().union(*(kinds for kinds in declared if kinds is not None))
 
     def emit(self, rng_state: RNGState) -> Primary:
         """Choose a component by weight (one uniform), then emit from it."""
