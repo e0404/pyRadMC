@@ -962,6 +962,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     before = smi.gpus()  # before this process touches CUDA
     apps = smi.compute_apps()
     warnings = idle_warnings(before, apps, args.busy_mib)
+    if not before:
+        warnings.append("nvidia-smi not found or not answering: no idle check, clocks or "
+                        "throttle reasons are recorded")  # fmt: skip
 
     import warp as wp
 
