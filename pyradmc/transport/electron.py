@@ -18,11 +18,11 @@ One particle at a time, for the reference backend. The scheme, per docs/decision
 - **Discrete thin-target bremsstrahlung** (see :mod:`pyradmc.physics.brems`): at most
   one photon per substep, emitted forward from the hinge point, Bernoulli probability
   matched to the radiative stopping power; the sub-PCUT remainder joins the
-  continuous deposit.
+  continuous deposit. This is the ``"thin-target"`` bremsstrahlung model.
 - **Positrons are transported as electrons** (no Bhabha distinction — a stated,
   maintainer-approved approximation) and annihilate at rest into two back-to-back
   511 keV photons wherever they stop; a positron leaving the grid carries its
-  annihilation energy with it.
+  annihilation energy with it. This is the ``"moller-at-rest"`` positron model.
 - **Static magnetic field** (:mod:`pyradmc.physics.lorentz`; Bielajew 1988,
   doi:10.1007/978-1-4613-1059-4_19; Malkov & Rogers 2016, doi:10.1118/1.4954318):
   the field is sampled once per substep and each of the hinge's two straight chords
@@ -48,6 +48,10 @@ One particle at a time, for the reference backend. The scheme, per docs/decision
   though it may cross exterior voxels of other densities below the region's bound.
   Rotation draws no random number, and the hinge decouples from the field exactly as
   above, over a larger angle.
+
+Each named model is the only one registered for its process
+(:mod:`pyradmc.physics_options`); the loop is handed the run's resolved choice and
+refuses one it does not implement.
 
 Substeps are limited four ways: a fraction of the CSDA range (energy-loss
 accuracy), a mean-square hinge-angle ceiling (multiple-scattering accuracy — the
@@ -98,6 +102,7 @@ from pyradmc.physics.moller import moller_direction_cosines, sample_moller_delta
 from pyradmc.physics.msc import sample_hinge_cos_theta
 from pyradmc.physics.path import sample_path_length
 from pyradmc.physics.roulette import roulette_weight
+from pyradmc.physics_options import CLINICAL_PHYSICS, ResolvedPhysics, require_implemented
 from pyradmc.rng import RNGState, uniform
 from pyradmc.transport.particles import (
     ELECTRON,
@@ -111,8 +116,10 @@ from pyradmc.transport.particles import (
 
 __all__ = [
     "BOUNDARY_NUDGE_CM",
+    "BREMSSTRAHLUNG_MODELS",
     "GS_STEP_ENERGY_FRACTION",
     "LORENTZ_STEP_ANGLE_MAX",
+    "POSITRON_MODELS",
     "STEP_ENERGY_FRACTION",
     "STEP_HINGE_THETA2_MAX",
     "SUBSTEP_DEPOSIT_CAP",
@@ -121,6 +128,25 @@ __all__ = [
     "substep_deposit_count",
     "substep_pieces",
 ]
+
+BREMSSTRAHLUNG_MODELS: tuple[str, ...] = ("thin-target",)
+"""The bremsstrahlung models :func:`electron_steps` implements.
+
+Must equal the registered set (``PHYSICS_MODELS["bremsstrahlung"].models``;
+test-pinned). A new model is implemented at the two bremsstrahlung sites of
+:func:`electron_steps` — the per-substep emission decision and the photon sampled
+at the hinge — and named here.
+"""
+
+POSITRON_MODELS: tuple[str, ...] = ("moller-at-rest",)
+"""The positron models :func:`electron_steps` implements.
+
+Must equal the registered set (``PHYSICS_MODELS["positron"].models``;
+test-pinned). A new model is implemented where a positron's transport would
+differ from an electron's in :func:`electron_steps` — the discrete cross-section
+and its event at the end of the substep, and a competing in-flight channel — and
+named here. Annihilation of a *stopped* positron is not model-dependent.
+"""
 
 STEP_ENERGY_FRACTION: float = 0.05
 """Maximum fraction of the CSDA range per substep under the Gaussian instrument.
@@ -297,6 +323,7 @@ def electron_steps(
     deposit_resolution_cm: float | None = None,
     field: MagneticField | None = None,
     exterior_safety: npt.NDArray[np.float64] | None = None,
+    physics: ResolvedPhysics = CLINICAL_PHYSICS,
 ) -> float:
     """Transport one electron or positron; secondaries go to ``spawn``.
 
@@ -361,9 +388,17 @@ def electron_steps(
     stepping; the engines pass it only under a uniform non-zero field
     (:func:`~pyradmc.geometry.exterior.resolve_exterior_air`). Where it is positive the
     substep is the long exact-helix step of the module docstring.
+    ``physics`` carries the run's resolved models
+    (:class:`~pyradmc.physics_options.ResolvedPhysics`). This loop reads
+    ``physics.bremsstrahlung`` for every particle and ``physics.positron`` for a
+    positron; see :data:`BREMSSTRAHLUNG_MODELS` and :data:`POSITRON_MODELS`.
     """
     if msc_model not in ("gaussian", "gs"):
         raise ValueError(f"unknown msc_model {msc_model!r}; expected 'gaussian' or 'gs'")
+    where = "the reference electron loop"
+    require_implemented("bremsstrahlung", physics.bremsstrahlung, BREMSSTRAHLUNG_MODELS, where)
+    if is_positron:
+        require_implemented("positron", physics.positron, POSITRON_MODELS, where)
     if step_energy_fraction is None:
         step_energy_fraction = default_step_energy_fraction(msc_model)
     if deposit_resolution_cm is not None and deposit_resolution_cm <= 0.0:
@@ -534,6 +569,9 @@ def electron_steps(
                 + BOUNDARY_NUDGE_CM
             )
         s_geometry = min(s_max, s_boundary)
+        # Positron model dispatch (physics.positron), first site. "moller-at-rest":
+        # a positron takes the electron's Moller cross-section. A second model
+        # selects the positron's own discrete cross-sections here.
         sigma_moller = rho * cross_sections.moller_cross_section(e, material, ecut)
         s_interaction = (
             sample_path_length(sigma_moller, rng_state) if sigma_moller > 0.0 else math.inf
@@ -570,6 +608,9 @@ def electron_steps(
             moller_pending = False
         else:
             de = e - cross_sections.energy_after_mass_path(e, material, ecut, rho * path)
+        # Bremsstrahlung model dispatch (physics.bremsstrahlung), first site.
+        # "thin-target": a Bernoulli emission per substep, one uniform. A second
+        # model replaces this decision and the sub-PCUT remainder.
         emit_probability, local_brems = bremsstrahlung_step_parameters(
             e, cross_sections.radiative_stopping_power(e, material), rho, path, pcut
         )
@@ -661,6 +702,9 @@ def electron_steps(
         ux, uy, uz = rotate_direction(ux, uy, uz, cos_hinge, phi)
 
         if emit_brems and e > pcut:
+            # Bremsstrahlung model dispatch, second site. "thin-target": 1/k
+            # energy, one uniform, photon along the post-hinge direction. A
+            # second model samples its own energy and emission angle here.
             k = sample_bremsstrahlung_energy(e, pcut, rng_state)
             # Rare tail: the sampled photon would overdraw the energy still owed to
             # the second continuous deposit. Cap it; a capped photon at or below
@@ -738,6 +782,8 @@ def electron_steps(
             return escaped + w * (e + latent)
 
         # --- discrete Moller event at the end of the substep -------------------------
+        # Positron model dispatch, second site. "moller-at-rest": a positron's
+        # discrete event is sampled as Moller, like an electron's.
         if moller_pending and e > 2.0 * ecut:
             delta_energy = sample_moller_delta_energy(e, ecut, rng_state)
             cos_delta, cos_primary = moller_direction_cosines(e, delta_energy)

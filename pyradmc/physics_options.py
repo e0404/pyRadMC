@@ -48,6 +48,7 @@ __all__ = [
     "PhysicsOptions",
     "ProcessModels",
     "ResolvedPhysics",
+    "require_implemented",
     "resolve_physics",
     "run_primary_kinds",
 ]
@@ -313,6 +314,21 @@ def resolve_physics(
     if explicit:
         reason += "; " + ", ".join(explicit) + " set explicitly"
     return ResolvedPhysics(**models, reason=reason)
+
+
+def require_implemented(process: str, model: str, implemented: Collection[str], where: str) -> None:
+    """Raise unless ``where`` implements ``model`` for ``process``.
+
+    The guard every implementation site runs on the model it is handed. A name in
+    :data:`PHYSICS_MODELS` is a promise that both backends implement it; this is
+    what turns a broken promise into an error instead of a run that silently
+    used a different model.
+    """
+    if model not in implemented:
+        raise NotImplementedError(
+            f"{process} model {model!r} is registered but not implemented in {where}; "
+            f"implemented there: {_quoted(implemented)}"
+        )
 
 
 def run_primary_kinds(source: object, fallback: str) -> frozenset[str]:

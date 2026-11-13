@@ -22,7 +22,8 @@ Stated approximations, named here because this is where they are implemented:
   distribution is strongly forward at these energies anyway).
 - **Pair energy split sampled uniformly** between the electron and positron
   (maintainer-approved), both emitted **forward**; the positron annihilates at rest
-  (see :mod:`pyradmc.transport.particles`).
+  (see :mod:`pyradmc.transport.particles`). This is the ``"uniform-split"`` pair
+  model, the only one registered (:mod:`pyradmc.physics_options`).
 - **No Rayleigh by default** is a property of the *data*, not of this loop: the loop
   is channel-complete (AGENTS.md 2.10) and samples the coherent channel whenever the
   data source reports it nonzero (see :mod:`pyradmc.physics.rayleigh` for the angular
@@ -72,6 +73,7 @@ from pyradmc.physics.compton import (
 from pyradmc.physics.direction import rotate_direction
 from pyradmc.physics.path import sample_path_length
 from pyradmc.physics.roulette import roulette_weight
+from pyradmc.physics_options import CLINICAL_PHYSICS, ResolvedPhysics, require_implemented
 from pyradmc.rng import RNGState, uniform
 from pyradmc.transport.particles import (
     ELECTRON,
@@ -85,7 +87,7 @@ from pyradmc.transport.particles import (
     unit_weight,
 )
 
-__all__ = ["DepositFn", "photon_steps", "transport_photon"]
+__all__ = ["PAIR_MODELS", "DepositFn", "photon_steps", "transport_photon"]
 
 # Nudge past the grid surface after the vacuum flight, so the entry position is
 # strictly inside under the half-open convention. 1e-9 cm is float-noise relative to
@@ -95,6 +97,14 @@ _ENTRY_NUDGE_CM = 1.0e-9
 # Relative headroom for the majorant sanity check. The majorant must bound the real
 # cross-section exactly; the epsilon only forgives float evaluation-order noise.
 _MAJORANT_TOLERANCE = 1.0e-9
+
+PAIR_MODELS: tuple[str, ...] = ("uniform-split",)
+"""The pair models :func:`photon_steps` implements.
+
+Must equal the registered set (``PHYSICS_MODELS["pair"].models``; test-pinned). A
+new model is implemented at the pair branch of :func:`photon_steps`, where the
+energy split and the lepton directions are sampled, and named here.
+"""
 
 
 def photon_steps(
@@ -116,6 +126,7 @@ def photon_steps(
     transport_electrons: bool,
     is_primary: bool,
     deposit_weight: DepositWeightFn = unit_weight,
+    physics: ResolvedPhysics = CLINICAL_PHYSICS,
 ) -> float:
     """Transport one photon; secondaries go to ``spawn``. Returns removed energy.
 
@@ -143,7 +154,12 @@ def photon_steps(
     default books dose-to-medium): every local deposit passes both the physical
     amount and ``deposit_weight(E, material) * amount`` to the scorer, evaluated
     at the deposited particle's energy in the interaction voxel's material.
+
+    ``physics`` carries the run's resolved models
+    (:class:`~pyradmc.physics_options.ResolvedPhysics`). This loop reads
+    ``physics.pair``, at the pair branch; see :data:`PAIR_MODELS`.
     """
+    require_implemented("pair", physics.pair, PAIR_MODELS, "the reference photon loop")
     escaped = 0.0
     e = energy
     w = weight
@@ -245,6 +261,9 @@ def photon_steps(
         else:  # pair production
             kinetic = e - 2.0 * ELECTRON_MASS_MEV
             if transport_electrons:
+                # Pair model dispatch (physics.pair). "uniform-split": one uniform
+                # for the energy share, both leptons forward. A second model
+                # branches here on its own draws and directions.
                 fraction = uniform(rng_state)  # uniform split, stated approximation
                 for kind, share in (
                     (ELECTRON, fraction * kinetic),

@@ -25,6 +25,7 @@ from pyradmc.physics_options import (
     PhysicsOptions,
     ProcessModels,
     ResolvedPhysics,
+    require_implemented,
     resolve_physics,
     run_primary_kinds,
 )
@@ -270,6 +271,23 @@ class TestRunPrimaryKinds:
             particle_kinds = None
 
         assert run_primary_kinds(Defers(), "photon") == PHOTONS
+
+
+class TestImplementationGuard:
+    def test_an_implemented_model_passes(self) -> None:
+        require_implemented("pair", "uniform-split", ("uniform-split",), "a loop")
+
+    def test_an_unimplemented_model_names_itself_and_the_site(self) -> None:
+        with pytest.raises(NotImplementedError, match=r"pair model 'x'.*in a loop.*'uniform-s"):
+            require_implemented("pair", "x", ("uniform-split",), "a loop")
+
+    def test_reference_loops_implement_exactly_the_registered_models(self) -> None:
+        """Registering a name without implementing it in the oracle fails here."""
+        from pyradmc.transport import electron, photon
+
+        assert PHYSICS_MODELS["bremsstrahlung"].models == electron.BREMSSTRAHLUNG_MODELS
+        assert PHYSICS_MODELS["pair"].models == photon.PAIR_MODELS
+        assert PHYSICS_MODELS["positron"].models == electron.POSITRON_MODELS
 
 
 def test_resolution_is_silent(caplog: pytest.LogCaptureFixture) -> None:

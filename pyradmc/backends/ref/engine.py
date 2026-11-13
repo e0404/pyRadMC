@@ -12,6 +12,7 @@ itself (launch and memory management only, AGENTS.md section 3).
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from functools import partial
 
@@ -37,6 +38,12 @@ from pyradmc.geometry.exterior import (
 from pyradmc.geometry.field import MagneticField
 from pyradmc.geometry.grid import VoxelGrid
 from pyradmc.geometry.source import BeamletSource, Source
+from pyradmc.physics_options import (
+    PhysicsOptions,
+    ResolvedPhysics,
+    resolve_physics,
+    run_primary_kinds,
+)
 from pyradmc.progress import ProgressCallback, ProgressEmitter
 from pyradmc.rng.interface import RNG
 from pyradmc.scoring.dij import BatchedBeamletScorer, DijAssembler, DijResult
@@ -54,6 +61,8 @@ from pyradmc.transport.particles import (
 )
 
 __all__ = ["ReferenceEngine", "TransportResult"]
+
+logger = logging.getLogger(__name__)
 
 # Maps a Primary's per-particle kind name to a transport particle constant. A
 # phase-space source sets ``kind`` per record; beam sources leave it None and the
@@ -126,6 +135,7 @@ class ReferenceEngine:
         msc_model: str,
         step_energy_fraction: float | None,
         deposit_resolution_cm: float | None,
+        physics: ResolvedPhysics,
     ) -> RunProvenance:
         """Record the configuration this run actually used.
 
@@ -152,6 +162,7 @@ class ReferenceEngine:
                 None if self.magnetic_field is None else self.magnetic_field.provenance
             ),
             exterior_air=None if self._exterior is None else self._exterior.provenance,
+            physics=physics,
         )
 
     def _exterior_safety(self) -> npt.NDArray[np.float64] | None:
@@ -175,6 +186,7 @@ class ReferenceEngine:
         msc_model: str = "gs",
         progress: ProgressCallback | None = None,
         concurrent_batches: int = 1,
+        physics: PhysicsOptions | str = "auto",
     ) -> TransportResult:
         """Transport ``n_histories`` primaries in ``n_batches`` equal batches.
 
@@ -264,6 +276,15 @@ class ReferenceEngine:
             Scheduling hint shared with the Warp API. The single-history reference
             oracle is deliberately sequential, so any positive value is accepted
             and has no effect.
+        physics
+            The physics model per process (AGENTS.md 2.10): ``"auto"`` (default)
+            or a :class:`~pyradmc.physics_options.PhysicsOptions` naming a model
+            for bremsstrahlung, pair production or positrons. ``"auto"`` is the
+            certified path; it is resolved once, before the first history, from
+            ``source.max_energy`` and the kinds the run starts
+            (:func:`~pyradmc.physics_options.resolve_physics`). An explicit model
+            is the caller's responsibility. The resolved choice and its reason
+            are logged once at INFO and recorded in the result's provenance.
         """
         require_energy_domain(self.cross_sections, source.max_energy)
         if n_histories < 1:
@@ -280,6 +301,12 @@ class ReferenceEngine:
         deposit_weight = _deposit_weight_for(
             scoring_mode, self.cross_sections, ecut, transport_electrons
         )
+        resolved = resolve_physics(
+            physics,
+            max_energy_mev=source.max_energy,
+            primary_kinds=run_primary_kinds(source, primary_kind),
+        )
+        logger.info("physics models: %s (%s)", resolved.summary(), resolved.reason)
 
         scorer = BatchedDoseScorer(
             scoring_grid if scoring_grid is not None else self.grid, n_batches
@@ -327,6 +354,7 @@ class ReferenceEngine:
                     msc_model=msc_model,
                     field=self.magnetic_field,
                     exterior_safety=self._exterior_safety(),
+                    physics=resolved,
                 )
             scorer.end_batch(per_batch)
             emitter.tick(per_batch)
@@ -343,7 +371,7 @@ class ReferenceEngine:
             n_batches=n_batches,
             scoring_mode=scoring_mode,
             provenance=self._provenance(
-                seed, pcut, ecut, msc_model, step_energy_fraction, deposit_resolution_cm
+                seed, pcut, ecut, msc_model, step_energy_fraction, deposit_resolution_cm, resolved
             ),
         )
 
@@ -364,6 +392,7 @@ class ReferenceEngine:
         deposit_resolution_cm: float | None = None,
         msc_model: str = "gs",
         progress: ProgressCallback | None = None,
+        physics: PhysicsOptions | str = "auto",
     ) -> DijResult:
         """Compute the beamlet-resolved dose influence matrix over the lattice.
 
@@ -439,6 +468,9 @@ class ReferenceEngine:
             reach the same total, but tick count and spacing differ between
             backends. Treat ``histories_done / histories_total`` as the portable
             signal (see :mod:`pyradmc.progress`).
+        physics
+            The physics model per process, as in :meth:`run`. A Dij starts
+            photons only, so ``"auto"`` is resolved from ``source.max_energy``.
         """
         require_energy_domain(self.cross_sections, source.max_energy)
         if n_histories_per_beamlet < 1:
@@ -454,6 +486,10 @@ class ReferenceEngine:
         deposit_weight = _deposit_weight_for(
             scoring_mode, self.cross_sections, ecut, transport_electrons
         )
+        resolved = resolve_physics(
+            physics, max_energy_mev=source.max_energy, primary_kinds=("photon",)
+        )
+        logger.info("physics models: %s (%s)", resolved.summary(), resolved.reason)
         n_beamlets = source.n_beamlets
         per_batch = n_histories_per_beamlet // n_batches
         scoring = scoring_grid if scoring_grid is not None else ScoringGrid.for_grid(self.grid)
@@ -494,6 +530,7 @@ class ReferenceEngine:
                         msc_model=msc_model,
                         field=self.magnetic_field,
                         exterior_safety=self._exterior_safety(),
+                        physics=resolved,
                     )
             scorer.end_batch(per_batch)
             emitter.tick(n_beamlets * per_batch)
@@ -508,7 +545,7 @@ class ReferenceEngine:
             correlated=correlated,
             scoring_mode=scoring_mode,
             provenance=self._provenance(
-                seed, pcut, ecut, msc_model, step_energy_fraction, deposit_resolution_cm
+                seed, pcut, ecut, msc_model, step_energy_fraction, deposit_resolution_cm, resolved
             ),
         )
         assembler.add_block(0, block.dose, block.sigma)

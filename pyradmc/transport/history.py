@@ -17,6 +17,7 @@ import numpy.typing as npt
 from pyradmc.data.interface import CrossSectionSource
 from pyradmc.geometry.field import MagneticField
 from pyradmc.geometry.grid import VoxelGrid
+from pyradmc.physics_options import CLINICAL_PHYSICS, ResolvedPhysics
 from pyradmc.rng import RNGState
 from pyradmc.transport.electron import electron_steps
 from pyradmc.transport.particles import (
@@ -55,6 +56,7 @@ def transport_history(
     msc_model: str = "gs",
     field: MagneticField | None = None,
     exterior_safety: npt.NDArray[np.float64] | None = None,
+    physics: ResolvedPhysics = CLINICAL_PHYSICS,
 ) -> float:
     """Transport one primary and all its descendants; returns the escaped energy.
 
@@ -102,6 +104,11 @@ def transport_history(
     exterior_safety
         Per-voxel safety of an exterior-air map, or ``None`` for the current stepping;
         handed to :func:`~pyradmc.transport.electron.electron_steps` alone.
+    physics
+        The run's resolved physics models, handed unchanged to both step loops;
+        an engine resolves it once per run
+        (:func:`~pyradmc.physics_options.resolve_physics`). The default is the
+        clinical set, for callers that drive a history directly.
     """
     stack: list[StackEntry] = [(kind, energy, weight, x, y, z, ux, uy, uz)]
     escaped = 0.0
@@ -136,6 +143,7 @@ def transport_history(
                 transport_electrons,
                 is_primary=is_primary,
                 deposit_weight=deposit_weight,
+                physics=physics,
             )
         else:
             escaped += electron_steps(
@@ -161,5 +169,6 @@ def transport_history(
                 msc_model=msc_model,
                 field=field,
                 exterior_safety=exterior_safety,
+                physics=physics,
             )
     return escaped
