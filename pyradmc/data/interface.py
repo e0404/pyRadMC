@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     import numpy.typing as npt
 
     from pyradmc.data.bethe_heitler import BremsScreening
+    from pyradmc.data.pair import PairScreening
     from pyradmc.data.tables import CrossSectionTables
 
 __all__ = ["DOMAIN_EDGE_RTOL", "CrossSectionSource", "PhotonProcess", "require_energy_domain"]
@@ -639,6 +640,31 @@ class CrossSectionSource(ABC):
             float(np.interp(x, log_e, cross_section)),
             float(np.interp(x, log_e, restricted)),
         )
+
+    # -- pair-production kinematics (concrete: derived from the composition) ----
+
+    def pair_screening(self, material: int) -> PairScreening:
+        """Screening scalars of the pair energy-sharing distribution, dimensionless.
+
+        The three per-material inputs of
+        :func:`pyradmc.physics.pair.sample_pair_electron_energy`
+        (``screening_constant``, ``coulomb_low``, ``coulomb_high``; see
+        :class:`pyradmc.data.pair.PairScreening`). They fix only the *shape* of the
+        electron/positron energy sharing; the pair cross-section itself stays
+        :meth:`mu_over_rho` with ``PhotonProcess.PAIR``.
+
+        Concrete on the interface for the reason :meth:`elastic_screening` is:
+        computed from the material's elemental composition
+        (:func:`pyradmc.data.pair.pair_screening_parameters`, EGS4 mixture rule),
+        so no implementation can omit it and no backend can drift on the shape. A
+        source with differential pair data of its own may override it.
+        """
+        from pyradmc.data.materials import MATERIALS
+        from pyradmc.data.pair import pair_screening_parameters
+
+        if not 0 <= material < self.n_materials:
+            raise ValueError(f"material index {material} beyond this source")
+        return pair_screening_parameters(MATERIALS[material].composition)
 
     # -- construction -------------------------------------------------------
 
