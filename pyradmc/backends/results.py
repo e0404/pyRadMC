@@ -29,6 +29,12 @@ class RunProvenance:
     anything, and the engines fill it in from the arguments they were actually
     called with (a resolved ``step_energy_fraction``, not the ``None`` the caller
     may have passed).
+
+    A beamlet contraction adds the fold that produced it (:attr:`fold`, and for the
+    deposit fold its scale and bands): the deposit and dense folds, and the deposit
+    fold at two scales, agree only to rounding (~1e-10 relative) and not bit for bit,
+    so two contractions with otherwise equal records are not interchangeable without
+    them. They are ``None`` where they do not apply.
     """
 
     version: str
@@ -73,15 +79,53 @@ class RunProvenance:
     :attr:`~pyradmc.geometry.exterior.ExteriorAirMap.provenance`; ``None`` for the
     current stepping, including when a map was given but is inert (no field, a zero
     field, a non-uniform field). It distinguishes two otherwise identical field runs."""
+    fold: str | None = None
+    """How a beamlet contraction's deposits became per-beamlet values, as the fold
+    that *produced the result*: ``"deposit"`` or ``"dense"``. ``None`` for everything
+    that is not a contraction (a forward run, a Dij). A deposit fold that fell back to
+    the dense fold at run time (a weight range beyond the octave bands, or an overflow
+    guard no rescale satisfied) is ``"dense"`` here: the two folds round differently
+    (about 1e-10 relative), so the result carries the fold that ran, not the one asked
+    for."""
+    fold_requested: str | None = None
+    """The ``fold`` the caller asked a contraction for; ``None`` outside a contraction.
+    It differs from :attr:`fold` exactly when the deposit fold fell back to the dense
+    one, which is worth seeing in a record even though the numbers are the dense
+    fold's either way."""
+    fold_scale_exponent: int | None = None
+    """``log2 K_0``, the power-of-two scale the deposit fold's integer accumulation ran
+    at, as of the pass the result came from: after an overflow-guard rescale it is the
+    rescaled exponent, not the a-priori one. A different ``K_0`` rounds every deposit
+    differently, so it is not recoverable from the values. ``None`` unless
+    :attr:`fold` is ``"deposit"``."""
+    fold_bands: int | None = None
+    """Number of octave bands of the deposit fold's accumulators (each with its own
+    scale ``K_0 2**(b W)``); with :attr:`fold_scale_exponent` and
+    :attr:`fold_band_width` it fixes the rounding. ``None`` unless :attr:`fold` is
+    ``"deposit"``."""
+    fold_band_width: int | None = None
+    """Octaves per band, ``W``; ``None`` unless :attr:`fold` is ``"deposit"``."""
 
     def summary(self) -> str:
         """One-line human-readable digest, for logs and file headers."""
-        return (
+        line = (
             f"pyradmc {self.version} {self.backend}/{self.device} seed={self.seed} "
             f"pcut={self.pcut_mev} ecut={self.ecut_mev} msc={self.msc_model} "
             f"step={self.step_energy_fraction} deposit_res={self.deposit_resolution_cm} "
             f"xs=[{self.cross_sections}] B=[{self.magnetic_field}] air=[{self.exterior_air}]"
         )
+        if self.fold is None:
+            return line
+        if self.fold == "deposit":
+            fold = (
+                f"deposit K=2**{self.fold_scale_exponent} "
+                f"bands={self.fold_bands}x{self.fold_band_width}"
+            )
+        elif self.fold_requested != self.fold:
+            fold = f"{self.fold} (fell back from {self.fold_requested})"
+        else:
+            fold = self.fold
+        return f"{line} fold=[{fold}]"
 
 
 @dataclass(frozen=True)
