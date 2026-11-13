@@ -2437,7 +2437,9 @@ therefore times the cpu shard's set-up, not the group scheduling, and says nothi
 identical GPUs.
 
 **Open.** Two identical GPUs: the four groups per device and the scheduling they are for are
-unmeasured. Which review fix costs the 1.2-5.7 %. The remembered scale under a source that
+unmeasured; `tests/perf/bench_multi_gpu_contraction.py` measures both on synthetic stand-ins
+for the study cases (7020 and 3060 edges, analytic water, no data files), at 1000 to 100 000
+histories per edge and 2, 4 and 8 groups per device. Which review fix costs the 1.2-5.7 %. The remembered scale under a source that
 does exceed the guard at its a-priori scale (no measured loop did). The old code at the full
 grid (not run; it was not in the first table either).
 
