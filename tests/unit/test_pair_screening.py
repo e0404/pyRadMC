@@ -93,6 +93,71 @@ class TestRadiationLogarithms:
         assert 1.0 / inverse == pytest.approx(PDG_WATER_RADIATION_LENGTH, rel=3e-3)
 
 
+class TestSharedWithBremsstrahlung:
+    """Literal pins of the helpers the bremsstrahlung model defines a second time.
+
+    The screened Bethe-Heitler bremsstrahlung model (branch
+    ``brems-bethe-heitler-physics``, ``pyradmc/data/bethe_heitler.py``) carries its
+    own fine-structure constant, ``coulomb_correction`` and Tsai radiation
+    logarithms. They are the same physical quantities as the ones here and must be
+    the same *numbers*, or a medium would be screened differently for the photon
+    that makes a pair and the lepton that radiates. The values below were printed
+    from that module (commit 891b204) to full double precision; the tolerance is
+    libm rounding only. When the two branches are stacked, the duplicates collapse
+    into one helper and these literals say which numbers it must return.
+    """
+
+    def test_fine_structure_constant(self) -> None:
+        assert FINE_STRUCTURE_CONSTANT == 7.2973525693e-3
+
+    @pytest.mark.parametrize(
+        ("z", "expected"),
+        [
+            (1, 6.40083830230286e-05),
+            (6, 0.0023006040397510067),
+            (8, 0.004084720814309612),
+            (20, 0.02514361676656564),
+            (29, 0.05184058187270907),
+            (74, 0.28174435078545906),
+            (82, 0.3316239382143995),
+        ],
+    )
+    def test_coulomb_correction(self, z: int, expected: float) -> None:
+        assert coulomb_correction(z) == pytest.approx(expected, rel=1e-14, abs=0.0)
+
+    @pytest.mark.parametrize(
+        ("z", "expected"),
+        [
+            # Tsai's table B.2 for Z <= 4, where the Thomas-Fermi model fails.
+            (1, (5.31, 6.144)),
+            (2, (4.79, 5.621)),
+            (3, (4.74, 5.805)),
+            (4, (4.71, 5.924)),
+            # Above: 20.863 / 4 - ln(Z) / 3 and 28.340 / 4 - 2 ln(Z) / 3.
+            (5, (4.679270695855299, 6.0120413917106)),
+            (6, (4.618496843590648, 5.890493687181297)),
+            (8, (4.5226028194400545, 5.698705638880109)),
+            (20, (4.217172575482003, 5.087845150964006)),
+            (29, (4.093318056671175, 4.84013611334235)),
+            (74, (3.7810616355986095, 4.21562327119722)),
+            (82, (3.7468435842452488, 4.147187168490498)),
+        ],
+    )
+    def test_radiation_logarithms(self, z: int, expected: tuple[float, float]) -> None:
+        assert radiation_logarithms(z) == pytest.approx(expected, rel=1e-14, abs=0.0)
+
+    def test_radiation_logarithms_are_tsai_to_the_fit_rounding(self) -> None:
+        """The pinned form is Tsai's ln(184.15 Z^-1/3), ln(1194 Z^-2/3) to 5 figures.
+
+        20.863 and 28.340 are his rounded ``4 ln 184.15`` and ``4 ln 1194``; the
+        rounding shifts the logarithms by 6.4e-7 and 6.4e-5, independent of Z.
+        """
+        for z in (5, 8, 29, 74):
+            l_rad, l_rad_prime = radiation_logarithms(z)
+            assert l_rad == pytest.approx(math.log(184.15 * z ** (-1.0 / 3.0)), abs=1e-6)
+            assert l_rad_prime == pytest.approx(math.log(1194.0 * z ** (-2.0 / 3.0)), abs=1e-4)
+
+
 class TestScreeningFunctions:
     def test_complete_screening_limit(self) -> None:
         """Phi1(0) = 4 ln 183 and Phi1(0) - Phi2(0) = 2/3 (Bethe-Heitler, Thomas-Fermi)."""

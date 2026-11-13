@@ -115,6 +115,12 @@ _TSAI_LIGHT_ELEMENTS: dict[int, tuple[float, float]] = {
     4: (4.71, 5.924),
 }
 
+_TSAI_PHI1_COMPLETE: float = 20.863
+"""``phi_1(0)`` of Tsai's Thomas-Fermi fit, his rounded ``4 ln 184.15``."""
+
+_TSAI_PSI1_COMPLETE: float = 28.340
+"""``psi_1(0)`` of Tsai's Thomas-Fermi fit, his rounded ``4 ln 1194``."""
+
 
 class PairScreening(NamedTuple):
     """Per-material inputs of the pair energy-sharing sampler; all dimensionless.
@@ -162,13 +168,27 @@ def radiation_logarithms(z: int) -> tuple[float, float]:
     ``Z <= 4``. Tsai (1974), doi:10.1103/RevModPhys.46.815, table B.2. They are the
     nuclear-field and electron-field screening logarithms of the complete-screening
     limit; here they only weight the elements of a mixture.
+
+    Evaluated as :math:`\tfrac14\phi_1(0) - \tfrac13\ln Z` and
+    :math:`\tfrac14\psi_1(0) - \tfrac23\ln Z` with the constants of Tsai's
+    Thomas-Fermi fit as he rounds them, :math:`\phi_1(0) = 20.863` and
+    :math:`\psi_1(0) = 28.340` (his :math:`4\ln 184.15` and :math:`4\ln 1194`).
+    The rounding moves the logarithms by 6.4e-7 and 6.4e-5. This form is used
+    because the screened Bethe-Heitler bremsstrahlung model evaluates the same
+    two logarithms from those constants, and a medium must not be screened by
+    two slightly different numbers; the values are pinned literally in
+    ``tests/unit/test_pair_screening.py``.
     """
     if z < 1:
         raise ValueError(f"atomic number must be positive, got {z}")
     light = _TSAI_LIGHT_ELEMENTS.get(z)
     if light is not None:
         return light
-    return math.log(184.15 * z ** (-1.0 / 3.0)), math.log(1194.0 * z ** (-2.0 / 3.0))
+    log_z = math.log(z)
+    return (
+        0.25 * _TSAI_PHI1_COMPLETE - log_z / 3.0,
+        0.25 * _TSAI_PSI1_COMPLETE - 2.0 * log_z / 3.0,
+    )
 
 
 def pair_screening_parameters(composition: tuple[tuple[int, float], ...]) -> PairScreening:
