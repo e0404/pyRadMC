@@ -32,6 +32,7 @@ This module is Warp backend code: exempt from ``mypy --strict`` (AGENTS.md 5).
 
 from __future__ import annotations
 
+import logging
 import threading
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
@@ -76,6 +77,14 @@ from pyradmc.geometry.source import (
     SpectralBeamletSource,
     SpectralBeamSource,
 )
+from pyradmc.physics_options import (
+    CLINICAL_PHYSICS,
+    PHYSICS_MODELS,
+    PhysicsOptions,
+    ResolvedPhysics,
+    resolve_physics,
+    run_primary_kinds,
+)
 from pyradmc.progress import ProgressCallback, ProgressEmitter
 from pyradmc.scoring.cylinder import CylindricalScoringGrid
 from pyradmc.scoring.dij import DijAssembler, DijResult
@@ -86,6 +95,8 @@ from pyradmc.transport.electron import default_step_energy_fraction
 from pyradmc.transport.particles import ELECTRON, PHOTON, POSITRON
 
 __all__ = ["DeviceDijResult", "WarpEngine"]
+
+logger = logging.getLogger(__name__)
 
 _E_MAX_MARGIN = 1.0 + 1.0e-6  # table upper edge strictly above the primary energy
 
@@ -198,6 +209,28 @@ def _validate_msc_model(msc_model: str) -> int:
     if msc_model not in ("gaussian", "gs"):
         raise ValueError(f"unknown msc_model {msc_model!r}; expected 'gaussian' or 'gs'")
     return 1 if msc_model == "gs" else 0
+
+
+def _kernel_physics_codes(physics: ResolvedPhysics) -> dict[str, int]:
+    """Map the resolved physics models to the codes the kernels carry; refuse gaps.
+
+    Checked *before* any launch, like ``msc_model`` — a kernel cannot raise. A
+    model that is registered (:data:`pyradmc.physics_options.PHYSICS_MODELS`) but
+    has no entry in :data:`kernels.KERNEL_PHYSICS_CODES` is implemented on the
+    reference backend at most; running it here would silently transport another
+    model under its name.
+    """
+    codes = {}
+    for process in PHYSICS_MODELS:
+        model = getattr(physics, process)
+        implemented = kernels.KERNEL_PHYSICS_CODES[process]
+        if model not in implemented:
+            raise NotImplementedError(
+                f"{process} model {model!r} is registered but not implemented in the "
+                f"Warp kernels; implemented there: {', '.join(map(repr, implemented))}"
+            )
+        codes[process] = implemented[model]
+    return codes
 
 
 _GROUP_SIZE_FALLBACK = 128
@@ -869,6 +902,7 @@ class WarpEngine:
         msc_model: str,
         step_energy_fraction: float,
         deposit_resolution_cm: float | None,
+        physics: ResolvedPhysics,
         devices: Sequence[str] | None = None,
     ) -> RunProvenance:
         """Record the configuration this run actually used.
@@ -892,6 +926,7 @@ class WarpEngine:
                 None if self.magnetic_field is None else self.magnetic_field.provenance
             ),
             exterior_air=None if self._exterior is None else self._exterior.provenance,
+            physics=physics,
         )
 
     def _chunk_histories(self, device: str | None = None) -> int:
@@ -1032,6 +1067,7 @@ class WarpEngine:
         msc_model: str = "gs",
         progress: ProgressCallback | None = None,
         concurrent_batches: int = 1,
+        physics: PhysicsOptions | str = "auto",
     ) -> TransportResult:
         """Transport ``n_histories`` primaries; same contract as the reference engine.
 
@@ -1072,6 +1108,14 @@ class WarpEngine:
         ``"gaussian"`` hinge survives as the paired-comparison test
         instrument. ``step_energy_fraction=None`` resolves to the selected
         model's validated fraction.
+
+        ``physics`` selects the physics model per process exactly as on the
+        reference engine: ``"auto"`` (default, the certified path) or a
+        :class:`~pyradmc.physics_options.PhysicsOptions`. It is resolved once,
+        before any launch, from ``source.max_energy`` and the kinds the run
+        starts; the choice is logged at INFO, recorded in the provenance, and
+        travels to the kernels as model codes on the ``Tables`` struct. A model
+        the kernels have no code for is refused here.
         """
         require_energy_domain(self.cross_sections, source.max_energy)
         if n_histories < 1:
@@ -1116,13 +1160,24 @@ class WarpEngine:
         # One float travels to the kernels; non-positive is the single-midpoint
         # sentinel, matching pyradmc.transport.electron.substep_pieces.
         deposit_resolution = 0.0 if deposit_resolution_cm is None else deposit_resolution_cm
+        # ``primary_kind`` decides the kind only for the in-kernel mono beams; every
+        # other route takes it per record, where an unset kind is a photon.
+        resolved = resolve_physics(
+            physics,
+            max_energy_mev=source.max_energy,
+            primary_kinds=run_primary_kinds(source, primary_kind if in_kernel else "photon"),
+        )
+        _kernel_physics_codes(resolved)
+        logger.info("physics models: %s (%s)", resolved.summary(), resolved.reason)
 
         device = self.device
         gi, density, material = self._upload_grid(device)
         scoring = self._scoring_geometry(scoring_grid)
         si, voxel_mass = self._upload_scoring(scoring, device)
         table_energy = source.max_energy
-        tab = self._upload_tables(table_energy, pcut, ecut, device, with_gs=msc_model_gs == 1)
+        tab = self._upload_tables(
+            table_energy, pcut, ecut, device, with_gs=msc_model_gs == 1, physics=resolved
+        )
 
         chunk = min(self._chunk_histories(device), n_histories)
         capacity = chunk * self.queue_factor
@@ -1552,7 +1607,7 @@ class WarpEngine:
             n_batches=n_batches,
             scoring_mode=scoring_mode,
             provenance=self._provenance(
-                seed, pcut, ecut, msc_model, step_energy_fraction, deposit_resolution_cm
+                seed, pcut, ecut, msc_model, step_energy_fraction, deposit_resolution_cm, resolved
             ),
         )
 
@@ -1576,6 +1631,7 @@ class WarpEngine:
         devices: Sequence[str] | None = None,
         concurrent_batches: int = 1,
         progress: ProgressCallback | None = None,
+        physics: PhysicsOptions | str = "auto",
     ) -> DijResult:
         """Compute the Dij over the lattice; same contract as the reference engine.
 
@@ -1661,6 +1717,10 @@ class WarpEngine:
         msc_model
             As in :meth:`run`. The GS grid is built once, before any launch, under
             the same lock every device shard takes.
+        physics
+            The physics model per process, as in :meth:`run`. A Dij starts photons
+            only. Resolved and logged once for the whole matrix, so every device
+            shard transports the same models.
         progress
             Optional callback, as in :meth:`run` (see :mod:`pyradmc.progress`).
             Ticks once per **beamlet group** *completed* (``ceil(n_beamlets /
@@ -1704,6 +1764,7 @@ class WarpEngine:
             devices=devices,
             concurrent_batches=concurrent_batches,
             progress=progress,
+            physics=physics,
             device_blocks=False,
         )
         assembler = DijAssembler(
@@ -1749,6 +1810,7 @@ class WarpEngine:
         devices: Sequence[str] | None = None,
         concurrent_batches: int = 1,
         progress: ProgressCallback | None = None,
+        physics: PhysicsOptions | str = "auto",
     ) -> DeviceDijResult:
         """Compute the Dij exactly as :meth:`run_dij` does, and leave it on the device.
 
@@ -1774,7 +1836,8 @@ class WarpEngine:
         computes on the host: it has no device to leave a result on.
 
         Every parameter but ``devices`` is :meth:`run_dij`'s, with the same
-        semantics (``correlated=False`` remains a test instrument, AGENTS.md 2.10).
+        semantics (``correlated=False`` remains a test instrument, AGENTS.md 2.10);
+        ``physics`` is resolved, logged and recorded exactly as there.
 
         Parameters
         ----------
@@ -1817,6 +1880,7 @@ class WarpEngine:
             devices=devices,
             concurrent_batches=concurrent_batches,
             progress=progress,
+            physics=physics,
             device_blocks=True,
         )
         device = run.devices[0]
@@ -1889,6 +1953,7 @@ class WarpEngine:
         devices: Sequence[str] | None,
         concurrent_batches: int,
         progress: ProgressCallback | None,
+        physics: PhysicsOptions | str,
         device_blocks: bool,
     ) -> _DijRun:
         """Validate, schedule and run every beamlet group; merge shards and books.
@@ -1924,6 +1989,11 @@ class WarpEngine:
         # One float travels to the kernels; non-positive is the single-midpoint
         # sentinel, matching pyradmc.transport.electron.substep_pieces.
         deposit_resolution = 0.0 if deposit_resolution_cm is None else deposit_resolution_cm
+        resolved = resolve_physics(
+            physics, max_energy_mev=source.max_energy, primary_kinds=("photon",)
+        )
+        _kernel_physics_codes(resolved)
+        logger.info("physics models: %s (%s)", resolved.summary(), resolved.reason)
 
         scoring = self._scoring_geometry(scoring_grid)
         n_beamlets = source.n_beamlets
@@ -1998,6 +2068,7 @@ class WarpEngine:
             msc_model,
             step_energy_fraction,
             deposit_resolution_cm,
+            resolved,
             devices=device_list,
         )
 
@@ -2013,6 +2084,7 @@ class WarpEngine:
             step_energy_fraction=step_energy_fraction,
             deposit_resolution=deposit_resolution,
             msc_model_gs=msc_model_gs,
+            physics=resolved,
             transport_electrons=transport_electrons,
             truncation=truncation,
             correlated=correlated,
@@ -2090,6 +2162,7 @@ class WarpEngine:
         step_energy_fraction: float,
         deposit_resolution: float,
         msc_model_gs: int,
+        physics: ResolvedPhysics,
         transport_electrons: bool,
         truncation: float,
         correlated: bool,
@@ -2117,7 +2190,9 @@ class WarpEngine:
         """
         gi, density, material = self._upload_grid(device)
         si, voxel_mass = self._upload_scoring(scoring, device)
-        tab = self._upload_tables(source.max_energy, pcut, ecut, device, with_gs=msc_model_gs == 1)
+        tab = self._upload_tables(
+            source.max_energy, pcut, ecut, device, with_gs=msc_model_gs == 1, physics=physics
+        )
         n_beamlets = source.n_beamlets
         n_voxels = scoring.n_voxels
         # Route by capability: the built-in lattice generates in-kernel from analytic
@@ -4609,7 +4684,14 @@ class WarpEngine:
         return gi, density, material
 
     def _upload_tables(
-        self, e_max: float, pcut: float, ecut: float, device: str, with_gs: bool = False
+        self,
+        e_max: float,
+        pcut: float,
+        ecut: float,
+        device: str,
+        with_gs: bool = False,
+        *,
+        physics: ResolvedPhysics = CLINICAL_PHYSICS,
     ) -> Tables:
         """Return the flattened tables on ``device``, uploaded once per key and device.
 
@@ -4618,9 +4700,16 @@ class WarpEngine:
         table, independent of ``pcut`` — is uploaded once per ``(ecut, e_max)`` and
         shared by every struct that carries it. The struct is read-only to the
         kernels, so concurrent calls on one device may share it.
+
+        The struct also carries the run's physics-model codes, so they are part
+        of its key: two runs that resolve to different models never share a
+        struct, and the arrays behind it are shared regardless. Every run path
+        passes its resolution; the default is the clinical set, for a caller
+        that uploads tables without running.
         """
         state = self._state(device)
-        full_key = (ecut, pcut, e_max, with_gs)
+        codes = _kernel_physics_codes(physics)
+        full_key = (ecut, pcut, e_max, with_gs, *(codes[p] for p in PHYSICS_MODELS))
         with state.lock:
             tab = _lru_get(state.tables, full_key)
         if tab is not None:
@@ -4638,6 +4727,9 @@ class WarpEngine:
             tab = _lru_get(state.tables, full_key)
             if tab is None:
                 tab = self._build_tables(state, host, gs_host, ecut, pcut, e_max, device)
+                tab.brems_model = codes["bremsstrahlung"]
+                tab.pair_model = codes["pair"]
+                tab.positron_model = codes["positron"]
                 _lru_put(state.tables, full_key, tab, _TABLES_RESIDENT)
             return tab
 

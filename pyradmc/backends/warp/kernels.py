@@ -64,12 +64,16 @@ from pyradmc.transport.electron import (
 from pyradmc.transport.particles import ELECTRON, PHOTON, POSITRON
 
 __all__ = [
+    "BREMS_THIN_TARGET",
     "DRAIN_ELECTRON_COUNT",
     "DRAIN_LAST_BUSY_ROUND",
     "DRAIN_OVERFLOW",
     "DRAIN_PHOTON_COUNT",
     "DRAIN_STATUS_SLOTS",
     "ENERGY_QUANTUM_MEV",
+    "KERNEL_PHYSICS_CODES",
+    "PAIR_UNIFORM_SPLIT",
+    "POSITRON_MOLLER_AT_REST",
     "TRUNCATION_TARGET_THREADS",
     "GridInfo",
     "Queue",
@@ -108,6 +112,30 @@ float64, so the per-deposit error is at most 5e-10 MeV — orders below the floa
 transport arithmetic. int64 headroom: ~9e18 quanta = 9e9 MeV per voxel per batch."""
 
 _INV_QUANTUM = 1.0 / ENERGY_QUANTUM_MEV
+
+# --- physics model codes -------------------------------------------------------
+# The run's resolved physics models (pyradmc.physics_options) reach the kernels as
+# ints on the ``Tables`` struct: ``tab.brems_model``, ``tab.pair_model`` and
+# ``tab.positron_model``. These are the values those fields take. Each process has
+# one implemented model, so nothing reads the fields yet; the sites where a second
+# model is dispatched are marked "model dispatch" in the kernel bodies.
+BREMS_THIN_TARGET = 0
+PAIR_UNIFORM_SPLIT = 0
+POSITRON_MOLLER_AT_REST = 0
+
+KERNEL_PHYSICS_CODES: dict[str, dict[str, int]] = {
+    "bremsstrahlung": {"thin-target": BREMS_THIN_TARGET},
+    "pair": {"uniform-split": PAIR_UNIFORM_SPLIT},
+    "positron": {"moller-at-rest": POSITRON_MOLLER_AT_REST},
+}
+"""Process -> model name -> the code the kernels implement it under.
+
+The Warp side of the registration table: it must name exactly the registered
+models (``PHYSICS_MODELS``; test-pinned), and the engine refuses a resolved model
+that has no entry here before any launch, because a kernel cannot raise. A new
+model gets a constant above, an entry here, and its arm at the marked sites of
+``photon_kernel`` / ``electron_kernel``.
+"""
 
 _ENTRY_NUDGE_CM = 1.0e-4
 """float32 entry nudge; see the module docstring for why it exceeds the reference's."""
@@ -246,6 +274,11 @@ class Tables:
     asked for ``msc_model="gs"``; a Gaussian run uploads a 1-element placeholder
     the kernel never reads (the branch is on the launch parameter, not the
     data). ``log_eta`` is always present — it is part of the flattened source.
+
+    ``brems_model``, ``pair_model`` and ``positron_model`` carry the run's
+    resolved physics models as the codes of :data:`KERNEL_PHYSICS_CODES`. They
+    ride here because this is the one per-run struct both transport kernels
+    already receive, and the engine keys its resident copy on them.
     """
 
     mu_compton: wp.array2d(dtype=float)
@@ -277,6 +310,9 @@ class Tables:
     gs_n_eta: int
     gs_n_theta2: int
     gs_n_u: int
+    brems_model: int
+    pair_model: int
+    positron_model: int
 
 
 @wp.struct
@@ -1548,6 +1584,9 @@ def photon_kernel(
         else:  # pair production
             kinetic = e - 2.0 * ELECTRON_MASS_MEV
             if transport_electrons != 0:
+                # Pair model dispatch (tab.pair_model). PAIR_UNIFORM_SPLIT: one
+                # uniform for the energy share, both leptons forward. A second
+                # model branches here on its own draws and directions.
                 fraction = uniform(state)
                 share_e = fraction * kinetic
                 share_p = (1.0 - fraction) * kinetic
@@ -1838,6 +1877,9 @@ def electron_kernel(
                 + BOUNDARY_NUDGE_CM
             )
         s_geometry = min(s_max, s_boundary)
+        # Positron model dispatch (tab.positron_model), first site.
+        # POSITRON_MOLLER_AT_REST: a positron takes the electron's Moller
+        # cross-section. A second model selects its own tables here.
         sigma_moller = rho * lookup_2d(
             tab.moller, mat, tab.e_log_e_min, tab.e_inv_dlog, tab.n_points, e
         )
@@ -1896,6 +1938,9 @@ def electron_kernel(
                 available,
             )
             de = min(max(e_start - e_end, 0.0), e - ecut)
+        # Bremsstrahlung model dispatch (tab.brems_model), first site.
+        # BREMS_THIN_TARGET: a Bernoulli emission per substep, one uniform. A
+        # second model replaces this decision and the sub-PCUT remainder.
         emit_probability, local_brems = bremsstrahlung_step_parameters(
             e,
             lookup_2d(
@@ -2064,6 +2109,9 @@ def electron_kernel(
         ux, uy, uz = rotate_direction(ux, uy, uz, cos_hinge, phi)
 
         if emit_brems and e > pcut:
+            # Bremsstrahlung model dispatch, second site. BREMS_THIN_TARGET: 1/k
+            # energy, one uniform, photon along the post-hinge direction. A
+            # second model samples its own energy and emission angle here.
             k = sample_bremsstrahlung_energy(e, pcut, state)
             k = min(k, e - d2)
             if k > pcut:
@@ -2215,6 +2263,8 @@ def electron_kernel(
             return
 
         # --- discrete Moller event at the end of the substep ---------------------
+        # Positron model dispatch, second site. POSITRON_MOLLER_AT_REST: a
+        # positron's discrete event is sampled as Moller, like an electron's.
         if moller_pending and e > 2.0 * ecut:
             delta_energy = sample_moller_delta_energy(e, ecut, state)
             cos_delta, cos_primary = moller_direction_cosines(e, delta_energy)
