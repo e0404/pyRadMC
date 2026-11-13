@@ -284,9 +284,10 @@ without a field, so results are not byte-identical to the previous release.
   (`WarpEngine.run_beamlet_contraction(fold="deposit")`, the new default). Each deposit's
   tally quanta are weighted at the deposit by `K_b a_v / m_v` and added, rounded to an
   integer, to an int64 accumulator of the beamlet, so cost and memory follow the
-  histories instead of `beamlets x scoring voxels`. The auto group on one device is every
-  beamlet the int32 history index, the device memory and the energy books allow; on several
-  devices it is cut to about four groups per device. Deterministic on a device (integer
+  histories instead of `beamlets x scoring voxels`. A call runs one group per device, and
+  more only once a group would hold more than `WarpEngine(fold_group_histories=...)`
+  histories (default 1e7, measured on two machines); a group also stays within the int32
+  history index, the device memory and the energy books. Deterministic on a device (integer
   atomics) and bitwise inert to group size, sub-accumulator count and batch lanes
   (test-pinned). Same histories, estimator and energy books as before; **values move** by
   the rounding of each weighted deposit. Voxels fall into up to six octave bands of `a/m`,

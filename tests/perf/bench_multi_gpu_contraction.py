@@ -2,8 +2,9 @@
 
 Answers the question left open in ``docs/decisions.md`` ("Contraction by deposit fold",
 "Several devices"): what ``run_beamlet_contraction(..., fold="deposit", devices=[...])``
-gains on several identical GPUs, and whether ``_FOLD_GROUPS_PER_DEVICE`` (groups per
-device of the multi-device auto group, 4, chosen and never measured) is a good value.
+gains on several identical GPUs, and how the engine's group rule (one group per device,
+more once a group would exceed ``WarpEngine.fold_group_histories``) compares with fixed
+numbers of groups per device. The rule's default comes from this script's first runs.
 A manual script, not a pytest benchmark (no ``test_`` prefix, never collected): it
 needs the hardware it measures and runs for tens of minutes.
 
@@ -27,11 +28,11 @@ The voxel weights are smooth and signed, like an objective gradient (an underdos
 target, an overdosed organ at risk, a weak normal-tissue term), and zero in "air".
 
 **Arms**, per problem and histories per edge: the deposit fold on 1, 2, ..., N GPUs
-(``cuda:0`` .. ``cuda:N-1``); for more than one device at each ``--groups-per-device``
-value, set by assigning ``engine._FOLD_GROUPS_PER_DEVICE`` from this script. That is a
-benchmark-only override of a private constant: ``_shard_group_size`` reads the module
-global at call time (checked below on its code object), and every call's actual group
-size is read back and compared with what the override should give. The dense fold on one
+(``cuda:0`` .. ``cuda:N-1``) at the engine's own group size ("auto"); for more than one
+device also at each ``--groups-per-device`` value G, passed as an explicit
+``beamlet_group_size = ceil(edges / (devices * G))``. Every call's actual group size is
+read back and compared with that; the engine still bounds an explicit group by its
+energy books, which shows as ``GROUP BOUNDED``. The dense fold on one
 GPU once per size as the baseline (dropped with a note if its warm-up exceeds
 ``--dense-max-seconds`` or fails). ``--include-cpu`` adds ``cpu`` to every device set;
 off by default: a cpu shard that pulls a group holds the whole call hostage, so those
@@ -579,7 +580,7 @@ class ShardSpy:
 
 @dataclass
 class Arm:
-    """One configuration: devices, groups per device (None: engine default), fold."""
+    """One configuration: devices, groups per device (None: the engine's rule), fold."""
 
     label: str
     devices: list[str]
@@ -594,10 +595,11 @@ class Arm:
 
 
 def build_arms(n_gpus: int, groups: Sequence[int], include_cpu: bool, dense: bool) -> list[Arm]:
-    """1 GPU; 2..N GPUs at each G; optionally the same with cpu added; dense on 1 GPU."""
+    """1 GPU; 2..N GPUs, auto and at each G; optionally with cpu added; dense on 1 GPU."""
     arms = [Arm("1 GPU", ["cuda:0"], None)]
     for k in range(2, n_gpus + 1):
         gpus = [f"cuda:{i}" for i in range(k)]
+        arms.append(Arm(f"{k} GPU auto", gpus, None, n_gpus=k))
         arms += [Arm(f"{k} GPU G={g}", gpus, g, n_gpus=k) for g in groups]
     if include_cpu:
         for k in range(1, n_gpus + 1):
@@ -634,31 +636,25 @@ def compare(result: Any, reference: Any) -> dict[str, Any]:
 class Runner:
     """Calls one problem's engine for one arm and records what happened."""
 
-    def __init__(self, wp: Any, module: Any, engine: Any, problem: dict[str, Any]) -> None:
-        self.wp, self.module, self.engine = wp, module, engine
+    def __init__(self, wp: Any, engine: Any, problem: dict[str, Any]) -> None:
+        self.wp, self.engine = wp, engine
         self.problem = problem
-        self.default_groups = module._FOLD_GROUPS_PER_DEVICE
         self.spy = ShardSpy(engine)
 
     def call(self, arm: Arm, n_hist: int, n_batches: int, seed: int) -> tuple[float, Any, dict]:
         wp, source = self.wp, self.problem["source"]
-        self.module._FOLD_GROUPS_PER_DEVICE = (
-            self.default_groups if arm.groups is None else arm.groups
-        )
         gc.collect()
         wp.synchronize()
         t0 = time.perf_counter()
         self.spy.begin(t0)
-        try:
-            result = self.engine.run_beamlet_contraction(
-                source, self.problem["weights"], n_histories_per_beamlet=n_hist,
-                n_batches=n_batches, seed=seed, scoring_grid=self.problem["scoring"],
-                devices=arm.devices, fold=arm.fold,
-            )  # fmt: skip
-            wp.synchronize()
-            seconds = time.perf_counter() - t0
-        finally:
-            self.module._FOLD_GROUPS_PER_DEVICE = self.default_groups
+        result = self.engine.run_beamlet_contraction(
+            source, self.problem["weights"], n_histories_per_beamlet=n_hist,
+            n_batches=n_batches, seed=seed, scoring_grid=self.problem["scoring"],
+            devices=arm.devices, fold=arm.fold,
+            beamlet_group_size=expected_group(arm, source.n_beamlets),
+        )  # fmt: skip
+        wp.synchronize()
+        seconds = time.perf_counter() - t0
         info = self.spy.summary(arm.devices, source.n_beamlets, n_hist)
         p = result.provenance
         info["provenance"] = {
@@ -672,11 +668,11 @@ class Runner:
 # -- one block: a problem at one history count -----------------------------------------
 
 
-def expected_group(arm: Arm, n_beamlets: int, single: int | None) -> int | None:
-    """What ``_shard_group_size`` should give: ``min(single-device group, share)``."""
-    if single is None or len(arm.devices) == 1 or arm.groups is None:
-        return single
-    return max(1, min(single, -(-n_beamlets // (len(arm.devices) * arm.groups))))
+def expected_group(arm: Arm, n_beamlets: int) -> int | None:
+    """The explicit group of a G arm, ``ceil(edges / (devices * G))``; None: engine's rule."""
+    if arm.groups is None:
+        return None
+    return max(1, -(-n_beamlets // (len(arm.devices) * arm.groups)))
 
 
 def run_block(
@@ -736,11 +732,10 @@ def run_block(
             arm.calls.append(info)
             line.append(f"{arm.label} {seconds:.4f}")
         log(f"    round {r + 1}/{args.repeats}: " + ", ".join(line))
-    single = reference.calls[-1].get("group_size") if reference.calls else None
     best_ref = min(reference.times) if reference.times else None
     records = []
     for arm in arms:
-        records.append(_arm_record(arm, n_beamlets, single, best_ref))
+        records.append(_arm_record(arm, n_beamlets, best_ref))
     return {"histories_per_edge": n_hist, "batches": args.batches, "arms": records}
 
 
@@ -752,7 +747,7 @@ def _share_text(info: dict[str, Any]) -> str:
     return f"{head}  {' '.join(parts)}  passes {info.get('passes')}"
 
 
-def _arm_record(arm: Arm, n_beamlets: int, single: int | None, best_ref: float | None) -> dict:
+def _arm_record(arm: Arm, n_beamlets: int, best_ref: float | None) -> dict:
     times = arm.times
     record: dict[str, Any] = {
         "label": arm.label,
@@ -775,7 +770,7 @@ def _arm_record(arm: Arm, n_beamlets: int, single: int | None, best_ref: float |
     sizes = {c.get("group_size") for c in arm.calls}
     record["group_sizes"] = sorted(s for s in sizes if s is not None)
     record["n_groups"] = sorted({c.get("n_groups") for c in arm.calls if c.get("n_groups")})
-    want = expected_group(arm, n_beamlets, single) if arm.fold == "deposit" else None
+    want = expected_group(arm, n_beamlets) if arm.fold == "deposit" else None
     record["expected_group_size"] = want
     record["override_effective"] = None if want is None else record["group_sizes"] == [want]
     record["passes"] = sorted({c.get("passes") for c in arm.calls if c.get("passes") is not None})
@@ -850,7 +845,7 @@ def print_block(problem: dict[str, Any], block: dict[str, Any]) -> None:
             + " x "
             + "/".join(str(n) for n in rec["n_groups"])
         )
-        flag = "" if rec.get("override_effective") in (None, True) else "  OVERRIDE MISMATCH"
+        flag = "" if rec.get("override_effective") in (None, True) else "  GROUP BOUNDED"
         flag += "  ONE GPU DID ALL" if rec.get("one_gpu_did_everything") else ""
         flag += "  cpu took no group" if rec.get("cpu_transported") is False else ""
         passes = "/".join(str(p) for p in rec["passes"])
@@ -873,10 +868,10 @@ def print_block(problem: dict[str, Any], block: dict[str, Any]) -> None:
 
 
 def print_crossover(results: list[dict[str, Any]], n_gpus: int) -> None:
-    """Best speed-up over G per GPU count, per problem and history count."""
+    """Best speed-up over the arms of a GPU count, per problem and history count."""
     if n_gpus < 2:
         return
-    print("\n== speed-up vs 1 GPU, best over groups per device [that G] ==")
+    print("\n== speed-up vs 1 GPU, best arm per GPU count [G, or auto] ==")
     print(
         f"{'problem':<8}{'hist/edge':>11}"
         + "".join(f"{f'{k} GPU':>14}" for k in range(2, n_gpus + 1))
@@ -889,7 +884,8 @@ def print_crossover(results: list[dict[str, Any]], n_gpus: int) -> None:
                         and "speedup_best" in a]  # fmt: skip
                 if cand:
                     top = max(cand, key=lambda a: a["speedup_best"])
-                    cells.append(f"{top['speedup_best']:.2f} [{top['groups_per_device']}]")
+                    g = top["groups_per_device"] or "auto"
+                    cells.append(f"{top['speedup_best']:.2f} [{g}]")
                 else:
                     cells.append("-")
             print(f"{res['problem']['name']:<8}{block['histories_per_edge']:>11,}"
@@ -925,7 +921,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--settle", type=int, default=1,
                         help="untimed calls of the same arm before each timed call")  # fmt: skip
     parser.add_argument("--groups-per-device", default="2,4,8",
-                        help="values of _FOLD_GROUPS_PER_DEVICE for multi-device arms")  # fmt: skip
+                        help="fixed groups per device for multi-device arms")  # fmt: skip
     parser.add_argument("--max-gpus", type=int, default=None, help="use cuda:0 .. cuda:N-1")
     parser.add_argument("--include-cpu", action="store_true", help="add cpu to every device set")
     parser.add_argument("--cpu-max-histories", type=int, default=1000,
@@ -978,21 +974,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     n_gpus = min(n_cuda, args.max_gpus or n_cuda)
     gpus = [f"cuda:{i}" for i in range(n_gpus)]
     env = environment(wp, smi, gpus)
-    reads_global = "_FOLD_GROUPS_PER_DEVICE" in module._shard_group_size.__code__.co_names
-    env["override"] = {
-        "constant": "pyradmc.backends.warp.engine._FOLD_GROUPS_PER_DEVICE",
-        "default": module._FOLD_GROUPS_PER_DEVICE,
-        "read_at_call_time": reads_global,
-    }
+    env["fold_group_histories_default"] = module._FOLD_GROUP_HISTORIES
     for d in env["gpus"]:
         if d["free_memory_mib"] < 0.85 * d["total_memory_mib"]:
             warnings.append(f"{d['device']} reports {d['free_memory_mib']} of "
                             f"{d['total_memory_mib']} MiB free at start")  # fmt: skip
     if not env["pyradmc_from_this_checkout"]:
         warnings.append(f"pyradmc is imported from {env['pyradmc_file']}, not from {REPO}")
-    if not reads_global:
-        warnings.append("_shard_group_size no longer reads _FOLD_GROUPS_PER_DEVICE: "
-                        "the groups-per-device override has no effect")  # fmt: skip
 
     log(f"pyradmc {env['pyradmc_version']} from {env['pyradmc_file']}")
     log(f"checkout {REPO}  commit {env['git_commit']}  branch {env['git_branch']}  "
@@ -1003,8 +991,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     for d in env["gpus"]:
         log(f"  {d['device']}: {d['name']} sm_{d['arch']} {d['sm_count']} SMs, "
             f"{d['total_memory_mib']} MiB ({d['free_memory_mib']} free)")  # fmt: skip
-    log(f"identical GPUs: {env['identical_gpus']}; _FOLD_GROUPS_PER_DEVICE default "
-        f"{module._FOLD_GROUPS_PER_DEVICE}, read at call time: {reads_global}")  # fmt: skip
+    log(f"identical GPUs: {env['identical_gpus']}; fold_group_histories default "
+        f"{module._FOLD_GROUP_HISTORIES:,}")  # fmt: skip
     for row in before:
         log(f"  nvidia-smi GPU {row.get('index')}: {row.get('clocks.sm')}/"
             f"{row.get('clocks.max.sm')} MHz, {row.get('temperature.gpu')} C, "
@@ -1043,7 +1031,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 f"transport {info['transport_voxels']:,} voxels")  # fmt: skip
             log(f"  stands in for {info['stands_in_for']}")
             engine = WarpEngine(grid=problem["grid"], cross_sections=problem["xs"], device="cuda:0")
-            runner = Runner(wp, module, engine, problem)
+            runner = Runner(wp, engine, problem)
             if not runner.spy.ok:
                 warnings.append("engine internals changed: per-device work cannot be recorded")
             result = {"problem": info, "blocks": []}

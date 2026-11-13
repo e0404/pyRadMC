@@ -789,8 +789,8 @@ def _auto_fold_group_size(
     stops dense maps growing past the point where wider launches stop paying, but
     here a wider group costs nothing and fills the chunk (a batch block of ``group *
     per_batch`` histories) where a narrow one launches under-filled. Unknown free
-    memory (cpu) takes every beamlet. This is one device's fit; a multi-device call
-    then cuts it (:func:`_shard_group_size`).
+    memory (cpu) takes every beamlet. This is one device's memory fit; the group
+    rule then cuts it (:func:`_shard_group_size`).
     """
     if free_bytes <= 0:
         return max(1, n_beamlets)
@@ -800,29 +800,45 @@ def _auto_fold_group_size(
     return max(1, min(sized, n_beamlets))
 
 
-_FOLD_GROUPS_PER_DEVICE = 4
-"""Groups per device a multi-device deposit fold cuts its auto group into
-(:func:`_shard_group_size`). Chosen, not measured (no multi-GPU machine was at hand):
-several per device so that a device that finishes early keeps pulling, few so that
-each group's batch blocks stay wide."""
+_FOLD_GROUP_HISTORIES = 10_000_000
+"""Default histories a deposit-fold auto group holds at most
+(:func:`_shard_group_size`; ``WarpEngine.fold_group_histories`` sets it per engine).
+
+Measured 2026-11-13 on two synthetic problems (7020 and 3060 leaf edges), on one
+RTX 4070 Laptop and on one to four Tesla V100 (``docs/decisions.md``, "Contraction
+by deposit fold"). A group has a fixed host-side cost of a few milliseconds, so at
+1000 histories per edge every extra group costs: one group per device is fastest.
+Past roughly 1e7 histories a group, the 7020-edge problem ran 5 % faster in groups
+of 4e6 to 9e6 histories at 10 000 per edge and 10 % faster in groups of 1e7 to 2e7
+at 100 000 per edge; the 3060-edge problem was flat. Not measured elsewhere."""
 
 
-def _shard_group_size(group: int, n_beamlets: int, n_devices: int) -> int:
-    """Largest group ``<= group`` giving each of ``n_devices`` devices groups to pull.
+def _shard_group_size(
+    group: int,
+    n_beamlets: int,
+    n_devices: int,
+    n_histories_per_beamlet: int,
+    group_histories: int,
+) -> int:
+    """Largest group ``<= group`` under the deposit fold's group rule.
 
-    Devices pull groups from one shared queue, so the deposit fold's auto group
-    (every beamlet, :func:`_auto_fold_group_size`) left every device but one idle,
-    and on a mixed set the whole call ran on whichever device pulled first. On
-    several devices the group is therefore at most ``ceil(n_beamlets / (n_devices *
-    _FOLD_GROUPS_PER_DEVICE))``, at least one beamlet: at least ``n_devices`` groups
-    whenever there are that many beamlets, and at least ``2 n_devices`` from
-    ``_FOLD_GROUPS_PER_DEVICE * n_devices`` beamlets on. One device keeps ``group``:
-    a single-device call launches exactly as before. Group size is bit-inert
+    The call is cut into ``max(n_devices, ceil(n_beamlets * n_histories_per_beamlet
+    / group_histories))`` groups, rounded up to a multiple of ``n_devices`` so that
+    the devices' shares are even: one group per device, and more only once a group
+    would hold more than ``group_histories`` histories. At least one beamlet a group.
+
+    Devices pull groups from one shared queue, so one whole-call group (the fold's
+    auto fit, :func:`_auto_fold_group_size`) left every device but one idle, and on
+    a mixed set the whole call ran on whichever device pulled first: hence at least
+    one group per device. A group has a fixed cost, so no more than that until the
+    groups are large (:data:`_FOLD_GROUP_HISTORIES`). Group size is bit-inert
     (test-pinned), so this is scheduling only.
     """
-    if n_devices <= 1:
-        return group
-    share = -(-n_beamlets // (n_devices * _FOLD_GROUPS_PER_DEVICE))
+    histories = n_beamlets * n_histories_per_beamlet
+    n_devices = max(1, n_devices)
+    n_groups = max(n_devices, -(-histories // max(1, group_histories)))
+    n_groups = -(-n_groups // n_devices) * n_devices
+    share = -(-n_beamlets // n_groups)
     return max(1, min(group, share))
 
 
@@ -839,9 +855,10 @@ factor of 8 is for source weights above one (the edge derivatives are not bounde
 by one), soft-photon roulette and the dose-to-water factor, which this bound does
 not see; realistic books are well below it, since a history does not deposit, or
 escape with, more than its own energy on average. At 6 MeV the bound binds only
-past 1.9e8 histories per group, so a split adds one group's fixed cost (a few
-launches and one readback) per 1.9e8 histories at the least; the study (7020 edges
-of 1000 histories) stays one group."""
+past 1.9e8 histories per group. An auto-sized group is cut long before that
+(:data:`_FOLD_GROUP_HISTORIES`), so the bound acts on an explicit
+``beamlet_group_size``, on an engine with a very large ``fold_group_histories``,
+and on a single beamlet of more histories than the rule's target."""
 
 
 def _book_safe_group_size(group: int, n_histories_per_beamlet: int, max_energy: float) -> int:
@@ -1441,8 +1458,15 @@ class _Reduction:
         """Largest auto group one device's free memory holds."""
         return _auto_group_size(free, n_voxels, n_beamlets, lanes, queue_bytes)
 
-    def share_group_size(self, group: int, n_beamlets: int, n_devices: int) -> int:
-        """Cut an auto group so that every device has groups to pull."""
+    def share_group_size(
+        self,
+        group: int,
+        n_beamlets: int,
+        n_devices: int,
+        n_histories_per_beamlet: int,
+        group_histories: int,
+    ) -> int:
+        """Cut an auto group by the reduction's own group rule (the dense paths: none)."""
         return group
 
     def bound_group_size(self, group: int, n_histories_per_beamlet: int, max_energy: float) -> int:
@@ -1805,7 +1829,8 @@ class _DepositFold(_Reduction):
 
     A beamlet costs its sub-accumulators rather than a dense column, so the auto
     group has no :data:`_GROUP_SIZE_CAP` (:func:`_auto_fold_group_size`); it is cut
-    for several devices (:func:`_shard_group_size`) and bounded by what its int64
+    to one group per device, and further past the engine's ``fold_group_histories``
+    (:func:`_shard_group_size`), and bounded by what its int64
     energy books hold at unit weight (:func:`_book_safe_group_size`).
     """
 
@@ -1816,8 +1841,17 @@ class _DepositFold(_Reduction):
     ) -> int:
         return _auto_fold_group_size(free, n_beamlets, lanes, queue_bytes, self.spec.stride)
 
-    def share_group_size(self, group: int, n_beamlets: int, n_devices: int) -> int:
-        return _shard_group_size(group, n_beamlets, n_devices)
+    def share_group_size(
+        self,
+        group: int,
+        n_beamlets: int,
+        n_devices: int,
+        n_histories_per_beamlet: int,
+        group_histories: int,
+    ) -> int:
+        return _shard_group_size(
+            group, n_beamlets, n_devices, n_histories_per_beamlet, group_histories
+        )
 
     def bound_group_size(self, group: int, n_histories_per_beamlet: int, max_energy: float) -> int:
         return _book_safe_group_size(group, n_histories_per_beamlet, max_energy)
@@ -2106,6 +2140,13 @@ class WarpEngine:
         the previous drain on the device needed on CUDA, where each readback idles
         the GPU for a host round trip; host-sized on cpu, where a readback is a
         plain memory read and a capacity-wide launch would loop over every slot.
+    fold_group_histories
+        Advanced. Histories an auto-sized group of the deposit fold
+        (``run_beamlet_contraction(fold="deposit")``) holds at most: the call runs
+        one group per device, and more only once a group would exceed this
+        (:func:`_shard_group_size`). Bit-inert scheduling, like ``chunk_size``
+        (test-pinned). The default is :data:`_FOLD_GROUP_HISTORIES`, measured on two
+        machines; an explicit ``beamlet_group_size`` on the call overrides the rule.
     """
 
     grid: VoxelGrid
@@ -2116,6 +2157,7 @@ class WarpEngine:
     magnetic_field: MagneticField | None = None
     drain_rounds: int | None = None
     exterior_air: ExteriorAirChoice = EXTERIOR_AUTO
+    fold_group_histories: int = _FOLD_GROUP_HISTORIES
     _exterior: ExteriorAirMap | None = field(default=None, init=False, repr=False, compare=False)
     _auto_chunk: dict = field(default_factory=dict, init=False, repr=False, compare=False)
     _drain: _DrainState = field(default_factory=_DrainState, init=False, repr=False, compare=False)
@@ -2151,6 +2193,10 @@ class WarpEngine:
             self.grid
         ):
             raise ValueError("the exterior-air map was derived from another grid")
+        if self.fold_group_histories < 1:
+            raise ValueError(
+                f"fold_group_histories must be at least 1, got {self.fold_group_histories}"
+            )
         if self.drain_rounds is not None and self.drain_rounds < 0:
             raise ValueError(f"drain_rounds must be None or >= 0, got {self.drain_rounds}")
         if self.magnetic_field is not None and not self.magnetic_field.covers(self.grid):
@@ -3221,9 +3267,10 @@ class WarpEngine:
             sub-accumulators against contention, :func:`_fold_subslots`). Cost and
             memory follow the deposits, not ``beamlets x scoring voxels``: a beamlet
             of a wide group holds 48 bytes (80 past two octave bands), so the auto
-            group on one device is every beamlet that the history index and the
-            int64 energy books allow (:func:`_book_safe_group_size`), on several
-            devices a few groups per device (:func:`_shard_group_size`), and the
+            group is not a memory fit: the call runs one group per device, and more
+            only once a group would exceed the engine's ``fold_group_histories``
+            (:func:`_shard_group_size`), within what the history index and the
+            int64 energy books allow (:func:`_book_safe_group_size`), and the
             scoring grid's size costs only its coefficient and band arrays.
             Deterministic on a device for any group size, lane count or arrival
             order, since integer addition is associative. ``K_0`` is a power of two
@@ -3584,9 +3631,10 @@ class WarpEngine:
 
         ``None`` auto-sizes from device memory (``reduction.fit_group_size``:
         :func:`_auto_group_size`, or :func:`_auto_fold_group_size` for the deposit
-        fold, whose group is otherwise every beamlet); on several devices the fold's
-        auto group is then cut so that each device has groups to pull
-        (``share_group_size``, :func:`_shard_group_size`). Auto-sized or explicit, a
+        fold, whose fit is otherwise every beamlet); the fold's auto group is then cut
+        to one group per device, and further once a group would exceed
+        ``fold_group_histories`` histories (``share_group_size``,
+        :func:`_shard_group_size`). Auto-sized or explicit, a
         batch block stays inside the int32 history index
         (:func:`_index_safe_group_size`), and a deposit-fold group inside what its
         int64 energy books hold at unit weight (``bound_group_size``,
@@ -3619,7 +3667,11 @@ class WarpEngine:
                 )
 
             beamlet_group_size = reduction.share_group_size(
-                min(_fit(d) for d in device_list), n_beamlets, len(device_list)
+                min(_fit(d) for d in device_list),
+                n_beamlets,
+                len(device_list),
+                n_histories_per_beamlet,
+                self.fold_group_histories,
             )
 
         # Auto-sized or explicit, one batch's block must stay inside the generators'

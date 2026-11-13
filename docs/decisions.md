@@ -2254,11 +2254,15 @@ number of transports changes. It follows the last call only (one outlier costs t
 one extra transport and no resolution) and clears when a call settles at the a-priori scale
 or runs dense.
 
-**Groups and books.** On one device the auto group is every beamlet that the int32 history
-index, the device memory and the energy books allow (it is not "as wide as the history index
-allows" alone, as an earlier draft of this entry said). On several devices it is cut to about
-four groups per device (`_FOLD_GROUPS_PER_DEVICE`, chosen, not measured), because one
-whole-call group left every device but one idle. A group is also bounded so that its
+**Groups and books.** An auto-sized call runs one group per device, and more only once a
+group would hold more than `WarpEngine.fold_group_histories` histories (default 1e7,
+`_FOLD_GROUP_HISTORIES`): `max(devices, ceil(histories / fold_group_histories))` groups,
+rounded up to a multiple of the device count (`_shard_group_size`). At least one group per
+device because one whole-call group left every device but one idle; no more than that at few
+histories because a group has a fixed host-side cost; smaller groups at many histories because
+they measured faster ("Group rule, 2026-11-13" below, which replaced a fixed four groups per
+device that was chosen without a measurement). An explicit `beamlet_group_size` overrides the
+rule. A group also stays within the int32 history index and the device memory, and is bounded so that its
 unit-weight energy books (`total_q`, `escaped`, `unscored`, `deposited`, read once per group)
 stay within `2**60` quanta (`_book_safe_group_size`): 7020 edges of 1e6 histories absorbing
 about 1.3 MeV each book 9.1e18 quanta, at the int64 limit. The bound binds only past about
@@ -2376,7 +2380,8 @@ runs as fast as the old code and returns its values bitwise.
 every cell, with ranges that do not overlap: +2.3 to +3.8 % (1THA232, 4 deg), +2.6 to +4.3 %
 (8 deg), +1.8 to +4.5 % (1THA210, 4 deg) and +2.4 to +5.7 % (8 deg) on the box, +1.2 to
 +5.6 % on the full grid. Which fix costs it (the band load, the band array, the changed
-`K_0`) was not isolated. Accepted or not is the maintainer's call; it does not change the
+`K_0`) was not isolated in these sessions (it was later: "Cost of the review fixes, isolated
+2026-11-13" below). Accepted or not is the maintainer's call; it does not change the
 default's case, the speed-up above being measured with it.
 
 Agreement at equal seeds (the first timed seed, all five rounds identical): deposit against
@@ -2429,17 +2434,71 @@ was never used: these loops do not exercise it.
 
 **Several devices** (partial; only `["cuda:0", "cpu"]` exists here; 1THA210, 8 deg, one
 process, three alternating rounds): `["cuda:0"]` 0.039-0.044 s; `["cuda:0", "cpu"]`
-0.107-0.111 s at `_FOLD_GROUPS_PER_DEVICE = 4`, 0.107-0.120 s at 2 and 0.107-0.113 s at 8
-(monkeypatched). Counted per device, the cpu launched only the set-up kernels
+0.107-0.111 s at four groups per device (the fixed count then in force), 0.107-0.120 s at 2
+and 0.107-0.113 s at 8 (monkeypatched). Counted per device, the cpu launched only the set-up kernels
 (`build_proposals`, `fold_coefficients`) and no transport: the GPU emptied the group queue
 before the cpu shard took a group, and the values are the GPU-only call's bits. The mixed set
 therefore times the cpu shard's set-up, not the group scheduling, and says nothing about two
 identical GPUs.
 
-**Open.** Two identical GPUs: the four groups per device and the scheduling they are for are
-unmeasured; `tests/perf/bench_multi_gpu_contraction.py` measures both on synthetic stand-ins
-for the study cases (7020 and 3060 edges, analytic water, no data files), at 1000 to 100 000
-histories per edge and 2, 4 and 8 groups per device. Which review fix costs the 1.2-5.7 %. The remembered scale under a source that
+**Group rule, 2026-11-13.** Measured at bc11dcc (four groups per device) with
+`tests/perf/bench_multi_gpu_contraction.py`: synthetic stand-ins for the study cases, `large`
+(7020 edges, 631 488 scoring voxels) and `small` (3060 edges, 126 960 voxels), analytic
+water, no data files. Times are the best of 5 in seconds (best of 3 at 100 000 per edge on
+the laptop); only ratios within a block compare.
+
+*Four Tesla V100-SXM2-32GB* (Warp 1.19.0, driver 580.178.04, 1530 MHz, no throttling), G =
+groups per device. Every deposit-fold call on 2 to 4 GPUs returned the 1-GPU call's bits
+(values, sigma, books; 370 deposit-fold calls in all), and the devices' shares were even.
+
+| problem, histories per edge | 1 GPU | 2 GPUs | 3 GPUs | 4 GPUs | dense, 1 GPU |
+|---|---|---|---|---|---|
+| large, 1000 | 0.139 | 0.082 (G=1, 2) | 0.067 (G=1, 2) | 0.064 (G=1, 2); 0.088 (G=4); 0.196 (G=8) | 1.60 |
+| large, 10 000 | 1.509 | 0.682 (G=4) | 0.471 (G=4) | 0.361 (G=4); 0.376 (G=2) | 2.28 |
+| large, 100 000 | 18.14 | 8.06 (G=8) | 5.40 (G=8) | 3.40 (G=8); 4.08 (G=4); 4.53 (G=2) | 13.52 |
+| small, 1000 | 0.062 | 0.041 (G=1) | 0.036 (G=1) | 0.041 (G=1); 0.055 (G=2); 0.108 (G=4) | 0.161 |
+| small, 10 000 | 0.571 | 0.296 (G=2) | 0.209 (G=2) | 0.170 (G=2) | 0.631 |
+| small, 100 000 | 5.75 | 2.83 (G=8) | 1.91 (G=8) | 1.46 (G=8); 1.50 (G=2) | 5.40 |
+
+At 1000 per edge the cost follows the number of groups, whatever the device count, and the
+former default (G=4) ran `small` on four GPUs at 0.58 of the one-GPU speed. Each shard's
+set-up takes 3 ms on one GPU and 7-8, 12-13 and 16-18 ms on two, three and four, so at 1000
+per edge four GPUs gain 2.2x on `large` and three GPUs (1.70x) beat four (1.52x) on `small`.
+That growth of the set-up with the device count is not explained and not addressed here.
+
+*One RTX 4070 Laptop* (2505-2535 MHz under load, no throttling; a slow host state, about 15 %
+above earlier sessions), explicit `beamlet_group_size`, relative to the engine's choice then
+(one group; four and two groups at 100 000 per edge, from the book bound):
+
+| problem, histories per edge | 2 groups | 4 | 8 | 16 | 32 | 64 | dense |
+|---|---|---|---|---|---|---|---|
+| large, 1000 (0.174 s) | 0.99 | 1.03 | 1.11 | 1.22 | 1.67 | 2.93 | 8.04 |
+| large, 10 000 (1.675 s) | 1.01 | 0.98 | 0.95 | 0.97 | 0.98 | 1.01 | 1.67 |
+| large, 100 000 (17.31 s) | - | 1.00 | 0.97 | 0.97 | 0.90 | 0.90 | 0.94 |
+| small, 1000 (0.083 s) | 1.03 | 1.14 | 1.19 | 1.66 | 3.06 | 6.88 | 2.82 |
+| small, 10 000 (0.678 s) | 0.97 | 1.01 | 1.03 | 1.11 | 1.12 | 1.19 | 1.20 |
+| small, 100 000 (6.69 s) | 1.00 | 1.01 | 1.00 | 1.00 | 1.01 | 1.05 | 0.96 |
+
+All deposit arms are bitwise equal. On `large` the fastest groups hold 4e6 to 9e6 histories
+at 10 000 per edge and 1e7 to 2e7 at 100 000 on both machines, where the deposit fold in 32
+groups (15.60 s) is also faster than the dense fold (16.20 s); `small` is flat. Hence one
+group per device and a target of 1e7 histories a group. The rule itself has not been timed on
+either machine, only the group sizes it produces, and nothing was measured on other problems
+or cards: `fold_group_histories` is an engine parameter for that reason. On `small` at 100 000
+per edge the dense fold stays 4 % faster at every group size, unexplained; left, since the
+study runs at 1000 per edge.
+
+**Cost of the review fixes, isolated 2026-11-13** (commit snapshots and variants, alternating
+processes, paired per round). Nearly all of the 1.2-5.7 % is the octave-band commit: the band
+read `si.fold_band[v]` per weighted deposit (2.8-3.5 ms per call on 1THA232 at 4 deg, 0.2-0.5
+ms on 1THA210 at 8 deg; a variant that reads the band and ignores it is as slow) and a heavier
+per-call set-up (0.35-0.6 ms on both). In the laptop's normal host state the gap is 2.1-3.3 %
+on both cases; the cells near 5 % are the small case in its slow host state, where the
+host-bound set-up grows. 0.5-1.4 ms on 1THA232 is not attributed. No other commit made a
+measurable difference. Not changed.
+
+**Open.** The per-device growth of the shard set-up. The group rule's default on other
+problems and cards. The remembered scale under a source that
 does exceed the guard at its a-priori scale (no measured loop did). The old code at the full
 grid (not run; it was not in the first table either).
 

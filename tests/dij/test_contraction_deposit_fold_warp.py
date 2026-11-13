@@ -667,24 +667,43 @@ class TestFoldSubslots:
 
 
 class TestFoldShardGroups:
-    """Several groups per device on a multi-device call; one device keeps every beamlet."""
+    """One group per device, and more only once a group would exceed the history target."""
 
-    def test_one_device_keeps_the_group(self) -> None:
-        assert warp_engine._shard_group_size(7020, 7020, 1) == 7020
+    TARGET = 10_000_000
+
+    def test_one_device_below_the_target_keeps_the_group(self) -> None:
+        """The study case, 7020 edges of 1000 histories: one group, as measured fastest."""
+        assert warp_engine._shard_group_size(7020, 7020, 1, 1000, self.TARGET) == 7020
+
+    def test_one_device_past_the_target_is_split(self) -> None:
+        """7020 edges of 10 000 histories at 1e7 a group: 8 groups of 878 edges."""
+        assert warp_engine._shard_group_size(7020, 7020, 1, 10_000, self.TARGET) == 878
 
     def test_a_smaller_group_is_kept(self) -> None:
-        assert warp_engine._shard_group_size(3, 7020, 2) == 3
+        assert warp_engine._shard_group_size(3, 7020, 2, 1000, self.TARGET) == 3
 
     @pytest.mark.parametrize("n_devices", [2, 3, 4])
-    def test_every_device_has_a_group_to_pull(self, n_devices: int) -> None:
-        per_device = warp_engine._FOLD_GROUPS_PER_DEVICE
+    def test_few_histories_run_one_group_per_device(self, n_devices: int) -> None:
         for n in range(1, 400):
-            group = warp_engine._shard_group_size(n, n, n_devices)
-            groups = -(-n // group)
+            group = warp_engine._shard_group_size(n, n, n_devices, 8, self.TARGET)
+            assert group == max(1, -(-n // n_devices))
+
+    @pytest.mark.parametrize("n_devices", [1, 2, 3, 4])
+    @pytest.mark.parametrize("n_per", [1000, 10_000, 100_000, 10**6])
+    def test_groups_hold_the_target_and_share_evenly(self, n_devices: int, n_per: int) -> None:
+        for n in (1, 7, 3060, 7020):
+            group = warp_engine._shard_group_size(n, n, n_devices, n_per, self.TARGET)
             assert group >= 1
-            assert groups >= min(n, n_devices)
-            if n >= per_device * n_devices:
-                assert groups >= 2 * n_devices
+            if n >= n_devices:
+                assert -(-n // group) >= n_devices
+            # No finer than the rule asks: a multiple of the device count, rounded up.
+            asked = max(n_devices, -(-n * n_per // self.TARGET))
+            asked = -(-asked // n_devices) * n_devices
+            assert group == max(1, -(-n // asked))
+
+    def test_the_target_sets_the_group(self) -> None:
+        assert warp_engine._shard_group_size(7020, 7020, 1, 1000, 10**6) == 878
+        assert warp_engine._shard_group_size(7020, 7020, 1, 1000, 1) == 1
 
 
 class TestBookSafeGroups:
@@ -729,19 +748,36 @@ def _plan(engine, contraction, devices, n_beamlets: int, n_per: int = 8) -> int:
 
 
 def test_the_planner_shards_the_fold_over_every_device() -> None:
-    """The fold's one whole-call group is cut for several devices; the dense plan is not."""
+    """The fold runs one group per device at few histories; the dense plan is not cut."""
     engine = _engine("cpu")
     a = _weights(engine.grid.shape)
     spec = engine._fold_spec(a, ScoringGrid.for_grid(engine.grid), 4, _source())
-    assert _plan(engine, spec, ["cpu"], 400) == 400  # one device: one group, as before
-    group = _plan(engine, spec, ["cpu", "cpu"], 400)
-    assert -(-400 // group) >= 2 * warp_engine._FOLD_GROUPS_PER_DEVICE
+    assert _plan(engine, spec, ["cpu"], 400) == 400  # one device: one group
+    assert _plan(engine, spec, ["cpu", "cpu"], 400) == 200
     dense = _plan(engine, a, ["cpu"], 400)
     assert _plan(engine, a, ["cpu", "cpu"], 400) == dense
 
 
-def test_the_planner_bounds_the_fold_by_the_books() -> None:
+def test_the_planner_cuts_the_fold_at_the_engines_group_histories() -> None:
+    """``fold_group_histories`` is the engine's knob; the dense plan ignores it."""
     engine = _engine("cpu")
+    assert engine.fold_group_histories == warp_engine._FOLD_GROUP_HISTORIES == 10_000_000
+    a = _weights(engine.grid.shape)
+    scoring = ScoringGrid.for_grid(engine.grid)
+    spec = engine._fold_spec(a, scoring, 4, _source())
+    # 400 beamlets of 10**5 histories: 4e7 histories, four groups at the default.
+    assert _plan(engine, spec, ["cpu"], 400, n_per=10**5) == 100
+    assert _plan(engine, spec, ["cpu", "cpu", "cpu"], 400, n_per=10**5) == 67  # 6 groups
+    small = dataclasses.replace(engine, fold_group_histories=800)
+    assert _plan(small, spec, ["cpu"], 400) == 100  # 400 x 8 histories, 800 a group
+    assert _plan(small, a, ["cpu"], 400) == _plan(engine, a, ["cpu"], 400)
+    with pytest.raises(ValueError, match="fold_group_histories"):
+        dataclasses.replace(engine, fold_group_histories=0)
+
+
+def test_the_planner_bounds_the_fold_by_the_books() -> None:
+    """With the group rule out of the way: its default cuts long before the books bind."""
+    engine = dataclasses.replace(_engine("cpu"), fold_group_histories=2**62)
     a = _weights(engine.grid.shape)
     spec = engine._fold_spec(a, ScoringGrid.for_grid(engine.grid), 4, _source())
     group = _plan(engine, spec, ["cpu"], 7020, n_per=10**6)
