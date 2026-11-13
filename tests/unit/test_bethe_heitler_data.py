@@ -426,7 +426,7 @@ class TestBornNormalization:
         Bethe-Heitler cross-section has to land near the Seltzer-Berger totals at
         these energies, so the rescaling factor (EGS4's ``A'``) is an end-to-end
         check on the formula and its constants that shares nothing with them.
-        Measured ESTAR/Born at (10, 20) MeV: water 0.988, 0.979; air 0.984, 0.995;
+        Measured ESTAR/Born at (10, 20) MeV: water 0.988, 0.998; air 0.984, 0.994;
         cortical bone 0.995, 1.000; tungsten 1.060, 1.020. At 1 MeV the same ratio
         is 0.93-0.98 in the low-Z media and 1.45 in tungsten, which is the known
         failure of the Born approximation there and the reason the model is
@@ -437,8 +437,28 @@ class TestBornNormalization:
             ratio = estar / born_radiative_stopping_power(energy, s)
             assert low < ratio < high, f"A' = {ratio:.4f} at {energy} MeV"
 
+    @pytest.mark.parametrize("material", ALL_MATERIALS)
+    def test_born_stopping_power_follows_estar_to_1_gev(self, material: int) -> None:
+        """Above 20 MeV the un-normalized model stays within 2 % of ESTAR.
 
-TABLE_E_MAX = 21.0
+        The radiative stopping power above the low-energy fit follows ESTAR
+        nodes from 30 MeV to 1 GeV (``radiative_high_anchors``). Against those
+        nodes the Born value needs a rescaling of 0.984 to 1.006 in every
+        registry medium (measured: water 1.000 at 30 MeV falling to 0.986 at
+        1 GeV; tungsten 1.006 to 0.984), so the normalization the transport
+        applies is a correction of under 2 % wherever the model is the
+        ``auto`` choice. The log-quadratic extrapolation those nodes replaced
+        would have asked for +8 % (water) to +32 % (tungsten) at 200 MeV.
+        """
+        s = screening_parameters(MATERIALS[material].composition)
+        anchors = MATERIALS[material].radiative_high_anchors
+        assert anchors and anchors[-1][0] == 1000.0
+        for energy, estar in anchors:
+            ratio = estar / born_radiative_stopping_power(energy, s)
+            assert 0.98 < ratio < 1.01, f"A' = {ratio:.4f} at {energy} MeV"
+
+
+TABLE_E_MAX = 20.0  # the analytic source's declared energy domain
 
 
 @pytest.fixture(scope="module")
@@ -465,6 +485,14 @@ class TestFlattenedTables:
         assert tables.cross_section.shape == (source.n_materials, tables.n_points)
         assert tables.stopping_radiative_restricted.shape == tables.cross_section.shape
         assert tables.screening.shape == (source.n_materials, 5)
+
+    def test_tables_are_refused_above_the_source_domain(
+        self, source: AnalyticCrossSections
+    ) -> None:
+        """Fail closed, like the cross-section tables (CrossSectionSource.energy_max)."""
+        assert source.energy_max == TABLE_E_MAX
+        with pytest.raises(ValueError, match="energy domain"):
+            build_bethe_heitler_tables(source, ecut=ECUT_MEV, pcut=PCUT_MEV, e_max=21.0, n_points=8)
 
     def test_lookup_parity_with_host_queries(
         self, source: AnalyticCrossSections, tables: BetheHeitlerTables

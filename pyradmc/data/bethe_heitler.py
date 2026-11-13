@@ -38,7 +38,8 @@ stopping power for the sub-threshold remainder, with the identity
 test-pinned (``tests/unit/test_bethe_heitler_data.py``). The un-normalized Born
 value, :func:`born_radiative_stopping_power`, is kept as a diagnostic: its ratio to
 ESTAR is within 3 percent of one at 10 and 20 MeV in water, air and cortical bone
-and within 7 percent in tungsten (measured values in the test).
+and within 7 percent in tungsten, and within 2 percent of one from 30 MeV to 1 GeV
+in every registry medium (measured values in the test).
 
 Compounds
 ---------
@@ -455,12 +456,17 @@ def build_bethe_heitler_tables(
         grid starts at ``ecut / 2`` like the electron tables; ``pcut`` is the
         photon threshold of the discrete channel.
     e_max
-        Upper grid edge in MeV.
+        Upper grid edge in MeV. Refused above the source's declared energy
+        domain (:attr:`~pyradmc.data.interface.CrossSectionSource.energy_max`),
+        like the cross-section tables: the normalization is the source's
+        radiative stopping power, which must not be extrapolated.
     n_points
         Grid nodes; defaults to :data:`pyradmc.data.tables.TABLE_POINTS`.
     """
+    from pyradmc.data.interface import require_energy_domain
     from pyradmc.data.tables import TABLE_POINTS
 
+    require_energy_domain(source, e_max)
     if n_points is None:
         n_points = TABLE_POINTS
     if pcut <= 0.0 or ecut <= 0.0:
