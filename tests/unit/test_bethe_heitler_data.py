@@ -52,17 +52,16 @@ ENERGIES = (0.2, 1.0, 6.0, 20.0, 100.0, 300.0)
 
 
 class _RegistrySource(CrossSectionSource):
-    """Test instrument: every registry material, radiative stopping from its ESTAR fit.
+    """Test instrument: every registry material, the registry's radiative stopping power.
 
-    Only the radiative stopping power is real; the bremsstrahlung queries under test
-    are concrete on the interface and need nothing else.
+    Only the radiative stopping power is real (the ESTAR fit to 20 MeV and the
+    ESTAR nodes to 1 GeV above it); the bremsstrahlung queries under test are
+    concrete on the interface and need nothing else. Its energy domain is the
+    interface default, unbounded.
     """
 
     def radiative_stopping_power(self, energy: float, material: int) -> float:
-        coefficients = berger_seltzer.radiative_fit_coefficients(
-            MATERIALS[material].radiative_anchors
-        )
-        return berger_seltzer.radiative_stopping(energy, coefficients)
+        return berger_seltzer.radiative_stopping_power(energy, MATERIALS[material])
 
     def mu_over_rho(self, energy: float, material: int, process: int) -> float:
         raise NotImplementedError
@@ -232,6 +231,96 @@ class TestStoppingPowerIdentity:
             assert sigma * radiated / count + restricted == pytest.approx(
                 source.radiative_stopping_power(energy, WATER), rel=1.0e-9
             )
+
+
+class TestInterpolatedStepCoefficients:
+    """The per-substep lookup of the reference loop, against the exact methods."""
+
+    @pytest.mark.parametrize("material", (WATER, CORTICAL_BONE, TUNGSTEN))
+    def test_interpolation_error_is_parts_per_million(self, material: int) -> None:
+        """Off-node energies across the transported range, both quantities.
+
+        Measured maxima for E >= ECUT (water, 3000 log-spaced probes): 5.3e-6 on
+        the cross-section, 1.7e-6 on the restricted stopping power. The bound is
+        four times the larger: a halved grid (2.1e-5) fails it.
+        """
+        source = _RegistrySource()
+        for energy in np.geomspace(ECUT_MEV, 63.0, 61):
+            e = float(energy)
+            sigma, restricted = source.bremsstrahlung_step_coefficients(e, material, PCUT_MEV)
+            assert sigma == pytest.approx(
+                source.bremsstrahlung_cross_section(e, material, PCUT_MEV), rel=2.0e-5
+            )
+            assert restricted == pytest.approx(
+                source.restricted_radiative_stopping_power(e, material, PCUT_MEV), rel=2.0e-5
+            )
+
+    def test_onset_above_the_cut_is_not_smeared(self) -> None:
+        """Just above k_cut the cross-section is tiny; its relative error stays small.
+
+        Measured at most 1.1e-3 within the first node spacing above the threshold,
+        where the cross-section rises from zero like ln(E / k_cut).
+        """
+        source = _RegistrySource()
+        for factor in (1.0005, 1.002, 1.006, 1.02):
+            e = PCUT_MEV * factor
+            sigma, _ = source.bremsstrahlung_step_coefficients(e, WATER, PCUT_MEV)
+            exact = source.bremsstrahlung_cross_section(e, WATER, PCUT_MEV)
+            assert exact > 0.0
+            assert sigma == pytest.approx(exact, rel=2.0e-3)
+
+    def test_outside_the_grid_the_exact_methods_answer(self) -> None:
+        """No discrete channel at or below k_cut; nothing clamped above the grid."""
+        source = _RegistrySource()
+        for energy in (0.5 * PCUT_MEV, PCUT_MEV, 100.0):
+            assert source.bremsstrahlung_step_coefficients(energy, WATER, PCUT_MEV) == (
+                source.bremsstrahlung_cross_section(energy, WATER, PCUT_MEV),
+                source.restricted_radiative_stopping_power(energy, WATER, PCUT_MEV),
+            )
+        assert source.bremsstrahlung_step_coefficients(PCUT_MEV, WATER, PCUT_MEV)[0] == 0.0
+
+    def test_a_wider_domain_appends_nodes_and_moves_nothing_below(self) -> None:
+        """A source declaring a domain above 64 MeV interpolates up to it.
+
+        The grid extends append-only (``extendable_log_grid``): below the 64 MeV
+        reference span a 250 MeV source answers bit for bit what the unbounded
+        instrument does, and between 64 and 250 MeV it interpolates to the same
+        parts per million instead of integrating.
+        """
+
+        class _To250(_RegistrySource):
+            @property
+            def energy_max(self) -> float:
+                return 250.0
+
+        wide = _To250()
+        reference = _RegistrySource()
+        for energy in (0.3, 6.0, 20.0, 40.0, 63.9):
+            assert wide.bremsstrahlung_step_coefficients(
+                energy, WATER, PCUT_MEV
+            ) == reference.bremsstrahlung_step_coefficients(energy, WATER, PCUT_MEV)
+        log_e = wide._brems_step_cache[(WATER, PCUT_MEV)][0]
+        assert math.exp(log_e[-1]) >= 250.0
+        for energy in (80.0, 133.3, 200.0, 250.0):
+            sigma, restricted = wide.bremsstrahlung_step_coefficients(energy, WATER, PCUT_MEV)
+            assert (sigma, restricted) != wide._bremsstrahlung_split(energy, WATER, PCUT_MEV)
+            assert sigma == pytest.approx(
+                wide.bremsstrahlung_cross_section(energy, WATER, PCUT_MEV), rel=2.0e-5
+            )
+            assert restricted == pytest.approx(
+                wide.restricted_radiative_stopping_power(energy, WATER, PCUT_MEV), rel=2.0e-5
+            )
+
+    def test_each_cut_has_its_own_grid(self) -> None:
+        """The cache is keyed on k_cut: a second cut does not read the first's grid."""
+        source = _RegistrySource()
+        low = source.bremsstrahlung_step_coefficients(6.0, WATER, 0.01)
+        high = source.bremsstrahlung_step_coefficients(6.0, WATER, PCUT_MEV)
+        assert low[0] > high[0]
+        assert low[1] < high[1]
+        assert high[0] == pytest.approx(
+            source.bremsstrahlung_cross_section(6.0, WATER, PCUT_MEV), rel=2.0e-5
+        )
 
 
 class TestShapeQuadrature:

@@ -74,6 +74,12 @@ _RANGE_GRID_POINTS: int = 4096
 """Nodes of the cached range grid; trapezoid error at this log spacing sits far
 below the 1e-4 pins of the derivative and round-trip tests."""
 
+_BREMS_GRID_POINTS: int = 1024
+"""Nodes of the cached bremsstrahlung grid of
+:meth:`CrossSectionSource.bremsstrahlung_step_coefficients`: a third of a second
+of quadrature per ``(material, k_cut)``, for an interpolation error of a few
+parts per million (measured values in that method's docstring)."""
+
 
 class PhotonProcess:
     """Enumeration of photon interaction channels.
@@ -509,8 +515,9 @@ class CrossSectionSource(ABC):
         continuously, never the total — the total would double-count every
         photon above ``k_cut``.
 
-        Evaluated by quadrature on every call (no cache): exact, and cheap enough
-        for the reference loop; kernels read the flattened
+        Evaluated by quadrature on every call (no cache): exact. The reference
+        loop reads :meth:`bremsstrahlung_step_coefficients`, which interpolates
+        these values; kernels read the flattened
         :class:`~pyradmc.data.bethe_heitler.BetheHeitlerTables`.
         """
         return self._bremsstrahlung_split(energy, material, k_cut)[0]
@@ -562,6 +569,76 @@ class CrossSectionSource(ABC):
             split = (norm * count, norm * below)
         self._brems_split_last = (key, split)
         return split
+
+    def bremsstrahlung_step_coefficients(
+        self, energy: float, material: int, k_cut: float
+    ) -> tuple[float, float]:
+        """``(discrete cross-section, restricted radiative stopping power)``, interpolated.
+
+        The pair a transport substep needs — :meth:`bremsstrahlung_cross_section`
+        in cm^2/g and :meth:`restricted_radiative_stopping_power` in MeV cm^2/g at
+        one ``(energy, material, k_cut)`` — read from a grid instead of integrated.
+        The two exact methods cost a quadrature per call (about 0.3 ms), which a
+        per-substep caller cannot afford; this is to them what
+        :meth:`restricted_range` is to :meth:`restricted_stopping_power`.
+
+        Both are interpolated linearly in ``log E`` on
+        :data:`_BREMS_GRID_POINTS` log-spaced nodes from ``k_cut`` to
+        :data:`_RANGE_GRID_E_REF`, each node an exact evaluation, cached per
+        ``(material, k_cut)``. A source whose declared domain
+        (:attr:`energy_max`) reaches higher gets nodes appended at the same spacing
+        up to that domain (:func:`~pyradmc.data.grids.extendable_log_grid`, as for
+        the restricted range), so every value below 64 MeV is the same whatever
+        the domain (test-pinned). The grid starts *at* the threshold, where the
+        cross-section leaves zero as ``ln(E / k_cut)`` — linear in the
+        interpolation variable, so the onset is not smeared. Measured against the
+        exact methods in water at ``k_cut`` = 50 keV: at most 5.3e-6 relative on
+        the cross-section and 1.7e-6 on the stopping power for ``E`` >= 0.2 MeV;
+        within the first node spacing above the threshold, where the
+        cross-section itself vanishes, at most 1.1e-3 of it (test-pinned).
+
+        Outside the grid the exact methods answer: at or below ``k_cut`` there is
+        no discrete channel, and above the grid's upper edge nothing is clamped
+        or extrapolated. This method does not police the energy domain: the
+        restricted-range lookup the same substep makes is what raises above it.
+        """
+        if energy <= k_cut:
+            return self._bremsstrahlung_split(energy, material, k_cut)
+        cache: (
+            dict[
+                tuple[int, float],
+                tuple[npt.NDArray[np.float64], npt.NDArray[np.float64], npt.NDArray[np.float64]],
+            ]
+            | None
+        ) = getattr(self, "_brems_step_cache", None)
+        if cache is None:
+            cache = {}
+            self._brems_step_cache = cache
+        key = (material, k_cut)
+        grids = cache.get(key)
+        if grids is None:
+            from pyradmc.data.grids import extendable_log_grid
+
+            top = self.energy_max * (1.0 + DOMAIN_EDGE_RTOL)
+            energies = extendable_log_grid(
+                k_cut,
+                _RANGE_GRID_E_REF,
+                _BREMS_GRID_POINTS,
+                e_top=top if math.isfinite(top) else _RANGE_GRID_E_REF,
+            )
+            split = np.array(
+                [self._bremsstrahlung_split(float(e), material, k_cut) for e in energies]
+            )
+            grids = (np.log(energies), split[:, 0].copy(), split[:, 1].copy())
+            cache[key] = grids
+        log_e, cross_section, restricted = grids
+        x = math.log(energy)
+        if x > log_e[-1]:
+            return self._bremsstrahlung_split(energy, material, k_cut)
+        return (
+            float(np.interp(x, log_e, cross_section)),
+            float(np.interp(x, log_e, restricted)),
+        )
 
     # -- construction -------------------------------------------------------
 
