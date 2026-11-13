@@ -17,6 +17,23 @@ without a field, so results are not byte-identical to the previous release.
 
 ### Added
 
+- **Selectable physics models, per process: `physics="auto"` or `PhysicsOptions`.** Both
+  engines' `run` and `run_dij`, and the Warp engine's `run_dij_device`, take a
+  `physics` argument naming a model for
+  bremsstrahlung, pair production and positron handling. `"auto"`, the default and the
+  certified path, is resolved once per run from the source's maximum energy and primary
+  kinds (`pyradmc.physics_options.resolve_physics`); the resolved models are logged at
+  INFO with the reason and recorded in `RunProvenance.physics`, and the provenance
+  summary string gains a `physics=[...]` token. Only today's models are registered
+  (`thin-target`, `uniform-split`, `moller-at-rest`), so this is the selector alone:
+  **no physics, numerics or dose moves** — fixed-seed dose, sigma, energy books and Dij are
+  byte-identical before and after on the reference backend, Warp CPU and Warp CUDA,
+  field-free, in a uniform magnetic field and with exterior-air stepping.
+  `HIGH_ENERGY_PHYSICS_THRESHOLD_MEV` (30 MeV, provisional) is where `"auto"` will switch
+  to high-energy models once one is registered. Sources gain an optional
+  `particle_kinds` declaration, which the phase-space sources fill in. This replaces the
+  rule that physics is never a per-run option (AGENTS.md 2.10).
+
 - **Cross-section sources declare an energy domain, enforced fail-closed.**
   `CrossSectionSource.energy_max` is the analytic source's 20 MeV calibration top or the
   tabulated source's compiled grid top. Both engines' `run` and `run_dij` refuse a

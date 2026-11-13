@@ -53,7 +53,7 @@ with that comparison, when the first high-energy model lands.
 # transport loops). Unbiased by construction — these change realizations and
 # efficiency, never expectations; unbiasedness is test-pinned against a
 # roulette-free run. They are still fixed project-wide values, not per-run options
-# (AGENTS.md 2.10): one configuration is what the validation tier certifies.
+# (AGENTS.md 2.10: the per-run physics choice is PhysicsOptions and nothing else).
 
 PHOTON_ROULETTE_MEV: float = 0.5
 """Photons below this energy play Russian roulette at their creation or scatter.

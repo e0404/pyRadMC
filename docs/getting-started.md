@@ -49,12 +49,57 @@ the cheapest sanity check available, and worth keeping in your own scripts.
 
 ```python
 print(result.provenance.summary())
-# pyradmc 0.2.1 ref/cpu seed=20260726 pcut=0.05 ecut=0.2 msc=gs step=0.2 xs=[analytic ...]
+# pyradmc 0.2.1 ref/cpu seed=20260726 pcut=0.05 ecut=0.2 msc=gs step=0.2 deposit_res=None
+#   physics=[bremsstrahlung=thin-target pair=uniform-split positron=moller-at-rest] xs=[analytic ...]
 ```
 
 A dose array outlives the process that made it. `result.provenance` records the version,
-backend, device, seed, cutoffs, multiple-scattering model, resolved substep fraction and
-the cross-section citation, so an archived result still says how it was produced.
+backend, device, seed, cutoffs, multiple-scattering model, resolved substep fraction, the
+physics models and the cross-section citation, so an archived result still says how it
+was produced.
+
+### Physics models
+
+Three processes have a selectable model: bremsstrahlung, pair production and positron
+handling. Leave them alone and the engine chooses:
+
+```python
+result = engine.run(source, n_histories=100_000, n_batches=10, seed=20260726)  # physics="auto"
+print(result.provenance.physics.summary())
+# bremsstrahlung=thin-target pair=uniform-split positron=moller-at-rest
+```
+
+`"auto"` is the certified path. It is resolved once per run from the source's maximum
+energy and the kinds of particle the run starts, and the choice is logged at INFO with
+its reason (`logging.getLogger("pyradmc")`). To pin a process, name its model:
+
+```python
+from pyradmc import PhysicsOptions
+
+result = engine.run(
+    source,
+    n_histories=100_000,
+    n_batches=10,
+    seed=20260726,
+    physics=PhysicsOptions(pair="uniform-split"),  # the other two stay on "auto"
+)
+```
+
+| Process | Registered models | What it does |
+|---|---|---|
+| `bremsstrahlung` | `thin-target` | 1/k photon spectrum, emitted along the electron's direction |
+| `pair` | `uniform-split` | kinetic energy shared uniformly, both leptons emitted forward |
+| `positron` | `moller-at-rest` | transported as an electron (no Bhabha), annihilation at rest |
+
+Each process has one registered model today, so every run resolves to the same physics
+and an explicit option changes nothing. The table is where further models appear;
+`"auto"` will select the high-energy ones for sources above
+`pyradmc.HIGH_ENERGY_PHYSICS_THRESHOLD_MEV` (30 MeV, provisional). A source that high
+also needs cross-section data whose declared energy domain reaches it
+(`CrossSectionSource.energy_max`: 20 MeV for the analytic source, the compiled grid top
+for a tabulated one); the engines refuse the run otherwise, whatever `physics` says. An
+unknown name raises a `ValueError` listing the valid ones. An explicit model is your responsibility: only
+what `"auto"` resolves to is what the validation tier certifies.
 
 ## Running on the GPU
 

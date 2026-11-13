@@ -94,7 +94,21 @@ the face after the deflection; that residual, dominant at air contrast, was clos
 convergence of the hinge at an interface plus genuine interface dosimetry.
 
 **Positrons stay Møller-approximated** — no Bhabha, annihilation at rest. If upgraded,
-both land together as the new default, with a test showing the dosimetric effect.
+both land together as one positron model, with a test showing the dosimetric effect.
+
+**Physics models are selectable per process, and `"auto"` is the certified path.** The
+engines take `physics="auto"` or a `PhysicsOptions` naming a model for bremsstrahlung,
+pair production or positrons. This replaces the earlier rule that physics is never a
+per-run option: higher-energy work needs models the clinical range does not, and they
+must stay optional for clinical runs. The cost of that rule's removal is contained
+rather than denied — `"auto"` is resolved from the source's maximum energy and primary
+kinds by one function reading one table, only what `"auto"` resolves to is certified,
+every registered model is validated reference-against-backend on its own, and an
+explicit override is the user's responsibility. The selector shipped first with one
+model per process (`thin-target`, `uniform-split`, `moller-at-rest`), so introducing it
+moved no result: fixed-seed dose is byte-identical before and after on the reference
+backend, Warp CPU and Warp CUDA. The 30 MeV threshold above which `"auto"` will select
+high-energy models is the default table ceiling and is provisional.
 
 ## Cross-section data
 
