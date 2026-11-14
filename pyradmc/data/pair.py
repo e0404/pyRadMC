@@ -43,7 +43,7 @@ doi:10.1098/rspa.1934.0140; Butcher & Messel, Nucl. Phys. 20, 15 (1960),
 doi:10.1016/0029-5582(60)90162-0 (screening-function fits); Davies, Bethe &
 Maximon, Phys. Rev. 93, 788 (1954), doi:10.1103/PhysRev.93.788 (Coulomb
 correction); Nelson, Hirayama & Rogers, *The EGS4 Code System*, SLAC-265 (1985),
-sec. 2.7 (mixture rule, 50 MeV switch); Agostinelli et al., NIM A 506, 250 (2003),
+ch. 2 (mixture rule, 50 MeV switch); Agostinelli et al., NIM A 506, 250 (2003),
 doi:10.1016/S0168-9002(03)01368-8 with the Geant4 Physics Reference Manual,
 "Gamma conversion into e+e- pair" (the form transcribed here).
 
@@ -174,7 +174,7 @@ def radiation_logarithms(z: int) -> tuple[float, float]:
 def pair_screening_parameters(composition: tuple[tuple[int, float], ...]) -> PairScreening:
     r"""Screening parameters of a material from its elemental mass fractions.
 
-    The EGS4 mixture rule (SLAC-265, sec. 2.7): each element contributes to the
+    The EGS4 mixture rule (SLAC-265, ch. 2): each element contributes to the
     pair yield in proportion to :math:`p_i Z_i (Z_i + \xi_i)`, with :math:`p_i` the
     atom-number fraction and
 

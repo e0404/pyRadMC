@@ -152,23 +152,24 @@ def sample_pair_electron_energy(
     n1 = u_max * u_max * f1_bound
     n2 = 1.5 * f2_bound
 
-    eps = 0.5
+    # Loop body written without loop-carried or branch-defined variables and with
+    # the return inside it: the form Warp's codegen accepts for a dynamic loop.
     while True:
-        if uniform(rng_state) * (n1 + n2) < n1:
-            eps = 0.5 - u_max * math.pow(uniform(rng_state), 1.0 / 3.0)
-            delta = screening_constant * eps0 / (eps * (1.0 - eps))
+        pick = uniform(rng_state) * (n1 + n2)
+        xi = uniform(rng_state)
+        u = u_max * xi
+        if pick < n1:
+            u = u_max * math.pow(xi, 1.0 / 3.0)
+        eps = 0.5 - u
+        delta = screening_constant * eps0 / (eps * (1.0 - eps))
+        accept = (pair_screening_f2(delta) - fz) / f2_bound
+        if pick < n1:
             accept = (pair_screening_f1(delta) - fz) / f1_bound
-        else:
-            eps = 0.5 - u_max * uniform(rng_state)
-            delta = screening_constant * eps0 / (eps * (1.0 - eps))
-            accept = (pair_screening_f2(delta) - fz) / f2_bound
         if uniform(rng_state) <= accept:
-            break
-
-    if uniform(rng_state) < 0.5:
-        eps = 1.0 - eps
-    # eps >= eps0 analytically; the clamp only guards float round-off at the edge.
-    return min(max(eps * energy - ELECTRON_MASS_MEV, 0.0), kinetic)
+            if uniform(rng_state) < 0.5:
+                eps = 1.0 - eps
+            # eps >= eps0 analytically; the clamp only guards float round-off.
+            return min(max(eps * energy - ELECTRON_MASS_MEV, 0.0), kinetic)
 
 
 def sample_pair_cos_theta(kinetic_energy: float, rng_state: RNGState) -> float:
