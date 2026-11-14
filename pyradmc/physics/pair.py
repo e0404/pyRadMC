@@ -25,6 +25,7 @@ __all__ = [
     "pair_screening_f2",
     "sample_pair_cos_theta",
     "sample_pair_electron_energy",
+    "sample_pair_one_minus_cos_theta",
 ]
 
 PAIR_LOW_ENERGY_LIMIT_MEV: float = 2.0
@@ -172,8 +173,8 @@ def sample_pair_electron_energy(
             return min(max(eps * energy - ELECTRON_MASS_MEV, 0.0), kinetic)
 
 
-def sample_pair_cos_theta(kinetic_energy: float, rng_state: RNGState) -> float:
-    r"""Sample the polar-angle cosine of one pair lepton about the photon direction.
+def sample_pair_one_minus_cos_theta(kinetic_energy: float, rng_state: RNGState) -> float:
+    r"""Sample :math:`1 - \cos\theta` of one pair lepton about the photon direction.
 
     Leading-order angular distribution
 
@@ -193,7 +194,10 @@ def sample_pair_cos_theta(kinetic_energy: float, rng_state: RNGState) -> float:
         1 - \mu = \frac{2(1-\beta)(1-\xi)}{(1-\beta) + 2\beta\xi},
         \qquad 1 - \beta = \frac{1}{\gamma^2(1+\beta)},
 
-    so that the :math:`1/\gamma` cone survives single precision at 300 MeV.
+    and returned in that form: at 300 MeV the cone is :math:`1 - \mu \sim 10^{-6}`,
+    a couple of dozen steps of a single-precision cosine. The transport loops hand
+    it to :func:`pyradmc.physics.direction.rotate_direction_one_minus_cos`, which
+    never forms the cosine.
 
     Stated approximations: each lepton is sampled independently and their azimuths
     are independent and uniform (the caller draws them). The nucleus takes up the
@@ -206,10 +210,25 @@ def sample_pair_cos_theta(kinetic_energy: float, rng_state: RNGState) -> float:
         The lepton's kinetic energy in MeV (non-negative; isotropic at zero).
     rng_state
         Per-history RNG state; one uniform.
+
+    Returns
+    -------
+    float
+        :math:`1 - \cos\theta` in [0, 2].
     """
     tau = kinetic_energy / ELECTRON_MASS_MEV
     gamma = tau + 1.0
     beta = math.sqrt(tau * (tau + 2.0)) / gamma
     one_minus_beta = 1.0 / (gamma * gamma * (1.0 + beta))
     xi = uniform(rng_state)
-    return 1.0 - 2.0 * one_minus_beta * (1.0 - xi) / (one_minus_beta + 2.0 * beta * xi)
+    return 2.0 * one_minus_beta * (1.0 - xi) / (one_minus_beta + 2.0 * beta * xi)
+
+
+def sample_pair_cos_theta(kinetic_energy: float, rng_state: RNGState) -> float:
+    r"""Sample the polar-angle cosine of one pair lepton about the photon direction.
+
+    :func:`sample_pair_one_minus_cos_theta` (distribution, references and stated
+    approximations there), returned as the cosine. One uniform. The cosine form
+    is for double-precision callers and tests; a kernel keeps ``1 - cos``.
+    """
+    return 1.0 - sample_pair_one_minus_cos_theta(kinetic_energy, rng_state)

@@ -221,6 +221,18 @@ class TestPolarAngle:
         p_value = self._p_value(kinetic, 1.2 * kinetic, stream)
         assert p_value < 1e-6, f"angle oracle has no power at T={kinetic} MeV: p={p_value:.2e}"
 
+    @pytest.mark.parametrize("kinetic", [1e-9, 0.05, 3.0, 30.0, 300.0])
+    def test_cosine_is_one_minus_the_small_angle_form(self, kinetic: float) -> None:
+        """One draw, two spellings: the kernels carry 1 - cos, hosts may ask for cos."""
+        from pyradmc.physics.pair import sample_pair_one_minus_cos_theta
+
+        rng = HostRNG()
+        a, b = rng.init_state(SEED, 330), rng.init_state(SEED, 330)
+        for _ in range(200):
+            x = sample_pair_one_minus_cos_theta(kinetic, a)
+            assert 0.0 <= x <= 2.0
+            assert sample_pair_cos_theta(kinetic, b) == 1.0 - x
+
     def test_isotropic_at_rest_and_forward_at_high_energy(self) -> None:
         state = HostRNG().init_state(SEED, 324)
         slow = np.array([sample_pair_cos_theta(1e-9, state) for _ in range(N)])
