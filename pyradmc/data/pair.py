@@ -91,6 +91,7 @@ from pyradmc.data.screening import (
     coulomb_correction,
     radiation_logarithms,
 )
+from pyradmc.physics.pair import PAIR_COULOMB_ENERGY_MEV, PAIR_LOW_ENERGY_LIMIT_MEV
 
 __all__ = [
     "FINE_STRUCTURE_CONSTANT",
@@ -105,14 +106,10 @@ __all__ = [
     "screening_phi2",
 ]
 
-PAIR_LOW_ENERGY_LIMIT_MEV: float = 2.0
-"""Photon energy below which the sharing is uniform; see the module docstring.
-
-Must equal :data:`pyradmc.physics.pair.PAIR_LOW_ENERGY_LIMIT_MEV` (test-pinned
-through the sampler's chi-squared against :func:`pair_sharing_dcs`)."""
-
-PAIR_COULOMB_ENERGY_MEV: float = 50.0
-"""Photon energy at and above which the Coulomb correction is applied."""
+# The two energies at which the model changes form are the sampler's own constants,
+# imported so that each exists once: PAIR_LOW_ENERGY_LIMIT_MEV (below it the sharing
+# is uniform) and PAIR_COULOMB_ENERGY_MEV (at and above it the Coulomb correction is
+# applied; the one place to change if it is ever applied at all energies).
 
 _SCREENING_PREFACTOR: float = 136.0
 """The 136 of delta = 136 Z^(-1/3) eps0 / (eps (1 - eps)) (Butcher & Messel)."""

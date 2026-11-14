@@ -66,7 +66,7 @@ def coulomb_correction(z: float) -> float:
     It is a high-energy result. *Where* it is applied is each model's own stated
     choice, not this function's: the bremsstrahlung model applies it at every
     energy (:mod:`pyradmc.physics.brems_bh`), the pair model at and above
-    :data:`pyradmc.data.pair.PAIR_COULOMB_ENERGY_MEV` only.
+    :data:`pyradmc.physics.pair.PAIR_COULOMB_ENERGY_MEV` only.
     """
     a2 = (FINE_STRUCTURE_CONSTANT * z) ** 2
     return a2 * (1.0 / (1.0 + a2) + 0.20206 - 0.0369 * a2 + 0.0083 * a2 * a2 - 0.002 * a2**3)

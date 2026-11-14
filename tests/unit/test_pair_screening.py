@@ -271,6 +271,16 @@ class TestSharingDcs:
             screened = pair_sharing_dcs(300.0, eps, params) / pair_sharing_dcs(300.0, 0.5, params)
             assert screened == pytest.approx(complete(eps) / complete(0.5), rel=0.05)
 
+    def test_the_switch_energies_exist_once(self) -> None:
+        """The data oracle and the sampler read one constant each, not two copies."""
+        from pyradmc.data import pair as data_pair
+        from pyradmc.physics import pair as physics_pair
+
+        assert data_pair.PAIR_COULOMB_ENERGY_MEV is physics_pair.PAIR_COULOMB_ENERGY_MEV
+        assert data_pair.PAIR_LOW_ENERGY_LIMIT_MEV is physics_pair.PAIR_LOW_ENERGY_LIMIT_MEV
+        assert physics_pair.PAIR_COULOMB_ENERGY_MEV == 50.0
+        assert physics_pair.PAIR_LOW_ENERGY_LIMIT_MEV == 2.0
+
     def test_coulomb_correction_switches_on_at_50_mev(self) -> None:
         """Only the high-energy branch carries f_c; in tungsten it lowers the DCS."""
         params = pair_screening_parameters(MATERIALS[TUNGSTEN].composition)
