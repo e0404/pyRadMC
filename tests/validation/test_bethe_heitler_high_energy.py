@@ -19,7 +19,13 @@ end at 40, 80 and 200 MeV in water, compiled here to 250 MeV from the pinned EPI
 What this certifies is the transport and the model's wiring on data that is valid
 at these energies for electrons (Berger-Seltzer collision stopping, ESTAR radiative
 stopping). It is not a benchmark against an external code: none is on file above
-30 MeV, and the pair and positron models are still the clinical ones.
+30 MeV. Since the pair and positron models landed, ``"auto"`` also runs
+``"bethe-heitler"`` pair sharing and the ``"bhabha-in-flight"`` positron at these
+energies (``test_pair_positron_high_energy.py``); for an electron beam they act
+only on the pairs its bremsstrahlung makes. The numbers quoted in the docstrings
+below were measured before that, under the clinical pair and positron models; the
+gates pass unchanged, and the R50 shift re-measured under the new set is the same
+-2.83 +- 0.07 mm.
 
 Needs both ``PYRADMC_EPDL_PATH`` and ``PYRADMC_EEDL_PATH``; otherwise it skips.
 """
