@@ -20,10 +20,25 @@ Stated approximations, named here because this is where they are implemented:
   photoelectron (or the voxel); characteristic x-rays (< 1 keV in water) are not
   emitted. The photoelectron is emitted **forward** (maintainer-approved; the Sauter
   distribution is strongly forward at these energies anyway).
-- **Pair energy split sampled uniformly** between the electron and positron
-  (maintainer-approved), both emitted **forward**; the positron annihilates at rest
-  (see :mod:`pyradmc.transport.particles`). This is the ``"uniform-split"`` pair
-  model, the only one registered (:mod:`pyradmc.physics_options`).
+- **Pair production**, in one of two models (:mod:`pyradmc.physics_options`),
+  both on the same pair cross-section:
+
+  - ``"uniform-split"``: the kinetic energy is **split uniformly** between the
+    electron and the positron (maintainer-approved), both emitted **forward**.
+    What ``"auto"`` selects at clinical energies.
+  - ``"bethe-heitler"`` (see :mod:`pyradmc.physics.pair`): the split follows the
+    screened Bethe-Heitler sharing (uniform below 2 MeV; EGS4 effective-Z mixture
+    rule; Coulomb correction at and above 50 MeV only), and each lepton takes the
+    leading-order polar angle for its own energy. Approximate, and named here:
+    the two polar angles and the two azimuths are **independent** (the nucleus
+    takes the recoil, which is not modelled, so the pair conserves energy but
+    not the photon's momentum), and **triplet production is not distinguished**
+    (the source's pair channel is the sum; an event in the field of an electron
+    is sampled as one in the field of the nucleus).
+
+  A lepton born at or below ECUT deposits where the pair is made, and such a
+  positron annihilates there at rest
+  (see :mod:`pyradmc.transport.particles`), under either model.
 - **No Rayleigh by default** is a property of the *data*, not of this loop: the loop
   is channel-complete (AGENTS.md 2.10) and samples the coherent channel whenever the
   data source reports it nonzero (see :mod:`pyradmc.physics.rayleigh` for the angular
@@ -70,7 +85,11 @@ from pyradmc.physics.compton import (
     compton_electron_cos_theta,
     sample_compton_energy_ratio,
 )
-from pyradmc.physics.direction import rotate_direction
+from pyradmc.physics.direction import rotate_direction, rotate_direction_one_minus_cos
+from pyradmc.physics.pair import (
+    sample_pair_electron_energy,
+    sample_pair_one_minus_cos_theta,
+)
 from pyradmc.physics.path import sample_path_length
 from pyradmc.physics.roulette import roulette_weight
 from pyradmc.physics_options import CLINICAL_PHYSICS, ResolvedPhysics, require_implemented
@@ -98,12 +117,13 @@ _ENTRY_NUDGE_CM = 1.0e-9
 # cross-section exactly; the epsilon only forgives float evaluation-order noise.
 _MAJORANT_TOLERANCE = 1.0e-9
 
-PAIR_MODELS: tuple[str, ...] = ("uniform-split",)
+PAIR_MODELS: tuple[str, ...] = ("uniform-split", "bethe-heitler")
 """The pair models :func:`photon_steps` implements.
 
 Must equal the registered set (``PHYSICS_MODELS["pair"].models``; test-pinned). A
-new model is implemented at the pair branch of :func:`photon_steps`, where the
-energy split and the lepton directions are sampled, and named here.
+model is implemented at the pair branch of :func:`photon_steps`, the site marked
+"pair model dispatch", where the energy split and the lepton directions are
+sampled, and named here.
 """
 
 
@@ -160,6 +180,7 @@ def photon_steps(
     ``physics.pair``, at the pair branch; see :data:`PAIR_MODELS`.
     """
     require_implemented("pair", physics.pair, PAIR_MODELS, "the reference photon loop")
+    bethe_heitler_pair = physics.pair == "bethe-heitler"
     escaped = 0.0
     e = energy
     w = weight
@@ -261,16 +282,42 @@ def photon_steps(
         else:  # pair production
             kinetic = e - 2.0 * ELECTRON_MASS_MEV
             if transport_electrons:
-                # Pair model dispatch (physics.pair). "uniform-split": one uniform
-                # for the energy share, both leptons forward. A second model
-                # branches here on its own draws and directions.
-                fraction = uniform(rng_state)  # uniform split, stated approximation
+                # Pair model dispatch (physics.pair): the electron's share of the
+                # kinetic energy and the two directions. The positron takes the
+                # rest, so the pair carries exactly ``kinetic`` under either model.
+                if bethe_heitler_pair:
+                    # "bethe-heitler": screened Bethe-Heitler sharing for this
+                    # voxel's material; each transported lepton then draws its own
+                    # polar angle at its own energy and its own azimuth (the
+                    # leptons are independent: a stated approximation, see the
+                    # module docstring). A lepton that will not be transported
+                    # draws no direction.
+                    share_electron = sample_pair_electron_energy(
+                        e, *cross_sections.pair_screening(material), rng_state
+                    )
+                    share_positron = kinetic - share_electron
+                else:
+                    # "uniform-split": one uniform for the share, both forward.
+                    fraction = uniform(rng_state)  # uniform split, stated approximation
+                    share_electron = fraction * kinetic
+                    share_positron = (1.0 - fraction) * kinetic
                 for kind, share in (
-                    (ELECTRON, fraction * kinetic),
-                    (POSITRON, (1.0 - fraction) * kinetic),
+                    (ELECTRON, share_electron),
+                    (POSITRON, share_positron),
                 ):
                     if share > ecut:
-                        spawn((kind, share, w, x, y, z, ux, uy, uz))  # forward
+                        if bethe_heitler_pair:
+                            # The angle travels as 1 - cos(theta): a single-
+                            # precision cosine cannot hold an angle of order
+                            # 1/gamma, and the kernels mirror this statement.
+                            one_minus_cos = sample_pair_one_minus_cos_theta(share, rng_state)
+                            phi = 2.0 * math.pi * uniform(rng_state)
+                            lepton_dir = rotate_direction_one_minus_cos(
+                                ux, uy, uz, one_minus_cos, phi
+                            )
+                            spawn((kind, share, w, x, y, z, *lepton_dir))
+                        else:
+                            spawn((kind, share, w, x, y, z, ux, uy, uz))  # forward
                     else:
                         deposit(x, y, z, w * share, deposit_weight(share, material) * w * share)
                         if kind == POSITRON:

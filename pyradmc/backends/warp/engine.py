@@ -1277,6 +1277,7 @@ class WarpEngine:
             # not thread-safe: load the selected model's electron kernel module
             # here (the shared module for the default models, else its own).
             wp.load_module(kernels.electron_kernel_for(tab).module, device=device)
+            wp.load_module(kernels.photon_kernel_for(tab).module, device=device)
             # Shared counters use integer atomics and therefore need only one clear
             # for the whole concurrent run (done above). Each lane owns the state
             # whose writes are not commutative (queues, RNG slots, and its batch dose
@@ -2108,14 +2109,18 @@ class WarpEngine:
         # not thread-safe. Everything after takes its device explicitly, so the
         # threads share no warp state.
         if len(device_list) > 1 or concurrent_batches > 1:
-            # A non-default physics model has its electron kernel in a module of
-            # its own (kernels.make_electron_kernel); load that one too.
-            model_kernel = kernels.make_electron_kernel(
-                _kernel_physics_codes(resolved)["bremsstrahlung"]
+            # A non-default physics model has its kernel in a module of its own
+            # (kernels.make_photon_kernel, kernels.make_electron_kernel); load
+            # those too.
+            codes = _kernel_physics_codes(resolved)
+            model_kernels = (
+                kernels.make_photon_kernel(codes["pair"]),
+                kernels.make_electron_kernel(codes["bremsstrahlung"]),
             )
             for d in device_list:
                 wp.load_module(kernels, device=d)
-                wp.load_module(model_kernel.module, device=d)
+                for model_kernel in model_kernels:
+                    wp.load_module(model_kernel.module, device=d)
             if type(source) is SegmentedFanSource:
                 from pyradmc.backends.warp import segments
 
@@ -3868,15 +3873,17 @@ class WarpEngine:
         count readback is ordered on that stream, so lanes on the same device
         never observe each other's queues.
         """
-        # The electron kernel compiled for the models these tables were built
-        # under (one kernel per model, not a run-time branch; see
-        # kernels.make_electron_kernel). Resolved once per drain, on the host.
+        # The kernels compiled for the models these tables were built under (one
+        # kernel per model, not a run-time branch; see kernels.make_photon_kernel
+        # and kernels.make_electron_kernel). Resolved once per drain, on the host.
+        photon_kernel = kernels.photon_kernel_for(tab)
+        photon_model_tables = self._photon_model_tables_for(tab, device)
         electron_kernel = kernels.electron_kernel_for(tab)
         model_tables = self._model_tables_for(tab, device)
 
         def photon_round(dim, q_in, q_electron_out, q_photon_out, max_blocks=0):
             _launch(
-                kernels.photon_kernel,
+                photon_kernel,
                 dim,
                 [
                     gi,
@@ -3884,6 +3891,7 @@ class WarpEngine:
                     density,
                     material,
                     tab,
+                    photon_model_tables,
                     q_in,
                     q_electron_out,
                     q_photon_out,
@@ -4760,10 +4768,11 @@ class WarpEngine:
                 # held with it (strong reference: the identity cannot be
                 # recycled) and dropped when the struct is evicted.
                 model = self._electron_model_tables(state, bh_host, ecut, pcut, e_max, device)
+                photon_model = self._photon_model_tables(state, physics, device)
                 resident = {id(t) for t in state.tables.values()}
                 for stale in [k for k in state.model_tables if k not in resident]:
                     del state.model_tables[stale]
-                state.model_tables[id(tab)] = (tab, model)
+                state.model_tables[id(tab)] = (tab, model, photon_model)
             return tab
 
     def _build_tables(
@@ -4863,10 +4872,40 @@ class WarpEngine:
             setattr(model, name, arr)
         return model
 
-    def _model_tables_for(self, tab: Tables, device: str) -> kernels.ElectronModelTables | int:
-        """Return the electron kernel's ``model`` argument for a resident ``tab``.
+    def _photon_model_tables(
+        self, state: _DeviceState, physics: ResolvedPhysics, device
+    ) -> kernels.PhotonModelTables | int:
+        """Build the photon kernel's ``model`` argument for one resident ``Tables``.
 
-        The pair is made together by :meth:`_upload_tables`; a ``Tables`` struct
+        Called under the device lock, like :meth:`_electron_model_tables`. The
+        default pair model's kernel takes an ``int`` placeholder. The screened
+        Bethe-Heitler pair model needs three scalars per material
+        (:meth:`~pyradmc.data.interface.CrossSectionSource.pair_screening`), read
+        from the source here and uploaded once per device: they depend on
+        neither cutoff nor the energy grid.
+        """
+        if physics.pair != "bethe-heitler":
+            return 0
+        model = kernels.PhotonModelTables()
+        key = ("pair-bethe-heitler",)
+        screening = _lru_get(state.table_arrays, key)
+        if screening is None:
+            host = np.array(
+                [
+                    self.cross_sections.pair_screening(material)
+                    for material in range(self.cross_sections.n_materials)
+                ],
+                dtype=np.float32,
+            )
+            screening = wp.array(host, dtype=float, device=device)
+            _lru_put(state.table_arrays, key, screening, 2 * _TABLES_RESIDENT)
+        model.pair_screening = screening
+        return model
+
+    def _model_entry(self, tab: Tables, device: str) -> tuple:
+        """Return the ``(tab, electron model, photon model)`` record of a resident ``tab``.
+
+        The three are made together by :meth:`_upload_tables`; a ``Tables`` struct
         that did not come from there has no model data, and is refused rather
         than run with a placeholder under a model that reads it.
         """
@@ -4877,7 +4916,15 @@ class WarpEngine:
             raise RuntimeError(
                 "tables without model data: build them with _upload_tables on this device"
             )
-        return entry[1]
+        return entry
+
+    def _model_tables_for(self, tab: Tables, device: str) -> kernels.ElectronModelTables | int:
+        """Return the electron kernel's ``model`` argument for a resident ``tab``."""
+        return self._model_entry(tab, device)[1]
+
+    def _photon_model_tables_for(self, tab: Tables, device: str) -> kernels.PhotonModelTables | int:
+        """Return the photon kernel's ``model`` argument for a resident ``tab``."""
+        return self._model_entry(tab, device)[2]
 
     def _bethe_heitler_host(self, host, ecut: float, pcut: float, e_max: float):
         """Return the screened Bethe-Heitler tables for these tables, built once.

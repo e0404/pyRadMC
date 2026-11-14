@@ -96,12 +96,14 @@ PHYSICS_MODELS: Mapping[str, ProcessModels] = MappingProxyType(
             auto_clinical="thin-target",
             auto_high_energy="bethe-heitler",
         ),
-        # Kinetic energy shared uniformly, both leptons forward
-        # (pyradmc.transport.photon).
+        # "uniform-split": kinetic energy shared uniformly, both leptons forward
+        # (pyradmc.transport.photon). "bethe-heitler": screened Bethe-Heitler
+        # sharing, each lepton at its own leading-order angle
+        # (pyradmc.physics.pair). The pair cross-section is the same for both.
         "pair": ProcessModels(
-            models=("uniform-split",),
+            models=("uniform-split", "bethe-heitler"),
             auto_clinical="uniform-split",
-            auto_high_energy="uniform-split",
+            auto_high_energy="bethe-heitler",
         ),
         # Transported as an electron (Moller, no Bhabha), annihilating at rest
         # (pyradmc.transport.electron).
@@ -164,7 +166,17 @@ class PhysicsOptions:
     ``pair``
         ``"uniform-split"`` — the kinetic energy is shared uniformly between the
         electron and the positron, both emitted forward
-        (:mod:`pyradmc.transport.photon`).
+        (:mod:`pyradmc.transport.photon`). What ``"auto"`` selects at or below
+        the high-energy threshold.
+
+        ``"bethe-heitler"`` — the sharing follows the screened Bethe-Heitler
+        differential cross-section (uniform below 2 MeV, where that expression
+        fails), and each lepton leaves at its own angle of order ``1/gamma`` to
+        the photon, with independent azimuths (:mod:`pyradmc.physics.pair`;
+        approximations in :mod:`pyradmc.data.pair`). The pair cross-section is
+        the source's either way: the two differ in how a pair's energy and
+        direction are distributed, not in how often a pair is made. What
+        ``"auto"`` selects above the threshold.
     ``positron``
         ``"moller-at-rest"`` — a positron is transported as an electron (Moller
         scattering, no Bhabha distinction) and annihilates at rest

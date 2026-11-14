@@ -54,6 +54,7 @@ _KERNEL_MODULES: dict[str, tuple[str, ...] | None] = {
     "pyradmc.physics.gs": None,
     "pyradmc.physics.brems": None,
     "pyradmc.physics.brems_bh": None,
+    "pyradmc.physics.pair": None,
     "pyradmc.physics.rayleigh": None,
     "pyradmc.physics.roulette": None,
     "pyradmc.physics.lorentz": None,

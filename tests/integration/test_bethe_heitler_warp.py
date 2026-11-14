@@ -522,7 +522,7 @@ class TestAutoAboveTheThreshold:
         result = self._run(device, "auto", energy)
 
         assert result.provenance is not None
-        assert result.provenance.physics == RESOLVED
+        assert result.provenance.physics.bremsstrahlung == "bethe-heitler"
         assert "above the 30 MeV" in result.provenance.physics.reason
         balance = result.energy_deposited + result.energy_escaped
         assert balance == pytest.approx(result.energy_emitted, rel=1e-6)

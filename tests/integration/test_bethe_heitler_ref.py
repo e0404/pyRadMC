@@ -550,7 +550,7 @@ def test_auto_selects_the_model_above_the_threshold_end_to_end(
     assert "bremsstrahlung=bethe-heitler" in caplog.text
     assert "above the 30 MeV" in caplog.text
     assert result.provenance is not None
-    assert result.provenance.physics == BETHE_HEITLER
+    assert result.provenance.physics.bremsstrahlung == "bethe-heitler"
     assert result.dose.max() > 0.0
     balance = result.energy_deposited + result.energy_escaped
     assert balance == pytest.approx(result.energy_emitted, rel=1.0e-9)
