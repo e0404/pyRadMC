@@ -88,11 +88,13 @@ class ProcessModels:
 
 PHYSICS_MODELS: Mapping[str, ProcessModels] = MappingProxyType(
     {
-        # Thin-target 1/k spectrum, collinear emission (pyradmc.physics.brems).
+        # "thin-target": 1/k spectrum, collinear emission (pyradmc.physics.brems).
+        # "bethe-heitler": screened Bethe-Heitler spectrum, 1/gamma emission angle
+        # (pyradmc.physics.brems_bh). Both carry the same radiative stopping power.
         "bremsstrahlung": ProcessModels(
-            models=("thin-target",),
+            models=("thin-target", "bethe-heitler"),
             auto_clinical="thin-target",
-            auto_high_energy="thin-target",
+            auto_high_energy="bethe-heitler",
         ),
         # Kinetic energy shared uniformly, both leptons forward
         # (pyradmc.transport.photon).
@@ -115,11 +117,12 @@ PHYSICS_MODELS: Mapping[str, ProcessModels] = MappingProxyType(
 The keys are the field names of :class:`PhysicsOptions` and
 :class:`ResolvedPhysics`, in the same order.
 
-Each process has exactly one registered model today, so both sides of the threshold
-name it and every run resolves to the same physics. Adding a model appends its name
-to ``models``; making it the above-threshold default changes ``auto_high_energy``.
-Changing ``auto_clinical`` changes what every clinical run computes: that is
-replacing a default, and needs the dosimetric evidence AGENTS.md 2.8 asks for.
+Bremsstrahlung has two models, and ``"auto"`` takes the screened Bethe-Heitler one
+above the threshold; pair production and the positron have one each, so both sides
+of the threshold name it. Adding a model appends its name to ``models``; making it
+the above-threshold default changes ``auto_high_energy``. Changing ``auto_clinical``
+changes what every clinical run computes: that is replacing a default, and needs
+the dosimetric evidence AGENTS.md 2.8 asks for.
 """
 
 
@@ -148,7 +151,16 @@ class PhysicsOptions:
 
     ``bremsstrahlung``
         ``"thin-target"`` — a ``1/k`` photon spectrum, emitted along the electron's
-        direction (:mod:`pyradmc.physics.brems`).
+        direction (:mod:`pyradmc.physics.brems`). What ``"auto"`` selects at or
+        below the high-energy threshold.
+
+        ``"bethe-heitler"`` — the screened Bethe-Heitler photon spectrum with the
+        Coulomb correction, emitted at an angle of order ``1/gamma`` to the
+        electron (:mod:`pyradmc.physics.brems_bh`, which lists its
+        approximations). Normalized to the same radiative stopping power as
+        ``"thin-target"``: the two differ in how the radiated energy is shared
+        among photons, not in how much is radiated. What ``"auto"`` selects above
+        the threshold.
     ``pair``
         ``"uniform-split"`` — the kinetic energy is shared uniformly between the
         electron and the positron, both emitted forward

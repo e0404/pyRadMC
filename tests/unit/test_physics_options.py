@@ -3,10 +3,10 @@
 AGENTS.md 2.10: the physics a run uses is chosen per process through
 :class:`~pyradmc.physics_options.PhysicsOptions`; ``"auto"`` is resolved from the
 run configuration by one pure function reading one table. These tests pin that
-function and that table *structurally*: with a single registered model per process
-both sides of the high-energy threshold resolve to the same name today, so the
-threshold logic is exercised against a patched table that registers a second model
-— the edit the next model's branch will make for real.
+function and that table: the shipped rows (bremsstrahlung switches to the screened
+Bethe-Heitler model above the high-energy threshold; pair production and the
+positron have one model each), and the threshold logic for *every* process against
+a patched table that registers a second model per row.
 """
 
 from __future__ import annotations
@@ -38,11 +38,22 @@ class TestRegistrationTable:
     def test_the_three_processes_are_registered(self) -> None:
         assert tuple(PHYSICS_MODELS) == PROCESSES
 
-    def test_todays_models_are_the_only_ones(self) -> None:
-        """This is the selector-only state: one model per process, today's."""
-        assert PHYSICS_MODELS["bremsstrahlung"].models == ("thin-target",)
+    def test_the_registered_models(self) -> None:
+        """The shipped table: two bremsstrahlung models, one for the other processes."""
+        assert PHYSICS_MODELS["bremsstrahlung"].models == ("thin-target", "bethe-heitler")
         assert PHYSICS_MODELS["pair"].models == ("uniform-split",)
         assert PHYSICS_MODELS["positron"].models == ("moller-at-rest",)
+
+    def test_bremsstrahlung_switches_model_at_the_threshold(self) -> None:
+        """Accuracy-defining (AGENTS.md 2.10): what "auto" names on each side."""
+        row = PHYSICS_MODELS["bremsstrahlung"]
+        assert row.auto_clinical == "thin-target"
+        assert row.auto_high_energy == "bethe-heitler"
+
+    @pytest.mark.parametrize("process", ["pair", "positron"])
+    def test_single_model_rows_name_it_on_both_sides(self, process: str) -> None:
+        row = PHYSICS_MODELS[process]
+        assert row.auto_clinical == row.auto_high_energy == row.models[0]
 
     @pytest.mark.parametrize("process", PROCESSES)
     def test_auto_choices_are_registered_models(self, process: str) -> None:
@@ -81,6 +92,7 @@ class TestPhysicsOptions:
             bremsstrahlung="thin-target", pair="uniform-split", positron="moller-at-rest"
         )
         assert options.bremsstrahlung == "thin-target"
+        assert PhysicsOptions(bremsstrahlung="bethe-heitler").bremsstrahlung == "bethe-heitler"
 
     @pytest.mark.parametrize("process", PROCESSES)
     def test_unknown_model_lists_the_valid_ones(self, process: str) -> None:
@@ -120,12 +132,36 @@ class TestResolvedPhysics:
 
 
 class TestResolveToday:
-    """With one model per process, every configuration resolves to it."""
+    """What "auto" resolves to with the shipped table."""
 
-    @pytest.mark.parametrize("energy", [0.5, 6.0, 30.0, 30.000001, 200.0])
-    def test_auto_resolves_to_todays_models_at_any_energy(self, energy: float) -> None:
+    @pytest.mark.parametrize("energy", [0.5, 6.0, 20.0, 30.0])
+    def test_auto_is_the_clinical_set_up_to_the_threshold(self, energy: float) -> None:
         resolved = resolve_physics("auto", max_energy_mev=energy, primary_kinds=PHOTONS)
         assert resolved == CLINICAL_PHYSICS
+        assert resolved.bremsstrahlung == "thin-target"
+
+    @pytest.mark.parametrize("energy", [30.000001, 50.0, 200.0])
+    def test_auto_takes_bethe_heitler_above_the_threshold(self, energy: float) -> None:
+        """Strictly above: a source at exactly the threshold stays clinical."""
+        resolved = resolve_physics("auto", max_energy_mev=energy, primary_kinds=PHOTONS)
+        assert resolved == dataclasses.replace(CLINICAL_PHYSICS, bremsstrahlung="bethe-heitler")
+        assert "above the 30 MeV" in resolved.reason
+
+    @pytest.mark.parametrize("kinds", [{"photon"}, {"electron"}, {"photon", "positron"}])
+    def test_the_switch_does_not_depend_on_the_primary_kind(self, kinds: set[str]) -> None:
+        below = resolve_physics("auto", max_energy_mev=18.0, primary_kinds=kinds)
+        above = resolve_physics("auto", max_energy_mev=40.0, primary_kinds=kinds)
+        assert below.bremsstrahlung == "thin-target"
+        assert above.bremsstrahlung == "bethe-heitler"
+
+    @pytest.mark.parametrize("energy", [6.0, 40.0])
+    @pytest.mark.parametrize("model", ["thin-target", "bethe-heitler"])
+    def test_an_explicit_model_overrides_the_threshold(self, energy: float, model: str) -> None:
+        resolved = resolve_physics(
+            PhysicsOptions(bremsstrahlung=model), max_energy_mev=energy, primary_kinds=PHOTONS
+        )
+        assert resolved.bremsstrahlung == model
+        assert f"bremsstrahlung={model} set explicitly" in resolved.reason
 
     def test_default_argument_is_auto(self) -> None:
         assert resolve_physics(max_energy_mev=6.0, primary_kinds=PHOTONS) == resolve_physics(
