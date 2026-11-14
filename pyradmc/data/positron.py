@@ -5,7 +5,8 @@ The positron twins of :mod:`pyradmc.data.berger_seltzer`, parameterized by
 annihilation-in-flight cross-section. Host-side, compile-time functions: the
 :class:`~pyradmc.data.interface.CrossSectionSource` accessors
 (``positron_restricted_stopping_power``, ``bhabha_cross_section``,
-``annihilation_cross_section``) delegate here, and no kernel ever calls them.
+``annihilation_cross_section``) delegate here, and no kernel ever calls them:
+kernels see the flattened :class:`PositronTables` (:func:`build_positron_tables`).
 
 The Class II scheme for positrons mirrors the electron one:
 
@@ -51,6 +52,11 @@ electron in cm^2 (differential: cm^2/MeV), per unit mass in cm^2/g.
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+import numpy as np
+import numpy.typing as npt
 
 from pyradmc import ELECTRON_MASS_MEV
 from pyradmc.data.berger_seltzer import (
@@ -60,10 +66,15 @@ from pyradmc.data.berger_seltzer import (
 )
 from pyradmc.data.materials import MaterialData
 
+if TYPE_CHECKING:
+    from pyradmc.data.interface import CrossSectionSource
+
 __all__ = [
+    "PositronTables",
     "annihilation_cross_section_per_electron",
     "annihilation_dcs_per_electron",
     "bhabha_dcs_per_electron",
+    "build_positron_tables",
     "positron_restricted_collision_stopping",
     "restricted_bhabha_cross_section",
 ]
@@ -284,3 +295,137 @@ def annihilation_dcs_per_electron(energy: float, photon_energy: float) -> float:
         math.pi * CLASSICAL_ELECTRON_RADIUS_CM**2 * ELECTRON_MASS_MEV / energy * bracket / eps
     )
     return per_fraction / total
+
+
+@dataclass(frozen=True)
+class PositronTables:
+    """Kernel-side data of the ``"bhabha-in-flight"`` positron model; frozen.
+
+    Laid on the *same* electron log-energy grid as
+    :class:`pyradmc.data.tables.CrossSectionTables` built with the same
+    ``(ecut, e_max, n_points)``, so a kernel interpolates both with one metadata
+    pair. Kept apart from that class because the model is optional: a run that
+    does not select it neither builds nor uploads these.
+
+    Attributes
+    ----------
+    n_points, ecut, e_max
+        Grid size, the cutoff (MeV) the tables were built at, and the upper edge.
+    electron_log_e_min, electron_inv_dlog
+        Lookup metadata, identical to the cross-section tables' electron grid.
+    bhabha
+        Restricted Bhabha cross-section per unit mass at ``ecut``, in cm^2/g,
+        ``(n_materials, n_points)``; zero at and below ``ecut``.
+    annihilation
+        Two-photon annihilation-in-flight cross-section per unit mass, in cm^2/g,
+        ``(n_materials, n_points)``.
+    restricted_range
+        Positron restricted-collision range to ``ecut``, in g/cm^2, on the
+        electron grid, ``(n_materials, n_points)``.
+    energy_of_restricted_range
+        Its inverse on a shared log-range grid of the positron's own,
+        ``(n_materials, n_points)``, built exactly as the electron's
+        (:func:`pyradmc.data.tables.build_cross_section_tables`);
+        ``range_log_r_min``/``range_inv_dlog`` are its lookup metadata. The
+        kernel takes a substep's loss as the difference of two lookups in this
+        one table (AGENTS.md section 8).
+    """
+
+    n_points: int
+    ecut: float
+    e_max: float
+    electron_log_e_min: float
+    electron_inv_dlog: float
+    bhabha: npt.NDArray[np.float64]
+    annihilation: npt.NDArray[np.float64]
+    restricted_range: npt.NDArray[np.float64]
+    energy_of_restricted_range: npt.NDArray[np.float64]
+    range_log_r_min: float
+    range_inv_dlog: float
+
+
+def build_positron_tables(
+    source: CrossSectionSource,
+    ecut: float,
+    e_max: float,
+    n_points: int | None = None,
+) -> PositronTables:
+    """Flatten the positron queries of a source onto the electron grid.
+
+    Generic over sources, like
+    :func:`pyradmc.data.tables.build_cross_section_tables`: everything goes
+    through
+    :meth:`~pyradmc.data.interface.CrossSectionSource.bhabha_cross_section`,
+    :meth:`~pyradmc.data.interface.CrossSectionSource.annihilation_cross_section`,
+    :meth:`~pyradmc.data.interface.CrossSectionSource.positron_restricted_range`
+    and
+    :meth:`~pyradmc.data.interface.CrossSectionSource.positron_energy_after_mass_path`.
+
+    Parameters
+    ----------
+    source
+        The host-side data source to flatten.
+    ecut
+        Electron cutoff in MeV (accuracy-defining, AGENTS.md 2.8): the Bhabha
+        threshold and the foot of the range. The grid starts at ``ecut / 2``
+        like the electron tables.
+    e_max
+        Upper grid edge in MeV; refused above the source's declared energy
+        domain, like the cross-section tables.
+    n_points
+        Grid nodes; defaults to :data:`pyradmc.data.tables.TABLE_POINTS`.
+    """
+    from pyradmc.data.interface import require_energy_domain
+    from pyradmc.data.tables import _RANGE_R_MIN_FRACTION, TABLE_POINTS
+
+    require_energy_domain(source, e_max)
+    if n_points is None:
+        n_points = TABLE_POINTS
+    if ecut <= 0.0:
+        raise ValueError(f"non-positive cutoff: ecut={ecut}")
+    if e_max <= ecut:
+        raise ValueError(f"e_max={e_max} MeV does not cover the transport range")
+    if n_points < 2:
+        raise ValueError(f"need at least two grid nodes, got {n_points}")
+
+    n_materials = source.n_materials
+    # Must stay the electron grid of build_cross_section_tables (test-pinned).
+    energies = np.geomspace(0.5 * ecut, e_max, n_points)
+    bhabha = np.empty((n_materials, n_points))
+    annihilation = np.empty((n_materials, n_points))
+    restricted_range = np.empty((n_materials, n_points))
+    for material in range(n_materials):
+        for j, energy in enumerate(energies):
+            e = float(energy)
+            bhabha[material, j] = source.bhabha_cross_section(e, material, ecut)
+            annihilation[material, j] = source.annihilation_cross_section(e, material)
+            restricted_range[material, j] = source.positron_restricted_range(e, material, ecut)
+
+    # The inverse on one shared log-range grid, as for the electron
+    # (build_cross_section_tables): per-material values clamp into [ecut, e_max].
+    e_top = float(energies[-1])
+    r_top = max(float(restricted_range[m, -1]) for m in range(n_materials))
+    range_nodes = np.geomspace(r_top * _RANGE_R_MIN_FRACTION, r_top, n_points)
+    energy_of_restricted_range = np.empty((n_materials, n_points))
+    for material in range(n_materials):
+        r_top_mat = float(restricted_range[material, -1])
+        for j, r in enumerate(range_nodes):
+            energy_of_restricted_range[material, j] = source.positron_energy_after_mass_path(
+                e_top, material, ecut, r_top_mat - float(r)
+            )
+
+    log_min = float(np.log(energies[0]))
+    log_max = float(np.log(energies[-1]))
+    return PositronTables(
+        n_points=n_points,
+        ecut=ecut,
+        e_max=e_max,
+        electron_log_e_min=log_min,
+        electron_inv_dlog=(n_points - 1) / (log_max - log_min),
+        bhabha=bhabha,
+        annihilation=annihilation,
+        restricted_range=restricted_range,
+        energy_of_restricted_range=energy_of_restricted_range,
+        range_log_r_min=float(np.log(range_nodes[0])),
+        range_inv_dlog=(n_points - 1) / float(np.log(range_nodes[-1]) - np.log(range_nodes[0])),
+    )
