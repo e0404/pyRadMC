@@ -36,7 +36,9 @@ on :math:`\varepsilon_0 \le \varepsilon \le 1 - \varepsilon_0`, with
         \tfrac83 \ln Z + 8 f_c(Z), & k \ge 50\ \mathrm{MeV}
     \end{cases}
 
-and :math:`f_c` the Coulomb correction (:func:`coulomb_correction`).
+and :math:`f_c` the Coulomb correction
+(:func:`pyradmc.data.screening.coulomb_correction`; that module holds the constants
+this model shares with the bremsstrahlung one, re-exported here).
 
 References: Bethe & Heitler, Proc. R. Soc. A 146, 83 (1934),
 doi:10.1098/rspa.1934.0140; Butcher & Messel, Nucl. Phys. 20, 15 (1960),
@@ -84,6 +86,11 @@ from typing import NamedTuple
 
 from pyradmc import ELECTRON_MASS_MEV
 from pyradmc.data.materials import STANDARD_ATOMIC_WEIGHT
+from pyradmc.data.screening import (
+    FINE_STRUCTURE_CONSTANT,
+    coulomb_correction,
+    radiation_logarithms,
+)
 
 __all__ = [
     "FINE_STRUCTURE_CONSTANT",
@@ -98,9 +105,6 @@ __all__ = [
     "screening_phi2",
 ]
 
-FINE_STRUCTURE_CONSTANT: float = 7.297_352_5693e-3
-"""Fine-structure constant alpha (CODATA 2018)."""
-
 PAIR_LOW_ENERGY_LIMIT_MEV: float = 2.0
 """Photon energy below which the sharing is uniform; see the module docstring.
 
@@ -112,21 +116,6 @@ PAIR_COULOMB_ENERGY_MEV: float = 50.0
 
 _SCREENING_PREFACTOR: float = 136.0
 """The 136 of delta = 136 Z^(-1/3) eps0 / (eps (1 - eps)) (Butcher & Messel)."""
-
-# Tsai, Rev. Mod. Phys. 46, 815 (1974), doi:10.1103/RevModPhys.46.815, table B.2:
-# (L_rad, L'_rad) for the light elements where the Thomas-Fermi model fails.
-_TSAI_LIGHT_ELEMENTS: dict[int, tuple[float, float]] = {
-    1: (5.31, 6.144),
-    2: (4.79, 5.621),
-    3: (4.74, 5.805),
-    4: (4.71, 5.924),
-}
-
-_TSAI_PHI1_COMPLETE: float = 20.863
-"""``phi_1(0)`` of Tsai's Thomas-Fermi fit, his rounded ``4 ln 184.15``."""
-
-_TSAI_PSI1_COMPLETE: float = 28.340
-"""``psi_1(0)`` of Tsai's Thomas-Fermi fit, his rounded ``4 ln 1194``."""
 
 
 class PairScreening(NamedTuple):
@@ -149,53 +138,6 @@ class PairScreening(NamedTuple):
     screening_constant: float
     coulomb_low: float
     coulomb_high: float
-
-
-def coulomb_correction(z: float) -> float:
-    r"""Coulomb correction :math:`f_c(Z)` to the Born pair cross-section.
-
-    .. math::
-
-        f_c(Z) = a^2 \left[ \frac{1}{1+a^2} + 0.20206 - 0.0369\,a^2
-                 + 0.0083\,a^4 - 0.002\,a^6 \right], \qquad a = \alpha Z,
-
-    Davies, Bethe & Maximon (1954), doi:10.1103/PhysRev.93.788: their four-figure
-    approximation to :math:`a^2 \sum_{n\ge1} 1/[n(n^2+a^2)]`, valid to ``a = 2/3``
-    (the series itself is the unit-test oracle).
-    """
-    a2 = (FINE_STRUCTURE_CONSTANT * z) ** 2
-    return a2 * (1.0 / (1.0 + a2) + 0.20206 - 0.0369 * a2 + 0.0083 * a2 * a2 - 0.002 * a2**3)
-
-
-def radiation_logarithms(z: int) -> tuple[float, float]:
-    r"""Tsai's radiation logarithms ``(L_rad, L'_rad)`` for element ``z``.
-
-    :math:`L_{rad} = \ln(184.15\,Z^{-1/3})` and
-    :math:`L'_{rad} = \ln(1194\,Z^{-2/3})` for ``Z > 4``; tabulated values for
-    ``Z <= 4``. Tsai (1974), doi:10.1103/RevModPhys.46.815, table B.2. They are the
-    nuclear-field and electron-field screening logarithms of the complete-screening
-    limit; here they only weight the elements of a mixture.
-
-    Evaluated as :math:`\tfrac14\phi_1(0) - \tfrac13\ln Z` and
-    :math:`\tfrac14\psi_1(0) - \tfrac23\ln Z` with the constants of Tsai's
-    Thomas-Fermi fit as he rounds them, :math:`\phi_1(0) = 20.863` and
-    :math:`\psi_1(0) = 28.340` (his :math:`4\ln 184.15` and :math:`4\ln 1194`).
-    The rounding moves the logarithms by 6.4e-7 and 6.4e-5. This form is used
-    because the screened Bethe-Heitler bremsstrahlung model evaluates the same
-    two logarithms from those constants, and a medium must not be screened by
-    two slightly different numbers; the values are pinned literally in
-    ``tests/unit/test_pair_screening.py``.
-    """
-    if z < 1:
-        raise ValueError(f"atomic number must be positive, got {z}")
-    light = _TSAI_LIGHT_ELEMENTS.get(z)
-    if light is not None:
-        return light
-    log_z = math.log(z)
-    return (
-        0.25 * _TSAI_PHI1_COMPLETE - log_z / 3.0,
-        0.25 * _TSAI_PSI1_COMPLETE - 2.0 * log_z / 3.0,
-    )
 
 
 def pair_screening_parameters(composition: tuple[tuple[int, float], ...]) -> PairScreening:

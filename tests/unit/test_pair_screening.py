@@ -95,17 +95,18 @@ class TestRadiationLogarithms:
 
 
 class TestSharedWithBremsstrahlung:
-    """Literal pins of the helpers the bremsstrahlung model defines a second time.
+    """Literal pins of the helpers the bremsstrahlung model shares.
 
-    The screened Bethe-Heitler bremsstrahlung model (branch
-    ``brems-bethe-heitler-physics``, ``pyradmc/data/bethe_heitler.py``) carries its
-    own fine-structure constant, ``coulomb_correction`` and Tsai radiation
-    logarithms. They are the same physical quantities as the ones here and must be
-    the same *numbers*, or a medium would be screened differently for the photon
-    that makes a pair and the lepton that radiates. The values below were printed
-    from that module (commit 891b204) to full double precision; the tolerance is
-    libm rounding only. When the two branches are stacked, the duplicates collapse
-    into one helper and these literals say which numbers it must return.
+    The fine-structure constant, ``coulomb_correction`` and Tsai's radiation
+    logarithms are the same physical quantities for the screened Bethe-Heitler
+    bremsstrahlung model (``pyradmc/data/bethe_heitler.py``) and for pair
+    production, and must be the same *numbers*, or a medium would be screened
+    differently for the photon that makes a pair and the lepton that radiates.
+    Both modules now read one implementation, :mod:`pyradmc.data.screening`
+    (``tests/unit/test_screening_shared.py``). The literals below were printed
+    from the bremsstrahlung module while it still carried its own copy, to full
+    double precision; the tolerance is libm rounding only, and they say which
+    numbers the shared helper must return.
     """
 
     def test_fine_structure_constant(self) -> None:
