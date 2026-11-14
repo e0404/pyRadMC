@@ -85,7 +85,11 @@ def annihilate_at_rest(
 ) -> None:
     """Positron annihilation at rest: two back-to-back 511 keV photons, isotropic.
 
-    A stated approximation (annihilation in flight neglected; docs/decisions.md). Called
+    The end of every positron that reaches the transport cutoff, under either
+    positron model. Under ``"moller-at-rest"`` it is also the only way a positron
+    annihilates: annihilation in flight is neglected there, a stated approximation
+    (docs/decisions.md); ``"bhabha-in-flight"`` adds it as a discrete channel in
+    :func:`pyradmc.transport.electron.electron_steps`. Called
     only for positions inside the transport grid. If PCUT is at or above 511 keV the
     photons would die immediately, so the 1.022 MeV is deposited instead — weighted
     by ``scored_factor``, the caller's dose-to-water SPR at the deposit site (1.0

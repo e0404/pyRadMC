@@ -42,13 +42,16 @@ decides which physics a run near it computes.
 
 **Provisional.** 30 MeV is the ceiling the default tabulated data is compiled to,
 i.e. the edge of what the clinical models are validated over; it has not been
-derived from a dosimetric comparison of the two model sets. It takes effect for
-bremsstrahlung, the one process with a second model: above it ``"auto"`` selects
-``"bethe-heitler"``, at or below it ``"thin-target"``. The two differ measurably on
-*both* sides of it (the depth of half-maximum dose of an electron beam in water moves
-shallower by 1.0 mm at 20 MeV, ``examples/bremsstrahlung_model_demo.py``, and by
-2.8 mm at 40 MeV, ``tests/validation/test_bethe_heitler_high_energy.py``), so where
-the switch sits — and whether the clinical side should switch too — is a decision
+derived from a dosimetric comparison of the two model sets. It takes effect for all
+three processes: above it ``"auto"`` selects ``"bethe-heitler"`` bremsstrahlung,
+``"bethe-heitler"`` pair sharing and the ``"bhabha-in-flight"`` positron, at or below
+it ``"thin-target"``, ``"uniform-split"`` and ``"moller-at-rest"``. The models of each
+process differ measurably on *both* sides of it (bremsstrahlung: the depth of
+half-maximum dose of an electron beam in water moves shallower by 1.0 mm at 20 MeV,
+``examples/bremsstrahlung_model_demo.py``, and by 2.8 mm at 40 MeV,
+``tests/validation/test_bethe_heitler_high_energy.py``; pair and positron: percent-level
+changes of an 18 MeV photon depth dose, ``examples/pair_positron_model_demo.py``), so
+where the switch sits — and whether the clinical side should switch too — is a decision
 the maintainer has still to take with a benchmark, not a property of 30 MeV. No
 shipped analytic run reaches it: that source's energy domain ends at 20 MeV.
 """
@@ -63,8 +66,11 @@ shipped analytic run reaches it: that source's energy domain ends at 20 MeV.
 PHOTON_ROULETTE_MEV: float = 0.5
 """Photons below this energy play Russian roulette at their creation or scatter.
 
-Chosen just below the 511 keV annihilation line so annihilation photons are exempt
-and positron energy accounting stays analog.
+Chosen just below the 511 keV annihilation line so the photons of an annihilation
+at rest are exempt. Under the ``"bhabha-in-flight"`` positron model the softer
+photon of an annihilation *in flight* can be as low as 256 keV; it plays the game
+like any other photon born below the threshold, with the same signed ledger entry,
+so the energy books stay exact.
 """
 
 PHOTON_ROULETTE_SURVIVAL: float = 0.5

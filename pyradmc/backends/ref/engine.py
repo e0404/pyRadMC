@@ -327,7 +327,8 @@ class ReferenceEngine:
                 primary = source.emit(state)
                 kind_name = primary.kind if primary.kind is not None else primary_kind
                 kind = _KIND_TO_PARTICLE[kind_name]
-                # A positron primary will annihilate at rest, injecting 2*m_e c^2 of
+                # A positron primary will annihilate (at rest, or in flight under the
+                # "bhabha-in-flight" model) or leave the grid, injecting 2*m_e c^2 of
                 # photons from rest mass that its kinetic energy does not account for.
                 # (For a photon that pair-produces, that 1.022 MeV is already inside
                 # the photon's energy; a positron primary brings it as rest mass.)
