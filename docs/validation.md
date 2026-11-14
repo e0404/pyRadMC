@@ -20,6 +20,7 @@ than the passes.
 | Fano test without a field, same phantoms, shipped GS substep fraction 0.20 | Fano theorem | gap-to-wall within 1 % at a tenth of the wall density, within 3 % down to air density | 2026-10-20, chunk-invariant source: 2 cm gaps 0.997-1.000 at every contrast; 0.2 cm air gap 0.9706 / 0.9785 (0.5 / 1 MeV) |
 | Exit-side ERE vs field strength, 10 x 10 cm2 6 MV on 20 x 20 x 8 cm3 water (Raaijmakers et al. 2008, Geant4 + film-verified setup) | literature: excess 40 / 52 / 42 / 25 % of dmax at 0.2 / 0.75 / 1.5 / 3 T, 20 % shift 17.5 / 9.5 / 4 mm, build-up 15 / 12 / 7 mm | excess within 30 % at 0.75-3 T with the 0.75 > 1.5 > 3 T ordering; shift within 4 mm; 1.5 T build-up within 2 mm | excess 0.42 / 0.63 / 0.50 / 0.29 (ratios 0.79 and 0.58 vs 0.81 and 0.60); shift 15 / 7.5 / 2.5 mm; build-up 14.8 / 12.2 / 12.2 mm |
 | Fano test, 0.2 cm air gap, substep fraction 0.02, 0 and 1.5 T | Fano theorem | gap-to-wall within 1.5 %, field moves it < 1.5 % | 0.998 / 0.994 at 0 T, 0.992 / 0.996 at 1.5 T (0.5 / 1 MeV, +- 0.3 %) |
+| Backend vs backend under `bethe-heitler` bremsstrahlung (15 MeV electron pencil, water/lung column; 40 MeV on water compiled to 250 MeV) | reference oracle | chi-squared detection oracle, null measured from 1000 same-backend pairs | 1.28 times the null mean (empirical p = 0.20); wiring mutants at 8.5 and 79; 40 MeV: 40 replicates a side, p = 0.085 |
 | Electron return effect, water / light gap / water | qualitative sign (Raaijmakers 2005) | gain before the gap, loss behind it, lateral push toward the Lorentz force | passes |
 
 Variance reduction is unbiased **by construction** and test-pinned as such against a
@@ -122,6 +123,19 @@ in the last millimetre before an air face, where the electron return effect peak
 the ERE *magnitude* there carries a few per cent while the sign, the lateral push and the
 downstream re-build-up do not. The validation tier gates the field's own contribution at
 1 % separately from this field-free residual, and pins the convergence at 0.03.
+
+### The `bethe-heitler` bremsstrahlung model has no external benchmark
+
+What is established for the second bremsstrahlung model is internal: its sampling
+against its own cross-section, its radiated energy against the radiative stopping power
+(the same as `thin-target`), reference against Warp, energy books, and that the Fano
+gates pass with it forced. Its *shape* is the screened Born cross-section, which no test
+here compares with measured or EGSnrc/Geant4 depth doses. It changes a dose measurably
+(R50 of an electron beam −0.10 mm at 6 MeV, −1.03 mm at 20 MeV, −2.83 mm at 40 MeV), and
+which of the two models is closer to a benchmark is not known at any energy. `"auto"`
+selects it only above 30 MeV, where nothing else is benchmarked either: pair production
+and positrons still run their clinical models there, and the only data that reaches
+there is a tabulated compile to a higher `--e-max`.
 
 ### Absolute CPU variance-reduction cost is unmeasured
 

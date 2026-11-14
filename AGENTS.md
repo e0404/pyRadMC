@@ -359,6 +359,17 @@ These outlive the work that produced them. Each is a live constraint, not histor
 - **Positrons are Moller-approximated** (no Bhabha, annihilation at rest). If ever upgraded,
   Bhabha and annihilation in flight land together as the new default per section 2.10, with
   a test showing the dosimetric effect.
+- **A physics model is compiled into the Warp kernel, never branched on at run time,
+  and its tables never ride on `Tables`.** Measured on CUDA against the kernel before a
+  second bremsstrahlung model existed, thin-target path, interleaved (2026-11-14): a
+  run-time branch on the model, never taken, 1.07 to 1.08; three unread array fields on
+  `Tables`, 1.01 to 1.02; the same arrays as an unused struct argument of the electron
+  kernel, 1.00 against 0.99. So `kernels.make_electron_kernel` compiles one kernel per
+  model from one source (`wp.static`), the default kernel stays in the shared module and
+  takes an `int` where a model's kernel takes its `ElectronModelTables`, and any other
+  kernel gets a module of its own. A new model follows that mechanism, and the default
+  path's timing ratio is re-measured before it merges; the CPU does not resolve any of
+  these effects, so a CPU timing proves nothing here.
 - **Variance-reduction CPU cost is unmeasured under controlled conditions.** The development
   laptop's power state drifts by several times, so only interleaved-median *ratios* are
   trustworthy on it. GPU cost is neutral (a warp retires with its longest thread). Absolute

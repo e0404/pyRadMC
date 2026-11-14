@@ -1115,8 +1115,11 @@ class WarpEngine:
         :class:`~pyradmc.physics_options.PhysicsOptions`. It is resolved once,
         before any launch, from ``source.max_energy`` and the kinds the run
         starts; the choice is logged at INFO, recorded in the provenance, and
-        travels to the kernels as model codes on the ``Tables`` struct. A model
-        the kernels have no code for is refused here.
+        travels as model codes on the ``Tables`` struct, by which the engine
+        launches the electron kernel compiled for those models
+        (:func:`~pyradmc.backends.warp.kernels.make_electron_kernel`; the first
+        run under a non-default model compiles its kernel). A model the kernels
+        have no code for is refused here.
         """
         require_energy_domain(self.cross_sections, source.max_energy)
         if n_histories < 1:

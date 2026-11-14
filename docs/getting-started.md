@@ -88,18 +88,29 @@ result = engine.run(
 | Process | Registered models | What it does |
 |---|---|---|
 | `bremsstrahlung` | `thin-target` | 1/k photon spectrum, emitted along the electron's direction |
+| | `bethe-heitler` | screened Bethe-Heitler spectrum, emitted at an angle of order 1/γ; same radiative stopping power |
 | `pair` | `uniform-split` | kinetic energy shared uniformly, both leptons emitted forward |
 | `positron` | `moller-at-rest` | transported as an electron (no Bhabha), annihilation at rest |
 
-Each process has one registered model today, so every run resolves to the same physics
-and an explicit option changes nothing. The table is where further models appear;
-`"auto"` will select the high-energy ones for sources above
-`pyradmc.HIGH_ENERGY_PHYSICS_THRESHOLD_MEV` (30 MeV, provisional). A source that high
-also needs cross-section data whose declared energy domain reaches it
+`"auto"` takes the first model of each row for a source whose maximum energy is at or
+below `pyradmc.HIGH_ENERGY_PHYSICS_THRESHOLD_MEV` (30 MeV, provisional) and
+`bethe-heitler` bremsstrahlung above it, so clinical runs compute what they always did.
+A source that high also needs cross-section data whose declared energy domain reaches it
 (`CrossSectionSource.energy_max`: 20 MeV for the analytic source, the compiled grid top
-for a tabulated one); the engines refuse the run otherwise, whatever `physics` says. An
-unknown name raises a `ValueError` listing the valid ones. An explicit model is your responsibility: only
-what `"auto"` resolves to is what the validation tier certifies.
+for a tabulated one, see `--e-max` in [Cross-section data](data.md)); the engines refuse
+the run otherwise, whatever `physics` says. An unknown name raises a `ValueError`
+listing the valid ones. An explicit model is your responsibility: only what `"auto"`
+resolves to is what the validation tier certifies.
+
+The two bremsstrahlung models radiate the same energy and share it differently among
+photons: the screened spectrum emits about 1.5 times as many, softer. That is visible in
+a dose. Measured in water (`examples/bremsstrahlung_model_demo.py`), `bethe-heitler`
+against `thin-target` moves the depth of half-maximum dose of an electron beam shallower
+by 0.10 mm at 6 MeV and 1.0 mm at 20 MeV (2.8 mm at 40 MeV, on a tabulated compile),
+raises the bremsstrahlung tail at 20 MeV by about 6 percent of itself, and changes an
+18 MeV photon depth dose by 0.6 percent of its maximum. Choosing a model costs the
+default nothing: the GPU kernel is compiled per model, and a thin-target run is as fast
+as before (measured). The first run that selects `bethe-heitler` compiles its kernel.
 
 ## Running on the GPU
 
@@ -296,7 +307,8 @@ figure beside itself that a physicist can sanity-check at a glance. They need th
 `examples` extra (matplotlib) and each runs in well under a minute:
 `reference_engine_demo.py` (scatter buildup against the primary-only exponential),
 `electron_transport_demo.py` (buildup vs the KERMA approximation, R50 tracking the CSDA
-range), `warp_backend_demo.py` (one physics source compiled three ways),
+range), `bremsstrahlung_model_demo.py` (what the bremsstrahlung model changes in a depth
+dose), `warp_backend_demo.py` (one physics source compiled three ways),
 `dij_demo.py` (a beamlet column, the fluence-sum identity, a wedge plan as
 `Dij @ weights`), `device_dij_demo.py` (the Dij kept on the GPU and a plan dose formed
 there, against the host route), `dij_plan_sigma_demo.py` (plan-dose sigma from the column variances:

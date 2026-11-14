@@ -294,8 +294,8 @@ class Tables:
     already receive. A model's own *tables* do not ride here: three more array
     fields on this struct cost every kernel that takes it 2.0 to 2.7 % on CUDA,
     measured with nothing reading them (it is passed by value into the helper
-    functions). They travel in :class:`ElectronModelTables`, which only the
-    electron kernel takes.
+    functions). They travel in :class:`ElectronModelTables`, which only an
+    electron kernel compiled for a non-default model takes.
     """
 
     mu_compton: wp.array2d(dtype=float)

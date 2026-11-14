@@ -107,8 +107,127 @@ every registered model is validated reference-against-backend on its own, and an
 explicit override is the user's responsibility. The selector shipped first with one
 model per process (`thin-target`, `uniform-split`, `moller-at-rest`), so introducing it
 moved no result: fixed-seed dose is byte-identical before and after on the reference
-backend, Warp CPU and Warp CUDA. The 30 MeV threshold above which `"auto"` will select
+backend, Warp CPU and Warp CUDA. The 30 MeV threshold above which `"auto"` selects
 high-energy models is the default table ceiling and is provisional.
+
+**Screened Bethe-Heitler bremsstrahlung is the second model, and `"auto"` takes it above
+30 MeV.** `bethe-heitler` samples the photon energy from the screened Bethe-Heitler
+cross-section (Tsai's Thomas-Fermi fits, Davies-Bethe-Maximon Coulomb correction) and the
+emission angle from a Lorentz-boosted isotropic law; photons above PCUT are a discrete
+channel distance-sampled with Møller, and only the radiative stopping power below PCUT
+stays continuous. It is normalized to the radiative stopping power the data layer already
+carries, so it radiates what `thin-target` radiates. Un-normalized, the model needs a
+rescaling of 0.984 to 1.006 against every ESTAR node from 30 MeV to 1 GeV in all seven
+registry media, and it singled out the water 20 MeV anchor before that was corrected
+(0.979 with the transcription error, 0.998 after). Its named approximations:
+
+- no Landau-Pomeranchuk-Migdal and no dielectric suppression (they matter well above
+  1 GeV in condensed media);
+- the electron is not deflected by the emission;
+- the emission angle does not depend on the photon energy or on Z;
+- the Coulomb correction, a high-energy result, is applied at every energy — the total
+  is unaffected, being imposed by the normalization, but the shape below 1-2 MeV is
+  the Born shape, not a partial-wave one;
+- one averaged set of screening parameters per compound instead of a sum over its
+  elements (within 0.17 percent of the element sum for every registry material).
+
+In a long exterior-air step the model's rates are the start voxel's, like every other
+rate of that step, and its photon leaves from the end of the step. Compared with the
+ordinary stepping of the same half-turn (15 MeV, 0.35 T, water at 0.009 g/cm³, 6000
+electrons a side): photons per electron 0.0775 ± 0.0036 against 0.0702 ± 0.0035, radiated
+energy 0.127 ± 0.010 against 0.123 ± 0.011 MeV, local deposit 0.6971 ± 0.0019 against
+0.6998 ± 0.0024 MeV. A negative-weight history mirrors its positive twin bit for bit on
+the reference engine and to the fixed-point quantum on Warp.
+
+**The two bremsstrahlung models give measurably different doses at every energy.** Same
+radiated energy, different straggling: the 1/k spectrum puts half the radiated energy
+into photons above half the electron energy, the screened shape less, so under
+`bethe-heitler` fewer electrons stop early and fewer run long. Measured in water with
+8 x 10^6 histories per model (analytic data), the depth of half-maximum dose of an
+electron beam moves shallower by 0.10 ± 0.01 mm at 6 MeV and 1.03 ± 0.01 mm at 20 MeV,
+with up to 0.8 and 2.7 percent of the maximum dose in the falloff; the bremsstrahlung
+tail rises 3 and 6 percent; an 18 MeV photon depth dose changes by 0.61 ± 0.06 percent
+of the maximum. On water compiled to 250 MeV from EPICS 2023 the shift at 40 MeV is
+2.83 ± 0.07 mm. `"auto"` keeps `thin-target` up to 30 MeV, so no clinical result moved.
+Which model is right below 30 MeV is **not decided by this measurement** — it needs an
+external benchmark — and neither is the threshold.
+
+**One compiled electron kernel per bremsstrahlung model, because a run-time branch costs
+the GPU 7 to 8 percent on the path that never takes it.** Develop b858f86 against the
+branch, thin-target, interleaved, eight rounds of best-of-five, per-round ratios for
+12 MeV electrons, 6 MeV photons and 18 MeV photons on CUDA (RTX 4070, 2026-11-14):
+
+| Kernel | electrons | 6 MeV photons | 18 MeV photons |
+|---|---|---|---|
+| selector only (three ints on `Tables`) | 0.990 | 0.987 | 0.989 |
+| run-time branch on `tab.brems_model` | 1.067 | 1.072 | 1.081 |
+| per-model kernel, model arrays on `Tables` | 1.011 | — | 1.016 |
+| per-model kernel, arrays in a struct argument | 0.996 | 1.001 | 1.000 |
+| per-model kernel, `int` placeholder (shipped) | 0.990 | 0.989 | 0.989 |
+
+Spreads are 0.001 to 0.004. Results are byte-identical in every row. The cost of the
+branch is not executed work: the generated code of the per-model thin-target kernel
+differs from develop's by one float copy and an unused `int` argument. Two smaller costs turned up on the way and set
+the shape of the mechanism. Three more array fields on `Tables` cost every kernel 2 to
+2.7 percent with nothing reading them, because that struct is copied into the helper
+calls; and the same arrays as an unused struct argument of the electron kernel still
+cost 1 percent. So the model is a `wp.static` constant of a kernel factory
+(`kernels.make_electron_kernel`), the default kernel stays in the shared module and
+takes an `int` where a model's kernel takes its `ElectronModelTables`, and a
+non-default kernel is compiled in a module of its own on first use. The CPU resolves
+none of this (1.00, spread 0.01 to 0.04). A further model, for pair production or the
+positron, is one more argument of the factory (and a `photon_kernel` factory of the
+same shape); a model's tables never go on `Tables`.
+
+**The batched chi-squared is anticonservative for electron beams, on a lattice and on a
+column.** Measured with both sides the same backend: on a 10 x 10 voxel lattice 6 of
+100 pairs fall below a nominal p of 0.01 for a 15 MeV broad beam and 16 of 100 for a
+pencil beam, because voxels along a column share the number of primaries that entered
+it. A pencil beam binned in depth only removes that, and the statistic then has the
+right mean (1.008 of its null mean over 1000 pairs), but with 15 bins its upper tail is
+heavier than the oracle's normal approximation: 5.1 percent of pairs below a nominal
+0.01, 9.6 percent below 0.05, 99 percent quantile 2.45 times the null mean. (An earlier
+measurement on a stale base, 1 of 100, was a small sample.) The Bethe-Heitler
+cross-backend tests use the column and read their verdict against that measured null:
+1.28 at 15 MeV (empirical p = 0.20), with the two wiring mutants at 8.5 and 79. At
+40 MeV on tabulated data a single pair gave 1.47 (nominal p = 0.034); 40 replicates a
+side resolved no difference (chi-squared 44.7 on 33 bins, p = 0.085; R50 16.371 ± 0.014
+against 16.354 ± 0.009 cm).
+
+**The Fano gates pass under either bremsstrahlung model and do not tell them apart.**
+All 22 gates of `tests/validation/test_fano_magnetic.py` and
+`test_fano_exterior_air.py` were run unmodified with `bethe-heitler` forced for every
+run (CUDA, 2026-11-14, by replacing what `"auto"` resolves to from outside the test
+files); all pass, as they do under `thin-target`. Gap-to-wall dose ratios, thin-target
+then bethe-heitler, at 0.5 / 1 MeV: 2 cm gap at a tenth of the wall density, 0 T,
+0.9999 / 0.9981 then 1.0008 / 0.9973; 0.2 cm air gap, 0 T, 0.9703 / 0.9777 then
+0.9795 / 0.9747, and at 1.5 T 0.9960 / 0.9951 then 0.9999 / 0.9901; 2 cm air gap, 0 T,
+0.9993 / 0.9971 then 0.9946 / 0.9965, and at 1.5 T 0.9918 / 0.9918 then 0.9894 /
+0.9912; exterior-air cavity on the long-step path at 1.5 T, 0.9865 / 0.9895 then
+0.9899 / 0.9894. Over the 58 reported ratios the model moves a ratio by at most 0.9 %
+and by 0.30 % in the root mean square, 1.8 times what the quoted sigmas allow — but the
+quoted sigmas understate the scatter: five further seeds of the case that moved most
+significantly (exterior cavity, 1 MeV, 1.5 T, current stepping; 0.9912 then 0.9864 at
+the gate's seed) give 0.9869 ± 0.0006 under thin-target and 0.9884 ± 0.0004 under
+bethe-heitler, a seed-to-seed spread of 0.0014 against a quoted 0.0009 and a model
+difference of +0.15 ± 0.07 %. The nearest approach to a gate is the field's movement of
+the 2 cm air gap on the long-step path at 0.5 MeV and 1.5 T: −0.96 % under
+bethe-heitler against a 1 % gate (−0.76 % under thin-target). The fast-tier air-gap
+check, the signed-weight mirrors and the field and exterior-air transport tests also
+pass with the model forced (118 tests).
+
+**Above 30 MeV the data decides whether a run exists.** The analytic source declares a
+20 MeV domain and both engines refuse a 40, 80 or 200 MeV source on it before any
+transport, whatever the model. A source with the interface's unbounded default domain
+(a test instrument) runs at 40 MeV and is refused at 80 and 200 MeV by the
+restricted-range lookup, whose reference grid ends at 64 MeV. A source that *declares*
+a wider domain gets its range, table and bremsstrahlung grids extended to it: a
+tabulated water compile to 250 MeV (six seconds from EPICS 2023) runs at all three
+energies on the reference backend, Warp CPU and Warp CUDA with closed books, and its
+entrance bin holds 1.11 times the restricted collision loss across it. The 16 MeV an
+80 MeV electron used to leave at the surface, with the range map clamped at 64 MeV, is
+gone. What remains unvalidated above 30 MeV is everything an external benchmark would
+check: pair production and positrons still run their clinical models there.
 
 ## Cross-section data
 
