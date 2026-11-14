@@ -42,6 +42,7 @@ from pyradmc.physics_options import (
     PhysicsOptions,
     ResolvedPhysics,
     resolve_physics,
+    run_energy_ceiling,
     run_primary_kinds,
 )
 from pyradmc.progress import ProgressCallback, ProgressEmitter
@@ -301,10 +302,12 @@ class ReferenceEngine:
         deposit_weight = _deposit_weight_for(
             scoring_mode, self.cross_sections, ecut, transport_electrons
         )
-        resolved = resolve_physics(
-            physics,
-            max_energy_mev=source.max_energy,
-            primary_kinds=run_primary_kinds(source, primary_kind),
+        kinds = run_primary_kinds(source, primary_kind)
+        resolved = resolve_physics(physics, max_energy_mev=source.max_energy, primary_kinds=kinds)
+        # A source positron annihilating in flight can make a photon harder than
+        # the source's maximum energy; the data must reach that too.
+        require_energy_domain(
+            self.cross_sections, run_energy_ceiling(source.max_energy, kinds, resolved)
         )
         logger.info("physics models: %s (%s)", resolved.summary(), resolved.reason)
 

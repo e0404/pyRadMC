@@ -38,7 +38,7 @@ from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
 
-from pyradmc import HIGH_ENERGY_PHYSICS_THRESHOLD_MEV
+from pyradmc import ELECTRON_MASS_MEV, HIGH_ENERGY_PHYSICS_THRESHOLD_MEV
 
 __all__ = [
     "AUTO",
@@ -50,6 +50,7 @@ __all__ = [
     "ResolvedPhysics",
     "require_implemented",
     "resolve_physics",
+    "run_energy_ceiling",
     "run_primary_kinds",
 ]
 
@@ -379,3 +380,37 @@ def run_primary_kinds(source: object, fallback: str) -> frozenset[str]:
     """
     declared: Collection[str] | None = getattr(source, "particle_kinds", None)
     return frozenset({fallback}) if declared is None else frozenset(declared)
+
+
+def run_energy_ceiling(
+    max_energy_mev: float, primary_kinds: Collection[str], physics: ResolvedPhysics
+) -> float:
+    r"""Return the highest energy any particle of a run can have, in MeV.
+
+    What the engines size their tables to and check the cross-section source's
+    energy domain against. It is the source's maximum energy, because a secondary
+    never has more energy than its parent — with one exception. A positron
+    annihilating **in flight** (``positron="bhabha-in-flight"``) hands its
+    kinetic energy :math:`T` *and* both rest masses to two photons, and the
+    harder one can carry up to
+
+    .. math::
+
+        k_{max}(T) = \tfrac12 (T + 2 m_e c^2) + \tfrac12 \sqrt{T (T + 2 m_e c^2)},
+
+    which lies between :math:`T + m_e c^2` and :math:`T + \tfrac32 m_e c^2`. A
+    positron made by a photon has at least :math:`2 m_e c^2` less kinetic energy
+    than that photon, so its annihilation photons stay below the photon's energy;
+    only a positron *the source starts* can exceed the source's maximum. So the
+    ceiling is :math:`k_{max}` of the source's maximum energy when the run starts
+    positrons under that model, and exactly ``max_energy_mev`` otherwise (the same
+    float: no clinical run's tables move).
+
+    Annihilation *at rest* emits 511 keV photons whatever the model, which a
+    positron source softer than that also exceeds; that is the behaviour of the
+    engines before this function and is left as it is.
+    """
+    if physics.positron == "bhabha-in-flight" and "positron" in primary_kinds:
+        total = max_energy_mev + 2.0 * ELECTRON_MASS_MEV
+        return 0.5 * total + 0.5 * math.sqrt(max_energy_mev * total)
+    return max_energy_mev

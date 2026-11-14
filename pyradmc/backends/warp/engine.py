@@ -83,6 +83,7 @@ from pyradmc.physics_options import (
     PhysicsOptions,
     ResolvedPhysics,
     resolve_physics,
+    run_energy_ceiling,
     run_primary_kinds,
 )
 from pyradmc.progress import ProgressCallback, ProgressEmitter
@@ -1166,19 +1167,20 @@ class WarpEngine:
         deposit_resolution = 0.0 if deposit_resolution_cm is None else deposit_resolution_cm
         # ``primary_kind`` decides the kind only for the in-kernel mono beams; every
         # other route takes it per record, where an unset kind is a photon.
-        resolved = resolve_physics(
-            physics,
-            max_energy_mev=source.max_energy,
-            primary_kinds=run_primary_kinds(source, primary_kind if in_kernel else "photon"),
-        )
+        kinds = run_primary_kinds(source, primary_kind if in_kernel else "photon")
+        resolved = resolve_physics(physics, max_energy_mev=source.max_energy, primary_kinds=kinds)
         _kernel_physics_codes(resolved)
+        # A source positron annihilating in flight can make a photon harder than
+        # the source's maximum energy: the tables are built to that ceiling and
+        # the data's domain is checked there. The source's own energy otherwise.
+        table_energy = run_energy_ceiling(source.max_energy, kinds, resolved)
+        require_energy_domain(self.cross_sections, table_energy)
         logger.info("physics models: %s (%s)", resolved.summary(), resolved.reason)
 
         device = self.device
         gi, density, material = self._upload_grid(device)
         scoring = self._scoring_geometry(scoring_grid)
         si, voxel_mass = self._upload_scoring(scoring, device)
-        table_energy = source.max_energy
         tab = self._upload_tables(
             table_energy, pcut, ecut, device, with_gs=msc_model_gs == 1, physics=resolved
         )
