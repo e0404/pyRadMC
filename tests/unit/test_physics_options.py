@@ -39,10 +39,10 @@ class TestRegistrationTable:
         assert tuple(PHYSICS_MODELS) == PROCESSES
 
     def test_the_registered_models(self) -> None:
-        """The shipped table: two bremsstrahlung and pair models, one positron model."""
+        """The shipped table: two models per process."""
         assert PHYSICS_MODELS["bremsstrahlung"].models == ("thin-target", "bethe-heitler")
         assert PHYSICS_MODELS["pair"].models == ("uniform-split", "bethe-heitler")
-        assert PHYSICS_MODELS["positron"].models == ("moller-at-rest",)
+        assert PHYSICS_MODELS["positron"].models == ("moller-at-rest", "bhabha-in-flight")
 
     def test_bremsstrahlung_switches_model_at_the_threshold(self) -> None:
         """Accuracy-defining (AGENTS.md 2.10): what "auto" names on each side."""
@@ -56,10 +56,20 @@ class TestRegistrationTable:
         assert row.auto_clinical == "uniform-split"
         assert row.auto_high_energy == "bethe-heitler"
 
-    @pytest.mark.parametrize("process", ["positron"])
-    def test_single_model_rows_name_it_on_both_sides(self, process: str) -> None:
-        row = PHYSICS_MODELS[process]
-        assert row.auto_clinical == row.auto_high_energy == row.models[0]
+    def test_positron_switches_model_at_the_threshold(self) -> None:
+        """Accuracy-defining: the clinical side stays the electron-like positron."""
+        row = PHYSICS_MODELS["positron"]
+        assert row.auto_clinical == "moller-at-rest"
+        assert row.auto_high_energy == "bhabha-in-flight"
+
+    def test_no_clinical_choice_has_moved(self) -> None:
+        """What "auto" computes at clinical energies is what it always computed."""
+        assert (
+            ResolvedPhysics(
+                bremsstrahlung="thin-target", pair="uniform-split", positron="moller-at-rest"
+            )
+            == CLINICAL_PHYSICS
+        )
 
     @pytest.mark.parametrize("process", PROCESSES)
     def test_auto_choices_are_registered_models(self, process: str) -> None:
@@ -151,7 +161,7 @@ class TestResolveToday:
         """Strictly above: a source at exactly the threshold stays clinical."""
         resolved = resolve_physics("auto", max_energy_mev=energy, primary_kinds=PHOTONS)
         assert resolved == ResolvedPhysics(
-            bremsstrahlung="bethe-heitler", pair="bethe-heitler", positron="moller-at-rest"
+            bremsstrahlung="bethe-heitler", pair="bethe-heitler", positron="bhabha-in-flight"
         )
         assert "above the 30 MeV" in resolved.reason
 
@@ -162,6 +172,7 @@ class TestResolveToday:
         assert below == CLINICAL_PHYSICS
         assert above.bremsstrahlung == "bethe-heitler"
         assert above.pair == "bethe-heitler"
+        assert above.positron == "bhabha-in-flight"
 
     @pytest.mark.parametrize("energy", [6.0, 40.0])
     @pytest.mark.parametrize("model", ["thin-target", "bethe-heitler"])

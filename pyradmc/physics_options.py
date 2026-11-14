@@ -105,12 +105,16 @@ PHYSICS_MODELS: Mapping[str, ProcessModels] = MappingProxyType(
             auto_clinical="uniform-split",
             auto_high_energy="bethe-heitler",
         ),
-        # Transported as an electron (Moller, no Bhabha), annihilating at rest
-        # (pyradmc.transport.electron).
+        # "moller-at-rest": transported as an electron (Moller, no Bhabha),
+        # annihilating at rest. "bhabha-in-flight": the positron's own collision
+        # stopping power and range, Bhabha delta rays, and two-photon annihilation
+        # in flight as a competing channel (pyradmc.physics.bhabha,
+        # pyradmc.physics.annihilation); one option, because the discrete
+        # cross-sections are only consistent together (AGENTS.md 2.10).
         "positron": ProcessModels(
-            models=("moller-at-rest",),
+            models=("moller-at-rest", "bhabha-in-flight"),
             auto_clinical="moller-at-rest",
-            auto_high_energy="moller-at-rest",
+            auto_high_energy="bhabha-in-flight",
         ),
     }
 )
@@ -119,10 +123,10 @@ PHYSICS_MODELS: Mapping[str, ProcessModels] = MappingProxyType(
 The keys are the field names of :class:`PhysicsOptions` and
 :class:`ResolvedPhysics`, in the same order.
 
-Bremsstrahlung has two models, and ``"auto"`` takes the screened Bethe-Heitler one
-above the threshold; pair production and the positron have one each, so both sides
-of the threshold name it. Adding a model appends its name to ``models``; making it
-the above-threshold default changes ``auto_high_energy``. Changing ``auto_clinical``
+Every process has two models: the one every clinical run has always computed, which
+``"auto"`` keeps at or below the threshold, and a more detailed one that ``"auto"``
+takes above it. Adding a model appends its name to ``models``; making it the
+above-threshold default changes ``auto_high_energy``. Changing ``auto_clinical``
 changes what every clinical run computes: that is replacing a default, and needs
 the dosimetric evidence AGENTS.md 2.8 asks for.
 """
@@ -180,7 +184,17 @@ class PhysicsOptions:
     ``positron``
         ``"moller-at-rest"`` — a positron is transported as an electron (Moller
         scattering, no Bhabha distinction) and annihilates at rest
-        (:mod:`pyradmc.transport.electron`).
+        (:mod:`pyradmc.transport.electron`). What ``"auto"`` selects at or below
+        the high-energy threshold.
+
+        ``"bhabha-in-flight"`` — a positron loses energy by its own restricted
+        collision stopping power, throws Bhabha delta rays (up to its whole
+        kinetic energy) and may annihilate in flight into two photons that share
+        its kinetic energy and both rest masses; one that reaches the cutoff
+        still annihilates at rest (:mod:`pyradmc.physics.bhabha`,
+        :mod:`pyradmc.physics.annihilation`; what remains the electron's is
+        listed in :mod:`pyradmc.transport.electron`). What ``"auto"`` selects
+        above the threshold.
 
     An unknown name raises ``ValueError`` listing the valid ones.
     """
