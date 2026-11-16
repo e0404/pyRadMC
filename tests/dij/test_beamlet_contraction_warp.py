@@ -1,12 +1,14 @@
 """Beamlet contraction on Warp: the Dij group machinery with a contraction fold.
 
 ``WarpEngine.run_beamlet_contraction`` transports exactly the histories
-``run_dij`` transports (same routes, groups and mapping) and replaces only the
-per-batch fold: each batch's quanta map is contracted with the voxel weights per
-(column, chunk) in a fixed order, so no dense dose map, truncation or compaction
-exists. Pinned against its own untruncated Dij contracted afterwards (same
-target, float64 rounding apart), against itself run to run (bitwise), across
-batch lanes (bitwise), and statistically against the reference contraction.
+``run_dij`` transports (same routes and mapping) and replaces only the scoring: by
+default each deposit is weighted and folded into its beamlet's int64 accumulator
+(the deposit fold, pinned against the dense fold in
+``test_contraction_deposit_fold_warp``), so no dense dose map, truncation or
+compaction exists. Pinned against its own untruncated Dij contracted afterwards
+(same target, float64 rounding and the deposit fold's weighted quantum apart, both
+orders below the tolerance), against itself run to run (bitwise), across batch
+lanes (bitwise), and statistically against the reference contraction.
 """
 
 from __future__ import annotations
@@ -15,11 +17,13 @@ import numpy as np
 import pytest
 
 from pyradmc.backends.ref.engine import ReferenceEngine
-from pyradmc.data.analytic import AnalyticCrossSections
-from pyradmc.geometry.grid import VoxelGrid
-from pyradmc.geometry.source import BeamletGridSource
 from pyradmc.rng.host import HostRNG
 from tests.conftest import SEED, assert_chi2_consistent_batched
+from tests.contraction_fixtures import engine as _engine
+from tests.contraction_fixtures import phantom_grid as _grid
+from tests.contraction_fixtures import phantom_xs as _xs
+from tests.contraction_fixtures import source as _source
+from tests.contraction_fixtures import weights as _weights
 
 wp = pytest.importorskip("warp", reason="warp-lang optional dependency not installed")
 
@@ -27,32 +31,6 @@ pytestmark = pytest.mark.warp
 
 DEVICES = ["cpu", pytest.param("cuda:0", marks=pytest.mark.gpu)]
 KWARGS = dict(n_batches=8, transport_electrons=False)
-
-
-def _grid() -> VoxelGrid:
-    return VoxelGrid.uniform_water(shape=(10, 10, 8), spacing=(1.0, 1.0, 1.0))
-
-
-def _xs(grid: VoxelGrid) -> AnalyticCrossSections:
-    return AnalyticCrossSections(geometry_densities=grid.max_density_by_material())
-
-
-def _source() -> BeamletGridSource:
-    return BeamletGridSource(2.0, -1.0, (2.0, 8.0), (2.0, 8.0), 3, 3)
-
-
-def _weights(shape: tuple[int, int, int]) -> np.ndarray:
-    x, y, z = np.meshgrid(*(np.arange(n) for n in shape), indexing="ij")
-    return np.sin(0.7 * x) + 0.3 * y - 0.1 * z
-
-
-def _engine(device: str):
-    if device.startswith("cuda") and not wp.is_cuda_available():
-        pytest.skip("no CUDA device")
-    from pyradmc.backends.warp.engine import WarpEngine
-
-    grid = _grid()
-    return WarpEngine(grid=grid, cross_sections=_xs(grid), device=device)
 
 
 @pytest.mark.parametrize("device", DEVICES)
