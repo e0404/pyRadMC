@@ -17,6 +17,38 @@ without a field, so results are not byte-identical to the previous release.
 
 ### Added
 
+- **Bethe-Heitler pair sharing and a Bhabha / in-flight-annihilation positron:
+  `PhysicsOptions(pair="bethe-heitler", positron="bhabha-in-flight")`.** A second model
+  for each of the two remaining processes, on both engines. `pair="bethe-heitler"`
+  samples the electron/positron energy sharing from the screened Bethe-Heitler
+  cross-section (uniform below 2 MeV) and each lepton's direction from the leading-order
+  angular law, on the unchanged pair cross-section. `positron="bhabha-in-flight"` gives
+  positrons their own restricted collision stopping power and range, Bhabha delta rays,
+  and two-photon annihilation in flight. Both are optional: `"auto"` selects them for
+  sources above `HIGH_ENERGY_PHYSICS_THRESHOLD_MEV` (30 MeV, still provisional) and
+  keeps `uniform-split` and `moller-at-rest` at or below it, so **no result of a run up
+  to 30 MeV moves**: fixed-seed dose, sigma, energy books and Dij are byte-identical to
+  before on the reference backend, Warp CPU and Warp CUDA, including a source that
+  starts positrons, dose to water, a uniform magnetic field and exterior-air stepping.
+  **A run above 30 MeV on `"auto"` does change** (it now runs all three detailed
+  models). Chosen explicitly below the threshold the models move a dose: for 18 MeV
+  photons in water the pair model raises the build-up by up to 1.4 % of the maximum
+  dose, and the positron model lowers the dose at every depth by 0.8 to 1.1 % of the
+  maximum (0.8 % and 0.16 % at 6 MeV); see `examples/pair_positron_model_demo.py` and
+  `docs/decisions.md`, which lists what each model still approximates.
+
+  A source that itself emits positrons needs, under `bhabha-in-flight`, cross-section
+  data up to 0.77 MeV above its maximum energy (an annihilation photon can be that much
+  harder than the positron); the engines build their tables to that ceiling and refuse
+  the run if the data ends below it (`pyradmc.physics_options.run_energy_ceiling`).
+
+  **Performance: none lost on the default path.** The Warp photon kernel is now
+  compiled per pair model and the electron kernel per (bremsstrahlung, positron) pair;
+  default wall time against the previous kernels on CUDA is 0.99 for 12 MeV electrons
+  and for 6 and 18 MeV photons (interleaved, sd 0.002 to 0.005), where it stood
+  before these models. The first run that selects a model compiles its kernel, once per
+  device.
+
 - **Screened Bethe-Heitler bremsstrahlung: `PhysicsOptions(bremsstrahlung="bethe-heitler")`.**
   A second bremsstrahlung model on both engines: photon energies from the screened
   Bethe-Heitler cross-section, emission at an angle of order 1/γ, photons above PCUT
@@ -48,13 +80,13 @@ without a field, so results are not byte-identical to the previous release.
   certified path, is resolved once per run from the source's maximum energy and primary
   kinds (`pyradmc.physics_options.resolve_physics`); the resolved models are logged at
   INFO with the reason and recorded in `RunProvenance.physics`, and the provenance
-  summary string gains a `physics=[...]` token. The selector itself shipped with one
-  model per process (`thin-target`, `uniform-split`, `moller-at-rest`), so on its own:
+  summary string gains a `physics=[...]` token. The selector itself was introduced with
+  one model per process (`thin-target`, `uniform-split`, `moller-at-rest`), so on its own:
   **no physics, numerics or dose moves** — fixed-seed dose, sigma, energy books and Dij are
   byte-identical before and after on the reference backend, Warp CPU and Warp CUDA,
   field-free, in a uniform magnetic field and with exterior-air stepping.
   `HIGH_ENERGY_PHYSICS_THRESHOLD_MEV` (30 MeV, provisional) is where `"auto"` switches
-  to high-energy models (see the bremsstrahlung entry above). Sources gain an optional
+  to high-energy models (see the two entries above). Sources gain an optional
   `particle_kinds` declaration, which the phase-space sources fill in. This replaces the
   rule that physics is never a per-run option (AGENTS.md 2.10).
 

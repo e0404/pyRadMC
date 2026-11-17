@@ -28,6 +28,8 @@ installed; touching it then raises an error naming the extra to install.
 
 ::: pyradmc.physics_options.PHYSICS_MODELS
 
+::: pyradmc.physics_options.run_energy_ceiling
+
 ## Results
 
 ::: pyradmc.backends.results.TransportResult

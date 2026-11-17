@@ -356,9 +356,30 @@ These outlive the work that produced them. Each is a live constraint, not histor
   real coherent channel without recalibrating pair against coherent-free totals
   double-counts attenuation. A backend must take its channels from one consistent
   decomposition of the same library.
-- **Positrons are Moller-approximated** (no Bhabha, annihilation at rest). If ever upgraded,
-  Bhabha and annihilation in flight land together as the new default per section 2.10, with
-  a test showing the dosimetric effect.
+- **At clinical energies positrons are Moller-approximated and pairs split uniformly; the
+  alternatives exist and are optional.** `"moller-at-rest"` (a positron transported as an
+  electron, annihilating only at rest) and `"uniform-split"` (kinetic energy shared
+  uniformly, both leptons forward) are what `"auto"` resolves to at or below
+  `HIGH_ENERGY_PHYSICS_THRESHOLD_MEV`, so no clinical result moved when the alternatives
+  landed. `"bhabha-in-flight"` (Bhabha and two-photon annihilation in flight, one option
+  per section 2.10) and `"bethe-heitler"` pair sharing are registered, validated on their
+  own, and what `"auto"` takes above the threshold. They change a dose measurably when
+  chosen below it (18 MeV photons in water: build-up up to +1.4 % of the maximum from the
+  pair model, -0.8 to -1.1 % at every depth from the positron model;
+  `examples/pair_positron_model_demo.py`), so making either the clinical choice is
+  replacing a default: it needs the dosimetric evidence of section 2.8 and a benchmark
+  that says which is closer, not an argument. What stays approximate under each is named
+  where it is implemented and listed in `docs/decisions.md`: under `"bhabha-in-flight"`
+  the substep length, multiple scattering, radiative stopping and the dose-to-water
+  stopping ratio are still the electron's, and one- and three-photon annihilation are
+  neglected; under `"bethe-heitler"` pair sharing is uniform below 2 MeV, triplet
+  production is not distinguished, the mixture rule is EGS4's effective Z, the two
+  lepton angles are independent, and the Coulomb correction switches on at 50 MeV.
+- **A run that starts positrons under `"bhabha-in-flight"` needs data 0.77 MeV above its
+  source.** Annihilation in flight is the one process whose secondary can be harder than
+  anything the source emits; `run_energy_ceiling` is what both engines size tables to and
+  check the energy domain against. Any future process that can do the same (it would have
+  to add rest mass) belongs in that function, not in a table margin.
 - **A physics model must not slow the default path.** A run-time branch on the model,
   never taken, cost 7 to 8 % on CUDA in the electron kernel, and unread table fields on
   `Tables` 1 to 2 % (interleaved ratios, 2026-11-14; cause not established). So each

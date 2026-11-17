@@ -83,6 +83,7 @@ from pyradmc.physics_options import (
     PhysicsOptions,
     ResolvedPhysics,
     resolve_physics,
+    run_energy_ceiling,
     run_primary_kinds,
 )
 from pyradmc.progress import ProgressCallback, ProgressEmitter
@@ -1166,19 +1167,20 @@ class WarpEngine:
         deposit_resolution = 0.0 if deposit_resolution_cm is None else deposit_resolution_cm
         # ``primary_kind`` decides the kind only for the in-kernel mono beams; every
         # other route takes it per record, where an unset kind is a photon.
-        resolved = resolve_physics(
-            physics,
-            max_energy_mev=source.max_energy,
-            primary_kinds=run_primary_kinds(source, primary_kind if in_kernel else "photon"),
-        )
+        kinds = run_primary_kinds(source, primary_kind if in_kernel else "photon")
+        resolved = resolve_physics(physics, max_energy_mev=source.max_energy, primary_kinds=kinds)
         _kernel_physics_codes(resolved)
+        # A source positron annihilating in flight can make a photon harder than
+        # the source's maximum energy: the tables are built to that ceiling and
+        # the data's domain is checked there. The source's own energy otherwise.
+        table_energy = run_energy_ceiling(source.max_energy, kinds, resolved)
+        require_energy_domain(self.cross_sections, table_energy)
         logger.info("physics models: %s (%s)", resolved.summary(), resolved.reason)
 
         device = self.device
         gi, density, material = self._upload_grid(device)
         scoring = self._scoring_geometry(scoring_grid)
         si, voxel_mass = self._upload_scoring(scoring, device)
-        table_energy = source.max_energy
         tab = self._upload_tables(
             table_energy, pcut, ecut, device, with_gs=msc_model_gs == 1, physics=resolved
         )
@@ -1277,6 +1279,7 @@ class WarpEngine:
             # not thread-safe: load the selected model's electron kernel module
             # here (the shared module for the default models, else its own).
             wp.load_module(kernels.electron_kernel_for(tab).module, device=device)
+            wp.load_module(kernels.photon_kernel_for(tab).module, device=device)
             # Shared counters use integer atomics and therefore need only one clear
             # for the whole concurrent run (done above). Each lane owns the state
             # whose writes are not commutative (queues, RNG slots, and its batch dose
@@ -2108,14 +2111,18 @@ class WarpEngine:
         # not thread-safe. Everything after takes its device explicitly, so the
         # threads share no warp state.
         if len(device_list) > 1 or concurrent_batches > 1:
-            # A non-default physics model has its electron kernel in a module of
-            # its own (kernels.make_electron_kernel); load that one too.
-            model_kernel = kernels.make_electron_kernel(
-                _kernel_physics_codes(resolved)["bremsstrahlung"]
+            # A non-default physics model has its kernel in a module of its own
+            # (kernels.make_photon_kernel, kernels.make_electron_kernel); load
+            # those too.
+            codes = _kernel_physics_codes(resolved)
+            model_kernels = (
+                kernels.make_photon_kernel(codes["pair"]),
+                kernels.make_electron_kernel(codes["bremsstrahlung"], codes["positron"]),
             )
             for d in device_list:
                 wp.load_module(kernels, device=d)
-                wp.load_module(model_kernel.module, device=d)
+                for model_kernel in model_kernels:
+                    wp.load_module(model_kernel.module, device=d)
             if type(source) is SegmentedFanSource:
                 from pyradmc.backends.warp import segments
 
@@ -3868,15 +3875,17 @@ class WarpEngine:
         count readback is ordered on that stream, so lanes on the same device
         never observe each other's queues.
         """
-        # The electron kernel compiled for the models these tables were built
-        # under (one kernel per model, not a run-time branch; see
-        # kernels.make_electron_kernel). Resolved once per drain, on the host.
+        # The kernels compiled for the models these tables were built under (one
+        # kernel per model, not a run-time branch; see kernels.make_photon_kernel
+        # and kernels.make_electron_kernel). Resolved once per drain, on the host.
+        photon_kernel = kernels.photon_kernel_for(tab)
+        photon_model_tables = self._photon_model_tables_for(tab, device)
         electron_kernel = kernels.electron_kernel_for(tab)
         model_tables = self._model_tables_for(tab, device)
 
         def photon_round(dim, q_in, q_electron_out, q_photon_out, max_blocks=0):
             _launch(
-                kernels.photon_kernel,
+                photon_kernel,
                 dim,
                 [
                     gi,
@@ -3884,6 +3893,7 @@ class WarpEngine:
                     density,
                     material,
                     tab,
+                    photon_model_tables,
                     q_in,
                     q_electron_out,
                     q_photon_out,
@@ -4748,6 +4758,9 @@ class WarpEngine:
         bh_host = None
         if physics.bremsstrahlung == "bethe-heitler":
             bh_host = self._bethe_heitler_host(host, ecut, pcut, e_max)
+        positron_host = None
+        if physics.positron == "bhabha-in-flight":
+            positron_host = self._positron_host(host, ecut, e_max)
         with state.lock:
             tab = _lru_get(state.tables, full_key)
             if tab is None:
@@ -4759,11 +4772,14 @@ class WarpEngine:
                 # The model data the electron kernel takes beside this struct,
                 # held with it (strong reference: the identity cannot be
                 # recycled) and dropped when the struct is evicted.
-                model = self._electron_model_tables(state, bh_host, ecut, pcut, e_max, device)
+                model = self._electron_model_tables(
+                    state, bh_host, positron_host, ecut, pcut, e_max, device
+                )
+                photon_model = self._photon_model_tables(state, physics, device)
                 resident = {id(t) for t in state.tables.values()}
                 for stale in [k for k in state.model_tables if k not in resident]:
                     del state.model_tables[stale]
-                state.model_tables[id(tab)] = (tab, model)
+                state.model_tables[id(tab)] = (tab, model, photon_model)
             return tab
 
     def _build_tables(
@@ -4829,44 +4845,114 @@ class WarpEngine:
         return tab
 
     def _electron_model_tables(
-        self, state: _DeviceState, bh_host, ecut, pcut, e_max, device
+        self, state: _DeviceState, bh_host, positron_host, ecut, pcut, e_max, device
     ) -> kernels.ElectronModelTables | int:
         """Build the electron kernel's ``model`` argument for one resident ``Tables``.
 
         Called under the device lock by the one builder of a resident struct. The
-        default models' kernel takes an ``int`` placeholder, so a thin-target run
-        builds, uploads and passes nothing. The screened Bethe-Heitler model's
-        three arrays are uploaded once per ``(ecut, pcut, e_max)`` and device and
-        shared by every struct that selects the model, like the base arrays.
+        default models' kernel takes an ``int`` placeholder, so a clinical run
+        builds, uploads and passes nothing. Each selected model's arrays are
+        uploaded once per key and device and shared by every struct that selects
+        the model, like the base arrays: the screened Bethe-Heitler model's three
+        per ``(ecut, pcut, e_max)``, the positron model's four per
+        ``(ecut, e_max)``. The fields of a model the kernel was not compiled for
+        carry a 1-element placeholder it never reads.
         """
-        if bh_host is None:
+        if bh_host is None and positron_host is None:
             return 0
         model = kernels.ElectronModelTables()
-        key = ("bethe-heitler", ecut, pcut, e_max)
-        arrays = _lru_get(state.table_arrays, key)
-        if arrays is None:
-            arrays = {
-                "brems_cross_section": wp.array(
-                    bh_host.cross_section.astype(np.float32), dtype=float, device=device
+
+        def upload(values) -> wp.array:
+            return wp.array(values.astype(np.float32), dtype=float, device=device)
+
+        placeholder = _lru_get(state.table_arrays, ("model-placeholder",))
+        if placeholder is None:
+            placeholder = wp.zeros((1, 1), dtype=float, device=device)
+            _lru_put(state.table_arrays, ("model-placeholder",), placeholder, 2 * _TABLES_RESIDENT)
+
+        if bh_host is not None:
+            key = ("bethe-heitler", ecut, pcut, e_max)
+            arrays = _lru_get(state.table_arrays, key)
+            if arrays is None:
+                arrays = {
+                    "brems_cross_section": upload(bh_host.cross_section),
+                    "stopping_radiative_restricted": upload(bh_host.stopping_radiative_restricted),
+                    "brems_screening": upload(bh_host.screening),
+                }
+                _lru_put(state.table_arrays, key, arrays, 2 * _TABLES_RESIDENT)
+        else:
+            arrays = dict.fromkeys(
+                ("brems_cross_section", "stopping_radiative_restricted", "brems_screening"),
+                placeholder,
+            )
+        for name, arr in arrays.items():
+            setattr(model, name, arr)
+
+        if positron_host is not None:
+            key = ("positron", ecut, e_max)
+            arrays = _lru_get(state.table_arrays, key)
+            if arrays is None:
+                arrays = {
+                    "bhabha": upload(positron_host.bhabha),
+                    "annihilation": upload(positron_host.annihilation),
+                    "positron_restricted_range": upload(positron_host.restricted_range),
+                    "positron_energy_of_restricted_range": upload(
+                        positron_host.energy_of_restricted_range
+                    ),
+                }
+                _lru_put(state.table_arrays, key, arrays, 2 * _TABLES_RESIDENT)
+            model.positron_r_log_min = positron_host.range_log_r_min
+            model.positron_r_inv_dlog = positron_host.range_inv_dlog
+        else:
+            arrays = dict.fromkeys(
+                (
+                    "bhabha",
+                    "annihilation",
+                    "positron_restricted_range",
+                    "positron_energy_of_restricted_range",
                 ),
-                "stopping_radiative_restricted": wp.array(
-                    bh_host.stopping_radiative_restricted.astype(np.float32),
-                    dtype=float,
-                    device=device,
-                ),
-                "brems_screening": wp.array(
-                    bh_host.screening.astype(np.float32), dtype=float, device=device
-                ),
-            }
-            _lru_put(state.table_arrays, key, arrays, 2 * _TABLES_RESIDENT)
+                placeholder,
+            )
+            model.positron_r_log_min = 0.0
+            model.positron_r_inv_dlog = 1.0
         for name, arr in arrays.items():
             setattr(model, name, arr)
         return model
 
-    def _model_tables_for(self, tab: Tables, device: str) -> kernels.ElectronModelTables | int:
-        """Return the electron kernel's ``model`` argument for a resident ``tab``.
+    def _photon_model_tables(
+        self, state: _DeviceState, physics: ResolvedPhysics, device
+    ) -> kernels.PhotonModelTables | int:
+        """Build the photon kernel's ``model`` argument for one resident ``Tables``.
 
-        The pair is made together by :meth:`_upload_tables`; a ``Tables`` struct
+        Called under the device lock, like :meth:`_electron_model_tables`. The
+        default pair model's kernel takes an ``int`` placeholder. The screened
+        Bethe-Heitler pair model needs three scalars per material
+        (:meth:`~pyradmc.data.interface.CrossSectionSource.pair_screening`), read
+        from the source here and uploaded once per device: they depend on
+        neither cutoff nor the energy grid.
+        """
+        if physics.pair != "bethe-heitler":
+            return 0
+        model = kernels.PhotonModelTables()
+        key = ("pair-bethe-heitler",)
+        screening = _lru_get(state.table_arrays, key)
+        if screening is None:
+            host = np.array(
+                [
+                    self.cross_sections.pair_screening(material)
+                    for material in range(self.cross_sections.n_materials)
+                ],
+                dtype=np.float32,
+            )
+            screening = wp.array(host, dtype=float, device=device)
+            _lru_put(state.table_arrays, key, screening, 2 * _TABLES_RESIDENT)
+        model.pair_screening = screening
+        return model
+
+    def _model_entry(self, tab: Tables, device: str) -> tuple:
+        """Return the ``(tab, electron model, photon model)`` record of a resident ``tab``.
+
+        The three are made together by :meth:`_upload_tables`; a ``Tables`` struct
         that did not come from there has no model data, and is refused rather
         than run with a placeholder under a model that reads it.
         """
@@ -4877,7 +4963,15 @@ class WarpEngine:
             raise RuntimeError(
                 "tables without model data: build them with _upload_tables on this device"
             )
-        return entry[1]
+        return entry
+
+    def _model_tables_for(self, tab: Tables, device: str) -> kernels.ElectronModelTables | int:
+        """Return the electron kernel's ``model`` argument for a resident ``tab``."""
+        return self._model_entry(tab, device)[1]
+
+    def _photon_model_tables_for(self, tab: Tables, device: str) -> kernels.PhotonModelTables | int:
+        """Return the photon kernel's ``model`` argument for a resident ``tab``."""
+        return self._model_entry(tab, device)[2]
 
     def _bethe_heitler_host(self, host, ecut: float, pcut: float, e_max: float):
         """Return the screened Bethe-Heitler tables for these tables, built once.
@@ -4903,6 +4997,25 @@ class WarpEngine:
                 )
                 self._table_cache[key] = bh_host
         return bh_host
+
+    def _positron_host(self, host, ecut: float, e_max: float):
+        """Return the ``"bhabha-in-flight"`` positron tables for these tables, built once.
+
+        Laid on the electron grid of ``host`` like the Bethe-Heitler tables, built
+        on first use by a run that selects the model and cached under the engine's
+        table lock; independent of ``pcut``.
+        """
+        from pyradmc.data import positron as positron_data
+
+        key = ("positron", ecut, e_max)
+        with self._table_cache_lock:
+            positron_host = self._table_cache.get(key)
+            if positron_host is None:
+                positron_host = positron_data.build_positron_tables(
+                    self.cross_sections, ecut=ecut, e_max=host.e_max, n_points=host.n_points
+                )
+                self._table_cache[key] = positron_host
+        return positron_host
 
     def _gs_grid_host(self, host, ecut: float, e_max: float):
         """Return the eager Goudsmit-Saunderson grid for these tables, built once.

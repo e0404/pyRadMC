@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     import numpy.typing as npt
 
     from pyradmc.data.bethe_heitler import BremsScreening
+    from pyradmc.data.pair import PairScreening
     from pyradmc.data.tables import CrossSectionTables
 
 __all__ = ["DOMAIN_EDGE_RTOL", "CrossSectionSource", "PhotonProcess", "require_energy_domain"]
@@ -639,6 +640,178 @@ class CrossSectionSource(ABC):
             float(np.interp(x, log_e, cross_section)),
             float(np.interp(x, log_e, restricted)),
         )
+
+    # -- positrons (concrete: closed forms over the material registry) ----------
+
+    def positron_restricted_stopping_power(
+        self, energy: float, material: int, delta_cut: float
+    ) -> float:
+        """Restricted *positron* collision stopping power, in MeV cm^2/g.
+
+        The positron twin of :meth:`restricted_stopping_power`: energy losses
+        above ``delta_cut`` are excluded, being handled as discrete Bhabha events
+        (:meth:`bhabha_cross_section`). Saturates at ``delta_cut >= energy`` (the
+        unrestricted value), where the electron's saturates at ``energy / 2``.
+        Berger-Seltzer positron formula, ICRU Report 37 (1984):
+        :func:`pyradmc.data.positron.positron_restricted_collision_stopping`
+        (governing equation and stated approximations there).
+
+        Concrete on the interface, evaluated from the registry material's
+        I-value, density effect and electron density — the same inputs every
+        implementation's electron stopping power is built from — so the analytic
+        and tabulated backends answer identically. A source carrying positron
+        stopping data of its own may override it, and must then override
+        :meth:`bhabha_cross_section` consistently (tested identity: restricted
+        plus the Bhabha energy moment above the cut equals the unrestricted
+        value).
+
+        **Radiative stopping of positrons is the electron's**
+        (:meth:`radiative_stopping_power`) — a stated approximation, see
+        :mod:`pyradmc.data.positron`.
+        """
+        from pyradmc.data.materials import MATERIALS
+        from pyradmc.data.positron import positron_restricted_collision_stopping
+
+        if not 0 <= material < self.n_materials:
+            raise ValueError(f"material index {material} beyond this source")
+        return positron_restricted_collision_stopping(energy, MATERIALS[material], delta_cut)
+
+    def bhabha_cross_section(self, energy: float, material: int, delta_cut: float) -> float:
+        """Restricted Bhabha cross-section per unit mass, in cm^2/g.
+
+        Total cross-section for a discrete positron-electron collision
+        transferring more than ``delta_cut`` (MeV, kinetic) to a delta electron.
+        Zero when ``energy`` is at or below ``delta_cut`` — *not* ``2 * delta_cut``
+        as for :meth:`moller_cross_section`: the particles are distinguishable and
+        the positron may transfer its whole kinetic energy. Bhabha (1936),
+        doi:10.1098/rspa.1936.0046;
+        :func:`pyradmc.data.positron.restricted_bhabha_cross_section`.
+        """
+        from pyradmc.data.materials import MATERIALS
+        from pyradmc.data.positron import restricted_bhabha_cross_section
+
+        if not 0 <= material < self.n_materials:
+            raise ValueError(f"material index {material} beyond this source")
+        return restricted_bhabha_cross_section(energy, MATERIALS[material], delta_cut)
+
+    def annihilation_cross_section(self, energy: float, material: int) -> float:
+        """Two-photon annihilation-in-flight cross-section per unit mass, in cm^2/g.
+
+        The Heitler cross-section per electron at positron kinetic energy
+        ``energy`` (MeV) times the material's electron density per gram:
+        :func:`pyradmc.data.positron.annihilation_cross_section_per_electron`.
+        Target electrons free and at rest; one- and three-photon annihilation
+        neglected. It diverges as ``1/v`` towards zero energy, which the
+        transport never sees: a positron at or below the cutoff annihilates at
+        rest.
+        """
+        from pyradmc.data.materials import MATERIALS
+        from pyradmc.data.positron import annihilation_cross_section_per_electron
+
+        if not 0 <= material < self.n_materials:
+            raise ValueError(f"material index {material} beyond this source")
+        return MATERIALS[material].electrons_per_gram * annihilation_cross_section_per_electron(
+            energy
+        )
+
+    def positron_restricted_range(self, energy: float, material: int, delta_cut: float) -> float:
+        """Restricted-collision range of a *positron* down to ``delta_cut``, in g/cm^2.
+
+        :meth:`restricted_range` with :meth:`positron_restricted_stopping_power`
+        in the integrand: the same nodes (reference span to 64 MeV, appended
+        above it up to :attr:`energy_max`), the same trapezoid, and the same
+        energy domain, enforced the same way — a query above ``energy_max``
+        raises instead of clamping (test-pinned against the electron lookup).
+        The two ranges differ at the percent level (water, 200 keV cut: the
+        positron's is 1.6 % shorter just above the cut and 1.3 % longer near
+        1 MeV), so a positron must not be stepped with the electron map once
+        its stopping power is its own.
+        """
+        log_e, cumulative = self._positron_range_grid(material, delta_cut)
+        e = max(energy, delta_cut)
+        if e > self.energy_max * (1.0 + DOMAIN_EDGE_RTOL) or math.log(e) > log_e[-1]:
+            raise ValueError(
+                f"positron restricted range queried at {energy} MeV, outside the energy "
+                f"domain of {type(self).__name__} (energy_max={self.energy_max} MeV)"
+            )
+        return float(np.interp(np.log(e), log_e, cumulative))
+
+    def positron_energy_after_mass_path(
+        self, energy: float, material: int, delta_cut: float, mass_path: float
+    ) -> float:
+        """Positron energy after a continuous-loss mass path; see :meth:`energy_after_mass_path`.
+
+        Clamped to ``[delta_cut, energy]`` in the same way, and raising above the
+        source's energy domain as :meth:`positron_restricted_range` does.
+        """
+        log_e, cumulative = self._positron_range_grid(material, delta_cut)
+        remaining = self.positron_restricted_range(energy, material, delta_cut) - mass_path
+        if remaining <= 0.0:
+            return delta_cut
+        e_end = float(np.exp(np.interp(remaining, cumulative, log_e)))
+        return min(max(e_end, delta_cut), energy)
+
+    def _positron_range_grid(
+        self, material: int, delta_cut: float
+    ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
+        """Return the cached positron ``(log E nodes, cumulative range)`` grid for one key."""
+        cache: (
+            dict[tuple[int, float], tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]] | None
+        ) = getattr(self, "_positron_restricted_range_cache", None)
+        if cache is None:
+            cache = {}
+            self._positron_restricted_range_cache = cache
+        key = (material, delta_cut)
+        grids = cache.get(key)
+        if grids is None:
+            from pyradmc.data.grids import extendable_log_grid
+
+            # The electron grid's nodes exactly (:meth:`_range_grid`), so the two
+            # maps share one rule and a wider domain only ever appends.
+            top = self.energy_max * (1.0 + DOMAIN_EDGE_RTOL)
+            energies = extendable_log_grid(
+                delta_cut,
+                _RANGE_GRID_E_REF,
+                _RANGE_GRID_POINTS,
+                e_top=top if math.isfinite(top) else _RANGE_GRID_E_REF,
+            )
+            inv_s = np.array(
+                [
+                    1.0 / self.positron_restricted_stopping_power(float(e), material, delta_cut)
+                    for e in energies
+                ]
+            )
+            cumulative = np.concatenate(
+                ([0.0], np.cumsum(np.diff(energies) * 0.5 * (inv_s[1:] + inv_s[:-1])))
+            )
+            grids = (np.log(energies), cumulative)
+            cache[key] = grids
+        return grids
+
+    # -- pair-production kinematics (concrete: derived from the composition) ----
+
+    def pair_screening(self, material: int) -> PairScreening:
+        """Screening scalars of the pair energy-sharing distribution, dimensionless.
+
+        The three per-material inputs of
+        :func:`pyradmc.physics.pair.sample_pair_electron_energy`
+        (``screening_constant``, ``coulomb_low``, ``coulomb_high``; see
+        :class:`pyradmc.data.pair.PairScreening`). They fix only the *shape* of the
+        electron/positron energy sharing; the pair cross-section itself stays
+        :meth:`mu_over_rho` with ``PhotonProcess.PAIR``.
+
+        Concrete on the interface for the reason :meth:`elastic_screening` is:
+        computed from the material's elemental composition
+        (:func:`pyradmc.data.pair.pair_screening_parameters`, EGS4 mixture rule),
+        so no implementation can omit it and no backend can drift on the shape. A
+        source with differential pair data of its own may override it.
+        """
+        from pyradmc.data.materials import MATERIALS
+        from pyradmc.data.pair import pair_screening_parameters
+
+        if not 0 <= material < self.n_materials:
+            raise ValueError(f"material index {material} beyond this source")
+        return pair_screening_parameters(MATERIALS[material].composition)
 
     # -- construction -------------------------------------------------------
 

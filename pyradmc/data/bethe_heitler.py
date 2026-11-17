@@ -61,11 +61,19 @@ import numpy.typing as npt
 from pyradmc import ELECTRON_MASS_MEV
 from pyradmc.data.berger_seltzer import CLASSICAL_ELECTRON_RADIUS_CM
 from pyradmc.data.materials import AVOGADRO, STANDARD_ATOMIC_WEIGHT
+from pyradmc.data.screening import (
+    FINE_STRUCTURE_CONSTANT,
+    coulomb_correction,
+    radiation_logarithms,
+)
+from pyradmc.data.screening import TSAI_PHI1_COMPLETE as _PHI1_COMPLETE
+from pyradmc.data.screening import TSAI_PSI1_COMPLETE as _PSI1_COMPLETE
 
 if TYPE_CHECKING:
     from pyradmc.data.interface import CrossSectionSource
 
 __all__ = [
+    "FINE_STRUCTURE_CONSTANT",
     "BetheHeitlerTables",
     "BremsScreening",
     "born_radiative_stopping_power",
@@ -75,25 +83,6 @@ __all__ = [
     "shape_array",
     "shape_integrals",
 ]
-
-FINE_STRUCTURE_CONSTANT: float = 7.297_352_5693e-3
-"""Fine-structure constant (CODATA 2018)."""
-
-_PHI1_COMPLETE: float = 20.863
-"""``phi_1(0)`` of Tsai's Thomas-Fermi fit: ``4 ln 184.15``."""
-
-_PSI1_COMPLETE: float = 28.340
-"""``psi_1(0)`` of Tsai's Thomas-Fermi fit: ``4 ln 1194``."""
-
-# Radiation logarithms (L_el, L_inel) for Z = 1..4, where the Thomas-Fermi model
-# fails: Tsai (1974), doi:10.1103/RevModPhys.46.815, Table B.2 (reproduced as Table
-# 34.2 of the Particle Data Group review of the passage of particles through matter).
-_LOW_Z_RADIATION_LOGARITHMS: dict[int, tuple[float, float]] = {
-    1: (5.31, 6.144),
-    2: (4.79, 5.621),
-    3: (4.74, 5.805),
-    4: (4.71, 5.924),
-}
 
 _GL_NODES, _GL_WEIGHTS = np.polynomial.legendre.leggauss(16)
 _PANELS_PER_DECADE: int = 4
@@ -136,26 +125,6 @@ class BremsScreening(NamedTuple):
     g_nuc: float
     g_el: float
     z2_per_gram: float
-
-
-def coulomb_correction(z: int) -> float:
-    r"""Davies-Bethe-Maximon Coulomb correction ``f(Z)`` to the Born approximation.
-
-    .. math::
-
-        f(Z) = a^2 \left[\frac{1}{1 + a^2} + 0.20206 - 0.0369 a^2
-                         + 0.0083 a^4 - 0.002 a^6\right], \qquad a = \alpha Z,
-
-    the standard four-digit approximation to
-    :math:`a^2 \sum_{n \ge 1} [n (n^2 + a^2)]^{-1}` (Davies, Bethe & Maximon, Phys.
-    Rev. 93, 788 (1954), doi:10.1103/PhysRev.93.788; the polynomial as given by
-    Tsai (1974), doi:10.1103/RevModPhys.46.815). It is a high-energy result; this
-    model applies it at every energy (a stated approximation, see
-    :mod:`pyradmc.physics.brems_bh`), which only reshapes the spectrum because the
-    total is renormalized.
-    """
-    a2 = (FINE_STRUCTURE_CONSTANT * z) ** 2
-    return a2 * (1.0 / (1.0 + a2) + 0.20206 - 0.0369 * a2 + 0.0083 * a2 * a2 - 0.002 * a2**3)
 
 
 def screening_parameters(composition: tuple[tuple[int, float], ...]) -> BremsScreening:
@@ -220,9 +189,7 @@ def screening_parameters(composition: tuple[tuple[int, float], ...]) -> BremsScr
             raise ValueError(f"invalid composition entry (Z={z}, w={fraction})")
         atoms = fraction / STANDARD_ATOMIC_WEIGHT[z]
         log_z = math.log(z)
-        l_el_tf = 0.25 * _PHI1_COMPLETE - log_z / 3.0
-        l_inel_tf = 0.25 * _PSI1_COMPLETE - 2.0 * log_z / 3.0
-        l_el, l_inel = _LOW_Z_RADIATION_LOGARITHMS.get(z, (l_el_tf, l_inel_tf))
+        l_el, l_inel = radiation_logarithms(z)
         weight_nuc = atoms * z * z
         weight_el = atoms * z
         sum_z += weight_el

@@ -90,11 +90,13 @@ result = engine.run(
 | `bremsstrahlung` | `thin-target` | 1/k photon spectrum, emitted along the electron's direction |
 | | `bethe-heitler` | screened Bethe-Heitler spectrum, emitted at an angle of order 1/γ; same radiative stopping power |
 | `pair` | `uniform-split` | kinetic energy shared uniformly, both leptons emitted forward |
+| | `bethe-heitler` | screened Bethe-Heitler sharing (uniform below 2 MeV), each lepton at its own angle of order 1/γ; same pair cross-section |
 | `positron` | `moller-at-rest` | transported as an electron (no Bhabha), annihilation at rest |
+| | `bhabha-in-flight` | the positron's own collision stopping power, Bhabha delta rays, two-photon annihilation in flight |
 
 `"auto"` takes the first model of each row for a source whose maximum energy is at or
-below `pyradmc.HIGH_ENERGY_PHYSICS_THRESHOLD_MEV` (30 MeV, provisional) and
-`bethe-heitler` bremsstrahlung above it, so clinical runs compute what they always did.
+below `pyradmc.HIGH_ENERGY_PHYSICS_THRESHOLD_MEV` (30 MeV, provisional) and the second
+of each row above it, so clinical runs compute what they always did.
 A source that high also needs cross-section data whose declared energy domain reaches it
 (`CrossSectionSource.energy_max`: 20 MeV for the analytic source, the compiled grid top
 for a tabulated one, see `--e-max` in [Cross-section data](data.md)); the engines refuse
@@ -111,6 +113,18 @@ raises the bremsstrahlung tail at 20 MeV by about 6 percent of itself, and chang
 18 MeV photon depth dose by 0.6 percent of its maximum. Choosing a model costs the
 default nothing: the GPU kernel is compiled per model, and a thin-target run is as fast
 as before (measured). The first run that selects `bethe-heitler` compiles its kernel.
+
+The pair and positron models are visible in a photon dose too
+(`examples/pair_positron_model_demo.py`). Against the clinical pair, `bethe-heitler`
+pair sharing raises the build-up of an 18 MeV beam in water by up to 1.4 percent of the
+maximum dose and leaves the dose behind the maximum alone; `bhabha-in-flight` lowers it
+at every depth by about 0.8 percent of the maximum, because a positron that annihilates
+in flight hands its remaining kinetic energy to photons. At 6 MeV the two are 0.8 and
+0.16 percent. What each model still approximates is listed in
+[Design decisions](decisions.md). One thing to know when a *source* emits positrons
+under `bhabha-in-flight`: an annihilation photon can be up to 0.77 MeV harder than the
+positron, so the cross-section data must reach that far above the source's maximum
+energy, and the engines refuse the run if it does not.
 
 ## Running on the GPU
 
