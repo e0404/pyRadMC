@@ -64,6 +64,7 @@ from pyradmc.transport.electron import (
 from pyradmc.transport.particles import ELECTRON, PHOTON, POSITRON
 
 __all__ = [
+    "BREMS_BETHE_HEITLER",
     "BREMS_THIN_TARGET",
     "DRAIN_ELECTRON_COUNT",
     "DRAIN_LAST_BUSY_ROUND",
@@ -72,10 +73,14 @@ __all__ = [
     "DRAIN_STATUS_SLOTS",
     "ENERGY_QUANTUM_MEV",
     "KERNEL_PHYSICS_CODES",
+    "PAIR_BETHE_HEITLER",
     "PAIR_UNIFORM_SPLIT",
+    "POSITRON_BHABHA_IN_FLIGHT",
     "POSITRON_MOLLER_AT_REST",
     "TRUNCATION_TARGET_THREADS",
+    "ElectronModelTables",
     "GridInfo",
+    "PhotonModelTables",
     "Queue",
     "Tables",
     "accumulate_dij_batch",
@@ -86,6 +91,7 @@ __all__ = [
     "count_kept_per_chunk",
     "count_kept_per_column",
     "electron_kernel",
+    "electron_kernel_for",
     "fill_float64",
     "fill_int32",
     "fill_int64",
@@ -99,8 +105,11 @@ __all__ = [
     "generate_spectral_beamlets",
     "generate_spectral_masked_beam",
     "make_beamlet_generator_kernel",
+    "make_electron_kernel",
     "make_generator_kernel",
+    "make_photon_kernel",
     "photon_kernel",
+    "photon_kernel_for",
     "retire_queue",
     "snapshot_drain_status",
     "truncation_chunk_layout",
@@ -116,25 +125,37 @@ _INV_QUANTUM = 1.0 / ENERGY_QUANTUM_MEV
 # --- physics model codes -------------------------------------------------------
 # The run's resolved physics models (pyradmc.physics_options) reach the kernels as
 # ints on the ``Tables`` struct: ``tab.brems_model``, ``tab.pair_model`` and
-# ``tab.positron_model``. These are the values those fields take. Each process has
-# one implemented model, so nothing reads the fields yet; the sites where a second
-# model is dispatched are marked "model dispatch" in the kernel bodies.
+# ``tab.positron_model``. These are the values those fields take. No kernel reads
+# them: the engine does, to pick the kernels compiled for those models
+# (``photon_kernel_for``, ``electron_kernel_for``), and inside a kernel the model
+# is a compile-time constant resolved at the sites marked "model dispatch"
+# (``make_photon_kernel`` for pair production, ``make_electron_kernel`` for
+# bremsstrahlung and the positron). Which *particle* a thread carries is run-time
+# data, so inside a kernel compiled for a positron model the positron's arm is
+# still guarded by ``is_positron``.
 BREMS_THIN_TARGET = 0
+BREMS_BETHE_HEITLER = 1
 PAIR_UNIFORM_SPLIT = 0
+PAIR_BETHE_HEITLER = 1
 POSITRON_MOLLER_AT_REST = 0
+POSITRON_BHABHA_IN_FLIGHT = 1
 
 KERNEL_PHYSICS_CODES: dict[str, dict[str, int]] = {
-    "bremsstrahlung": {"thin-target": BREMS_THIN_TARGET},
-    "pair": {"uniform-split": PAIR_UNIFORM_SPLIT},
-    "positron": {"moller-at-rest": POSITRON_MOLLER_AT_REST},
+    "bremsstrahlung": {"thin-target": BREMS_THIN_TARGET, "bethe-heitler": BREMS_BETHE_HEITLER},
+    "pair": {"uniform-split": PAIR_UNIFORM_SPLIT, "bethe-heitler": PAIR_BETHE_HEITLER},
+    "positron": {
+        "moller-at-rest": POSITRON_MOLLER_AT_REST,
+        "bhabha-in-flight": POSITRON_BHABHA_IN_FLIGHT,
+    },
 }
 """Process -> model name -> the code the kernels implement it under.
 
 The Warp side of the registration table: it must name exactly the registered
 models (``PHYSICS_MODELS``; test-pinned), and the engine refuses a resolved model
 that has no entry here before any launch, because a kernel cannot raise. A new
-model gets a constant above, an entry here, and its arm at the marked sites of
-``photon_kernel`` / ``electron_kernel``.
+model gets a constant above, an entry here, and its arm at the marked sites of the
+kernel, selected at compile time (:func:`make_photon_kernel`,
+:func:`make_electron_kernel`).
 """
 
 _ENTRY_NUDGE_CM = 1.0e-4
@@ -156,7 +177,8 @@ comparison against this finite bound classifies it without needing isinf in-kern
 # cross-target claim was always statistical-only, and the chi-squared and
 # energy-balance suites gate the equivalence. The pre-solve module must NOT take
 # this option: its attenuation mode is test-pinned float32-exact against the host.
-wp.set_module_options({"enable_backward": False, "fast_math": True})
+_MODULE_OPTIONS = {"enable_backward": False, "fast_math": True}
+wp.set_module_options(_MODULE_OPTIONS)
 
 _p = warp_physics()
 
@@ -169,6 +191,7 @@ compton_electron_cos_theta = _p.compton_electron_cos_theta
 sample_rayleigh_cos_theta = _p.sample_rayleigh_cos_theta
 sample_coherent_cos_theta_form_factor = _p.sample_coherent_cos_theta_form_factor
 rotate_direction = _p.rotate_direction
+rotate_direction_one_minus_cos = _p.rotate_direction_one_minus_cos
 sample_isotropic_direction = _p.sample_isotropic_direction
 sample_moller_delta_energy = _p.sample_moller_delta_energy
 moller_direction_cosines = _p.moller_direction_cosines
@@ -176,6 +199,14 @@ sample_hinge_cos_theta = _p.sample_hinge_cos_theta
 sample_gs_cos_theta_grid = _p.sample_gs_cos_theta_grid
 bremsstrahlung_step_parameters = _p.bremsstrahlung_step_parameters
 sample_bremsstrahlung_energy = _p.sample_bremsstrahlung_energy
+sample_bethe_heitler_photon_energy = _p.sample_bethe_heitler_photon_energy
+sample_bremsstrahlung_one_minus_cos_theta = _p.sample_bremsstrahlung_one_minus_cos_theta
+sample_bhabha_delta_energy = _p.sample_bhabha_delta_energy
+bhabha_direction_cosines = _p.bhabha_direction_cosines
+sample_annihilation_photon_energy = _p.sample_annihilation_photon_energy
+annihilation_direction_cosines = _p.annihilation_direction_cosines
+sample_pair_electron_energy = _p.sample_pair_electron_energy
+sample_pair_one_minus_cos_theta = _p.sample_pair_one_minus_cos_theta
 roulette_weight = _p.roulette_weight
 lookup_1d = _p.lookup_loglinear_1d
 lookup_2d = _p.lookup_loglinear_2d
@@ -278,7 +309,12 @@ class Tables:
     ``brems_model``, ``pair_model`` and ``positron_model`` carry the run's
     resolved physics models as the codes of :data:`KERNEL_PHYSICS_CODES`. They
     ride here because this is the one per-run struct both transport kernels
-    already receive, and the engine keys its resident copy on them.
+    already receive. A model's own *tables* do not ride here: three more array
+    fields on this struct cost every kernel that takes it 2.0 to 2.7 % on CUDA,
+    measured with nothing reading them (it is passed by value into the helper
+    functions). They travel in :class:`PhotonModelTables` and
+    :class:`ElectronModelTables`, which only a kernel compiled for a non-default
+    model takes.
     """
 
     mu_compton: wp.array2d(dtype=float)
@@ -1301,321 +1337,326 @@ def compact_column_chunked(
             cursor += 1
 
 
-@wp.kernel
-def photon_kernel(
-    gi: GridInfo,
-    si: GridInfo,
-    density: wp.array3d(dtype=float),
-    material: wp.array3d(dtype=wp.uint8),
-    tab: Tables,
-    q_in: Queue,
-    q_electron: Queue,
-    q_photon_out: Queue,
-    slots: wp.array(dtype=wp.uint32),
-    edep: wp.array(dtype=wp.int64),
-    escaped: wp.array(dtype=wp.int64),
-    unscored: wp.array(dtype=wp.int64),
-    deposited: wp.array(dtype=wp.int64),
-    pcut: float,
-    ecut: float,
-    transport_electrons: int,
-    dose_to_water: int,
-    majorant_violations: wp.array(dtype=wp.int32),
-):
-    """One thread transports one photon to termination; Woodcock tracking.
+@wp.struct
+class PhotonModelTables:
+    """Data of the photon kernel's non-default physics models; read-only.
 
-    Sequencing mirrors ``transport.photon.photon_steps`` statement for statement;
-    consult that loop for the physics commentary. ``gi`` is the transport grid;
-    ``si`` the scoring grid deposits route into (equal to ``gi`` by default).
-    ``dose_to_water`` selects the tally weighting (``_spr_factor``); the books
-    stay physical either way.
+    The ``model`` argument of a photon kernel compiled for a non-default model
+    (:func:`make_photon_kernel`). The default kernel does not take it: its
+    ``model`` argument is an ``int`` placeholder, so the clinical path carries no
+    model data at all (the reasons, measured, are on
+    :class:`ElectronModelTables`).
+
+    ``pair_screening`` holds the screened Bethe-Heitler pair model's three scalars
+    per material, ``(n_materials, 3)``: the ``(screening_constant, coulomb_low,
+    coulomb_high)`` arguments of
+    :func:`pyradmc.physics.pair.sample_pair_electron_energy`
+    (:class:`pyradmc.data.pair.PairScreening`).
     """
-    tid = wp.tid()
-    # A blind drain round launches at queue capacity; only the first ``count``
-    # slots hold particles. A launch sized from the count never takes this.
-    if tid >= wp.min(q_in.count[0], q_in.capacity):
-        return
-    e = q_in.energy[tid]
-    beamlet = q_in.beamlet[tid]
-    base = beamlet * si.n_voxels
-    w = q_in.weight[tid]
-    primary = q_in.primary[tid]
-    x = q_in.x[tid]
-    y = q_in.y[tid]
-    z = q_in.z[tid]
-    ux = q_in.ux[tid]
-    uy = q_in.uy[tid]
-    uz = q_in.uz[tid]
-    slots[tid] = q_in.rng[tid]
-    state = WarpRNGState()
-    state.slots = slots
-    state.idx = tid
 
-    if not point_inside(x, y, z, gi.x_lo, gi.y_lo, gi.z_lo, gi.x_hi, gi.y_hi, gi.z_hi):
-        t = slab_entry_distance(
-            x, y, z, ux, uy, uz, gi.x_lo, gi.y_lo, gi.z_lo, gi.x_hi, gi.y_hi, gi.z_hi
-        )
-        if t >= _INFINITY_CM:
-            _escape(escaped, w * e)
+    pair_screening: wp.array2d(dtype=float)
+
+
+_PHOTON_KERNELS: dict[tuple[int], wp.Kernel] = {}
+
+
+def make_photon_kernel(pair_model: int) -> wp.Kernel:
+    """Compile-time specialisation of the photon kernel on its physics model (cached).
+
+    The photon counterpart of :func:`make_electron_kernel`, and the same
+    mechanism for the same measured reason (AGENTS.md section 8): the pair model
+    is a Python value read through ``wp.static`` at the site marked "pair model
+    dispatch", so the other model's arm is not in the kernel at all.
+
+    The default (``PAIR_UNIFORM_SPLIT``) lives in this module, as
+    :data:`photon_kernel`, and takes an ``int`` placeholder as ``model``. Any
+    other model is compiled in a Warp module of its own (``module="unique"``,
+    same options) on the first run that selects it, and reads its data from
+    ``model``, a :class:`PhotonModelTables`.
+    """
+    key = (pair_model,)
+    cached = _PHOTON_KERNELS.get(key)
+    if cached is not None:
+        return cached
+    if pair_model not in (PAIR_UNIFORM_SPLIT, PAIR_BETHE_HEITLER):
+        raise ValueError(f"no photon kernel for pair model code {pair_model}")
+    bethe_heitler_pair = pair_model == PAIR_BETHE_HEITLER
+    if key == (PAIR_UNIFORM_SPLIT,):
+        decorate = wp.kernel
+        model_type: type = int  # placeholder: the default kernel takes no model data
+    else:
+        decorate = wp.kernel(module="unique", module_options=dict(_MODULE_OPTIONS))
+        model_type = PhotonModelTables
+
+    def photon_kernel(
+        gi: GridInfo,
+        si: GridInfo,
+        density: wp.array3d(dtype=float),
+        material: wp.array3d(dtype=wp.uint8),
+        tab: Tables,
+        model: PhotonModelTables,
+        q_in: Queue,
+        q_electron: Queue,
+        q_photon_out: Queue,
+        slots: wp.array(dtype=wp.uint32),
+        edep: wp.array(dtype=wp.int64),
+        escaped: wp.array(dtype=wp.int64),
+        unscored: wp.array(dtype=wp.int64),
+        deposited: wp.array(dtype=wp.int64),
+        pcut: float,
+        ecut: float,
+        transport_electrons: int,
+        dose_to_water: int,
+        majorant_violations: wp.array(dtype=wp.int32),
+    ):
+        """One thread transports one photon to termination; Woodcock tracking.
+
+        Sequencing mirrors ``transport.photon.photon_steps`` statement for statement;
+        consult that loop for the physics commentary. ``gi`` is the transport grid;
+        ``si`` the scoring grid deposits route into (equal to ``gi`` by default).
+        ``dose_to_water`` selects the tally weighting (``_spr_factor``); the books
+        stay physical either way.
+        """
+        tid = wp.tid()
+        # A blind drain round launches at queue capacity; only the first ``count``
+        # slots hold particles. A launch sized from the count never takes this.
+        if tid >= wp.min(q_in.count[0], q_in.capacity):
             return
-        t += _ENTRY_NUDGE_CM
-        x += t * ux
-        y += t * uy
-        z += t * uz
+        e = q_in.energy[tid]
+        beamlet = q_in.beamlet[tid]
+        base = beamlet * si.n_voxels
+        w = q_in.weight[tid]
+        primary = q_in.primary[tid]
+        x = q_in.x[tid]
+        y = q_in.y[tid]
+        z = q_in.z[tid]
+        ux = q_in.ux[tid]
+        uy = q_in.uy[tid]
+        uz = q_in.uz[tid]
+        slots[tid] = q_in.rng[tid]
+        state = WarpRNGState()
+        state.slots = slots
+        state.idx = tid
+
         if not point_inside(x, y, z, gi.x_lo, gi.y_lo, gi.z_lo, gi.x_hi, gi.y_hi, gi.z_hi):
-            _escape(escaped, w * e)
-            return
-
-    while True:
-        mu_majorant = lookup_1d(tab.majorant, tab.p_log_e_min, tab.p_inv_dlog, tab.n_points, e)
-        step = sample_path_length(mu_majorant, state)
-        x += step * ux
-        y += step * uy
-        z += step * uz
-        if not point_inside(x, y, z, gi.x_lo, gi.y_lo, gi.z_lo, gi.x_hi, gi.y_hi, gi.z_hi):
-            _escape(escaped, w * e)
-            return
-
-        ix = point_axis_index(x, gi.x_lo, gi.sx, gi.nx)
-        iy = point_axis_index(y, gi.y_lo, gi.sy, gi.ny)
-        iz = point_axis_index(z, gi.z_lo, gi.sz, gi.nz)
-        rho = density[ix, iy, iz]
-        mat = int(material[ix, iy, iz])  # uint8 voxel map -> table row index
-        mu_compton = rho * lookup_2d(
-            tab.mu_compton, mat, tab.p_log_e_min, tab.p_inv_dlog, tab.n_points, e
-        )
-        mu_photo = rho * lookup_2d(
-            tab.mu_photo, mat, tab.p_log_e_min, tab.p_inv_dlog, tab.n_points, e
-        )
-        mu_pair = rho * lookup_2d(
-            tab.mu_pair, mat, tab.p_log_e_min, tab.p_inv_dlog, tab.n_points, e
-        )
-        mu_rayleigh = rho * lookup_2d(
-            tab.mu_rayleigh, mat, tab.p_log_e_min, tab.p_inv_dlog, tab.n_points, e
-        )
-        mu_real = mu_compton + mu_photo + mu_pair + mu_rayleigh
-        if mu_real > mu_majorant * (1.0 + _MAJORANT_TOLERANCE):
-            wp.atomic_add(majorant_violations, 0, 1)
-            _escape(escaped, w * e)
-            return
-
-        if uniform(state) * mu_majorant >= mu_real:
-            continue  # delta (fictitious) scattering
-
-        process = select_photon_process(mu_compton, mu_photo, mu_pair, mu_rayleigh, state)
-
-        if process == PhotonProcess.RAYLEIGH:
-            cos_coherent = sample_coherent_cos_theta_form_factor(
-                tab.coherent_cumulative[mat], tab.coherent_x, tab.n_coherent, e, state
+            t = slab_entry_distance(
+                x, y, z, ux, uy, uz, gi.x_lo, gi.y_lo, gi.z_lo, gi.x_hi, gi.y_hi, gi.z_hi
             )
-            phi = 2.0 * math.pi * uniform(state)
-            ux, uy, uz = rotate_direction(ux, uy, uz, cos_coherent, phi)
-        elif process == PhotonProcess.COMPTON:
-            if PHOTON_SPLIT_N > 1 and primary != 0:
-                # Compton splitting: the source photon samples
-                # PHOTON_SPLIT_N independent final states, each copy (scattered
-                # photon + recoil electron) weighted w/N and pushed as a
-                # non-primary photon; the primary's thread ends here. Ships at
-                # PHOTON_SPLIT_N=1 (analog), where the constant guard above
-                # dead-codes this block and a primary's first Compton continues
-                # in-thread like every later scatter — no re-queue, no child
-                # stream; the N > 1 machinery compiles in unchanged whenever the
-                # constant says so. Only the primary splits, so the population
-                # is bounded.
-                # Copies get child streams (spawn_stream), the warp counterpart
-                # of the reference's sequential draws; each copy conserves energy
-                # (scattered + recoil = e), so the balance stays exact.
-                split_w = w / float(PHOTON_SPLIT_N)
-                for _ in range(PHOTON_SPLIT_N):
-                    ratio = sample_compton_energy_ratio(e, state)
-                    recoil = e * (1.0 - ratio)
-                    phi = 2.0 * math.pi * uniform(state)
-                    if transport_electrons != 0 and recoil > ecut:
-                        cos_electron = compton_electron_cos_theta(e, ratio)
-                        ex, ey, ez = rotate_direction(ux, uy, uz, cos_electron, phi + math.pi)
-                        _queue_push(
-                            q_electron,
-                            ELECTRON,
-                            beamlet,
-                            recoil,
-                            split_w,
-                            x,
-                            y,
-                            z,
-                            ex,
-                            ey,
-                            ez,
-                            spawn_stream(state),
-                        )
-                    else:
-                        f = _spr_factor(tab, dose_to_water, recoil, mat, ecut)
-                        _deposit(
-                            edep,
-                            deposited,
-                            unscored,
-                            si,
-                            base,
-                            x,
-                            y,
-                            z,
-                            split_w * recoil,
-                            f,
-                            dose_to_water,
-                        )
-                    cos_gamma = compton_cos_theta(e, ratio)
-                    gx, gy, gz = rotate_direction(ux, uy, uz, cos_gamma, phi)
-                    e_scatter = e * ratio
-                    if e_scatter <= pcut:
-                        f = _spr_factor(tab, dose_to_water, e_scatter, mat, ecut)
-                        _deposit(
-                            edep,
-                            deposited,
-                            unscored,
-                            si,
-                            base,
-                            x,
-                            y,
-                            z,
-                            split_w * e_scatter,
-                            f,
-                            dose_to_water,
-                        )
-                    else:
-                        copy_w = split_w
-                        keep = True
-                        if (
-                            e_scatter < PHOTON_ROULETTE_MEV
-                            and wp.abs(copy_w) < PHOTON_ROULETTE_WEIGHT_CAP
-                        ):
-                            new_w = roulette_weight(copy_w, PHOTON_ROULETTE_SURVIVAL, state)
-                            _escape(escaped, (copy_w - new_w) * e_scatter)
-                            if new_w == 0.0:
-                                keep = False
-                            else:
-                                copy_w = new_w
-                        if keep:
+            if t >= _INFINITY_CM:
+                _escape(escaped, w * e)
+                return
+            t += _ENTRY_NUDGE_CM
+            x += t * ux
+            y += t * uy
+            z += t * uz
+            if not point_inside(x, y, z, gi.x_lo, gi.y_lo, gi.z_lo, gi.x_hi, gi.y_hi, gi.z_hi):
+                _escape(escaped, w * e)
+                return
+
+        while True:
+            mu_majorant = lookup_1d(tab.majorant, tab.p_log_e_min, tab.p_inv_dlog, tab.n_points, e)
+            step = sample_path_length(mu_majorant, state)
+            x += step * ux
+            y += step * uy
+            z += step * uz
+            if not point_inside(x, y, z, gi.x_lo, gi.y_lo, gi.z_lo, gi.x_hi, gi.y_hi, gi.z_hi):
+                _escape(escaped, w * e)
+                return
+
+            ix = point_axis_index(x, gi.x_lo, gi.sx, gi.nx)
+            iy = point_axis_index(y, gi.y_lo, gi.sy, gi.ny)
+            iz = point_axis_index(z, gi.z_lo, gi.sz, gi.nz)
+            rho = density[ix, iy, iz]
+            mat = int(material[ix, iy, iz])  # uint8 voxel map -> table row index
+            mu_compton = rho * lookup_2d(
+                tab.mu_compton, mat, tab.p_log_e_min, tab.p_inv_dlog, tab.n_points, e
+            )
+            mu_photo = rho * lookup_2d(
+                tab.mu_photo, mat, tab.p_log_e_min, tab.p_inv_dlog, tab.n_points, e
+            )
+            mu_pair = rho * lookup_2d(
+                tab.mu_pair, mat, tab.p_log_e_min, tab.p_inv_dlog, tab.n_points, e
+            )
+            mu_rayleigh = rho * lookup_2d(
+                tab.mu_rayleigh, mat, tab.p_log_e_min, tab.p_inv_dlog, tab.n_points, e
+            )
+            mu_real = mu_compton + mu_photo + mu_pair + mu_rayleigh
+            if mu_real > mu_majorant * (1.0 + _MAJORANT_TOLERANCE):
+                wp.atomic_add(majorant_violations, 0, 1)
+                _escape(escaped, w * e)
+                return
+
+            if uniform(state) * mu_majorant >= mu_real:
+                continue  # delta (fictitious) scattering
+
+            process = select_photon_process(mu_compton, mu_photo, mu_pair, mu_rayleigh, state)
+
+            if process == PhotonProcess.RAYLEIGH:
+                cos_coherent = sample_coherent_cos_theta_form_factor(
+                    tab.coherent_cumulative[mat], tab.coherent_x, tab.n_coherent, e, state
+                )
+                phi = 2.0 * math.pi * uniform(state)
+                ux, uy, uz = rotate_direction(ux, uy, uz, cos_coherent, phi)
+            elif process == PhotonProcess.COMPTON:
+                if PHOTON_SPLIT_N > 1 and primary != 0:
+                    # Compton splitting: the source photon samples
+                    # PHOTON_SPLIT_N independent final states, each copy (scattered
+                    # photon + recoil electron) weighted w/N and pushed as a
+                    # non-primary photon; the primary's thread ends here. Ships at
+                    # PHOTON_SPLIT_N=1 (analog), where the constant guard above
+                    # dead-codes this block and a primary's first Compton continues
+                    # in-thread like every later scatter — no re-queue, no child
+                    # stream; the N > 1 machinery compiles in unchanged whenever the
+                    # constant says so. Only the primary splits, so the population
+                    # is bounded.
+                    # Copies get child streams (spawn_stream), the warp counterpart
+                    # of the reference's sequential draws; each copy conserves energy
+                    # (scattered + recoil = e), so the balance stays exact.
+                    split_w = w / float(PHOTON_SPLIT_N)
+                    for _ in range(PHOTON_SPLIT_N):
+                        ratio = sample_compton_energy_ratio(e, state)
+                        recoil = e * (1.0 - ratio)
+                        phi = 2.0 * math.pi * uniform(state)
+                        if transport_electrons != 0 and recoil > ecut:
+                            cos_electron = compton_electron_cos_theta(e, ratio)
+                            ex, ey, ez = rotate_direction(ux, uy, uz, cos_electron, phi + math.pi)
                             _queue_push(
-                                q_photon_out,
-                                PHOTON,
+                                q_electron,
+                                ELECTRON,
                                 beamlet,
-                                e_scatter,
-                                copy_w,
+                                recoil,
+                                split_w,
                                 x,
                                 y,
                                 z,
-                                gx,
-                                gy,
-                                gz,
+                                ex,
+                                ey,
+                                ez,
                                 spawn_stream(state),
                             )
-                return
-            # Non-primary photon: single scatter, continue in-thread — the bulk
-            # of the cascade. Only the source photon's first Compton re-queues
-            # (splitting, above); everything here mirrors the reference loop.
-            ratio = sample_compton_energy_ratio(e, state)
-            recoil = e * (1.0 - ratio)
-            phi = 2.0 * math.pi * uniform(state)
-            if transport_electrons != 0 and recoil > ecut:
-                cos_electron = compton_electron_cos_theta(e, ratio)
-                ex, ey, ez = rotate_direction(ux, uy, uz, cos_electron, phi + math.pi)
-                _queue_push(
-                    q_electron,
-                    ELECTRON,
-                    beamlet,
-                    recoil,
-                    w,
-                    x,
-                    y,
-                    z,
-                    ex,
-                    ey,
-                    ez,
-                    spawn_stream(state),
-                )
-            else:
-                f = _spr_factor(tab, dose_to_water, recoil, mat, ecut)
-                _deposit(edep, deposited, unscored, si, base, x, y, z, w * recoil, f, dose_to_water)
-            cos_gamma = compton_cos_theta(e, ratio)
-            ux, uy, uz = rotate_direction(ux, uy, uz, cos_gamma, phi)
-            e *= ratio
-            if e <= pcut:
-                _deposit(
-                    edep,
-                    deposited,
-                    unscored,
-                    si,
-                    base,
-                    x,
-                    y,
-                    z,
-                    w * e,
-                    _spr_factor(tab, dose_to_water, e, mat, ecut),
-                    dose_to_water,
-                )
-                return
-            if e < PHOTON_ROULETTE_MEV and wp.abs(w) < PHOTON_ROULETTE_WEIGHT_CAP:
-                # Basic VR, mirror of the reference loop: roulette the softened
-                # scattered photon; the signed ledger entry keeps the balance exact.
-                new_w = roulette_weight(w, PHOTON_ROULETTE_SURVIVAL, state)
-                _escape(escaped, (w - new_w) * e)
-                if new_w == 0.0:
+                        else:
+                            f = _spr_factor(tab, dose_to_water, recoil, mat, ecut)
+                            _deposit(
+                                edep,
+                                deposited,
+                                unscored,
+                                si,
+                                base,
+                                x,
+                                y,
+                                z,
+                                split_w * recoil,
+                                f,
+                                dose_to_water,
+                            )
+                        cos_gamma = compton_cos_theta(e, ratio)
+                        gx, gy, gz = rotate_direction(ux, uy, uz, cos_gamma, phi)
+                        e_scatter = e * ratio
+                        if e_scatter <= pcut:
+                            f = _spr_factor(tab, dose_to_water, e_scatter, mat, ecut)
+                            _deposit(
+                                edep,
+                                deposited,
+                                unscored,
+                                si,
+                                base,
+                                x,
+                                y,
+                                z,
+                                split_w * e_scatter,
+                                f,
+                                dose_to_water,
+                            )
+                        else:
+                            copy_w = split_w
+                            keep = True
+                            if (
+                                e_scatter < PHOTON_ROULETTE_MEV
+                                and wp.abs(copy_w) < PHOTON_ROULETTE_WEIGHT_CAP
+                            ):
+                                new_w = roulette_weight(copy_w, PHOTON_ROULETTE_SURVIVAL, state)
+                                _escape(escaped, (copy_w - new_w) * e_scatter)
+                                if new_w == 0.0:
+                                    keep = False
+                                else:
+                                    copy_w = new_w
+                            if keep:
+                                _queue_push(
+                                    q_photon_out,
+                                    PHOTON,
+                                    beamlet,
+                                    e_scatter,
+                                    copy_w,
+                                    x,
+                                    y,
+                                    z,
+                                    gx,
+                                    gy,
+                                    gz,
+                                    spawn_stream(state),
+                                )
                     return
-                w = new_w
-        elif process == PhotonProcess.PHOTOELECTRIC:
-            if transport_electrons != 0 and e > ecut:
-                _queue_push(
-                    q_electron, ELECTRON, beamlet, e, w, x, y, z, ux, uy, uz, spawn_stream(state)
-                )
-            else:
-                _deposit(
-                    edep,
-                    deposited,
-                    unscored,
-                    si,
-                    base,
-                    x,
-                    y,
-                    z,
-                    w * e,
-                    _spr_factor(tab, dose_to_water, e, mat, ecut),
-                    dose_to_water,
-                )
-            return
-        else:  # pair production
-            kinetic = e - 2.0 * ELECTRON_MASS_MEV
-            if transport_electrons != 0:
-                # Pair model dispatch (tab.pair_model). PAIR_UNIFORM_SPLIT: one
-                # uniform for the energy share, both leptons forward. A second
-                # model branches here on its own draws and directions.
-                fraction = uniform(state)
-                share_e = fraction * kinetic
-                share_p = (1.0 - fraction) * kinetic
-                if share_e > ecut:
+                # Non-primary photon: single scatter, continue in-thread — the bulk
+                # of the cascade. Only the source photon's first Compton re-queues
+                # (splitting, above); everything here mirrors the reference loop.
+                ratio = sample_compton_energy_ratio(e, state)
+                recoil = e * (1.0 - ratio)
+                phi = 2.0 * math.pi * uniform(state)
+                if transport_electrons != 0 and recoil > ecut:
+                    cos_electron = compton_electron_cos_theta(e, ratio)
+                    ex, ey, ez = rotate_direction(ux, uy, uz, cos_electron, phi + math.pi)
                     _queue_push(
                         q_electron,
                         ELECTRON,
                         beamlet,
-                        share_e,
+                        recoil,
                         w,
                         x,
                         y,
                         z,
-                        ux,
-                        uy,
-                        uz,
+                        ex,
+                        ey,
+                        ez,
                         spawn_stream(state),
                     )
                 else:
-                    f = _spr_factor(tab, dose_to_water, share_e, mat, ecut)
+                    f = _spr_factor(tab, dose_to_water, recoil, mat, ecut)
                     _deposit(
-                        edep, deposited, unscored, si, base, x, y, z, w * share_e, f, dose_to_water
+                        edep, deposited, unscored, si, base, x, y, z, w * recoil, f, dose_to_water
                     )
-                if share_p > ecut:
+                cos_gamma = compton_cos_theta(e, ratio)
+                ux, uy, uz = rotate_direction(ux, uy, uz, cos_gamma, phi)
+                e *= ratio
+                if e <= pcut:
+                    _deposit(
+                        edep,
+                        deposited,
+                        unscored,
+                        si,
+                        base,
+                        x,
+                        y,
+                        z,
+                        w * e,
+                        _spr_factor(tab, dose_to_water, e, mat, ecut),
+                        dose_to_water,
+                    )
+                    return
+                if e < PHOTON_ROULETTE_MEV and wp.abs(w) < PHOTON_ROULETTE_WEIGHT_CAP:
+                    # Basic VR, mirror of the reference loop: roulette the softened
+                    # scattered photon; the signed ledger entry keeps the balance exact.
+                    new_w = roulette_weight(w, PHOTON_ROULETTE_SURVIVAL, state)
+                    _escape(escaped, (w - new_w) * e)
+                    if new_w == 0.0:
+                        return
+                    w = new_w
+            elif process == PhotonProcess.PHOTOELECTRIC:
+                if transport_electrons != 0 and e > ecut:
                     _queue_push(
                         q_electron,
-                        POSITRON,
+                        ELECTRON,
                         beamlet,
-                        share_p,
+                        e,
                         w,
                         x,
                         y,
@@ -1626,9 +1667,167 @@ def photon_kernel(
                         spawn_stream(state),
                     )
                 else:
-                    f = _spr_factor(tab, dose_to_water, share_p, mat, ecut)
                     _deposit(
-                        edep, deposited, unscored, si, base, x, y, z, w * share_p, f, dose_to_water
+                        edep,
+                        deposited,
+                        unscored,
+                        si,
+                        base,
+                        x,
+                        y,
+                        z,
+                        w * e,
+                        _spr_factor(tab, dose_to_water, e, mat, ecut),
+                        dose_to_water,
+                    )
+                return
+            else:  # pair production
+                kinetic = e - 2.0 * ELECTRON_MASS_MEV
+                if transport_electrons != 0:
+                    # Pair model dispatch (compile time, wp.static): the electron's
+                    # share and the two directions; the positron takes the rest.
+                    # PAIR_UNIFORM_SPLIT: one uniform for the share, both leptons
+                    # forward. PAIR_BETHE_HEITLER: screened Bethe-Heitler sharing for
+                    # this voxel's material, then each transported lepton draws its
+                    # own polar angle and azimuth (mirror of the reference loop). The
+                    # angle travels as 1 - cos(theta): float32 cannot hold the cosine
+                    # of an angle of order 1/gamma.
+                    if wp.static(bethe_heitler_pair):
+                        share_e = sample_pair_electron_energy(
+                            e,
+                            model.pair_screening[mat, 0],
+                            model.pair_screening[mat, 1],
+                            model.pair_screening[mat, 2],
+                            state,
+                        )
+                        share_p = kinetic - share_e
+                    else:
+                        fraction = uniform(state)
+                        share_e = fraction * kinetic
+                        share_p = (1.0 - fraction) * kinetic
+                    if share_e > ecut:
+                        if wp.static(bethe_heitler_pair):
+                            one_minus_cos = sample_pair_one_minus_cos_theta(share_e, state)
+                            phi = 2.0 * math.pi * uniform(state)
+                            lx, ly, lz = rotate_direction_one_minus_cos(
+                                ux, uy, uz, one_minus_cos, phi
+                            )
+                            _queue_push(
+                                q_electron,
+                                ELECTRON,
+                                beamlet,
+                                share_e,
+                                w,
+                                x,
+                                y,
+                                z,
+                                lx,
+                                ly,
+                                lz,
+                                spawn_stream(state),
+                            )
+                        else:
+                            _queue_push(
+                                q_electron,
+                                ELECTRON,
+                                beamlet,
+                                share_e,
+                                w,
+                                x,
+                                y,
+                                z,
+                                ux,
+                                uy,
+                                uz,
+                                spawn_stream(state),
+                            )
+                    else:
+                        f = _spr_factor(tab, dose_to_water, share_e, mat, ecut)
+                        _deposit(
+                            edep,
+                            deposited,
+                            unscored,
+                            si,
+                            base,
+                            x,
+                            y,
+                            z,
+                            w * share_e,
+                            f,
+                            dose_to_water,
+                        )
+                    if share_p > ecut:
+                        if wp.static(bethe_heitler_pair):
+                            one_minus_cos = sample_pair_one_minus_cos_theta(share_p, state)
+                            phi = 2.0 * math.pi * uniform(state)
+                            lx, ly, lz = rotate_direction_one_minus_cos(
+                                ux, uy, uz, one_minus_cos, phi
+                            )
+                            _queue_push(
+                                q_electron,
+                                POSITRON,
+                                beamlet,
+                                share_p,
+                                w,
+                                x,
+                                y,
+                                z,
+                                lx,
+                                ly,
+                                lz,
+                                spawn_stream(state),
+                            )
+                        else:
+                            _queue_push(
+                                q_electron,
+                                POSITRON,
+                                beamlet,
+                                share_p,
+                                w,
+                                x,
+                                y,
+                                z,
+                                ux,
+                                uy,
+                                uz,
+                                spawn_stream(state),
+                            )
+                    else:
+                        f = _spr_factor(tab, dose_to_water, share_p, mat, ecut)
+                        _deposit(
+                            edep,
+                            deposited,
+                            unscored,
+                            si,
+                            base,
+                            x,
+                            y,
+                            z,
+                            w * share_p,
+                            f,
+                            dose_to_water,
+                        )
+                        _annihilate_at_rest(
+                            x,
+                            y,
+                            z,
+                            si,
+                            state,
+                            q_photon_out,
+                            edep,
+                            deposited,
+                            unscored,
+                            pcut,
+                            beamlet,
+                            base,
+                            w,
+                            _spr_factor(tab, dose_to_water, ELECTRON_MASS_MEV, mat, ecut),
+                            dose_to_water,
+                        )
+                else:
+                    f = _spr_factor(tab, dose_to_water, kinetic, mat, ecut)
+                    _deposit(
+                        edep, deposited, unscored, si, base, x, y, z, w * kinetic, f, dose_to_water
                     )
                     _annihilate_at_rest(
                         x,
@@ -1647,217 +1846,732 @@ def photon_kernel(
                         _spr_factor(tab, dose_to_water, ELECTRON_MASS_MEV, mat, ecut),
                         dose_to_water,
                     )
-            else:
-                f = _spr_factor(tab, dose_to_water, kinetic, mat, ecut)
-                _deposit(
-                    edep, deposited, unscored, si, base, x, y, z, w * kinetic, f, dose_to_water
-                )
-                _annihilate_at_rest(
-                    x,
-                    y,
-                    z,
-                    si,
-                    state,
-                    q_photon_out,
-                    edep,
-                    deposited,
-                    unscored,
-                    pcut,
-                    beamlet,
-                    base,
-                    w,
-                    _spr_factor(tab, dose_to_water, ELECTRON_MASS_MEV, mat, ecut),
-                    dose_to_water,
-                )
-            return
+                return
+
+    # As in make_electron_kernel: the type of ``model`` is the one thing about the
+    # signature that depends on the model, and string annotations cannot name it.
+    photon_kernel.__annotations__["model"] = model_type
+    kernel = decorate(photon_kernel)
+    _PHOTON_KERNELS[key] = kernel
+    return kernel
 
 
-@wp.kernel
-def electron_kernel(
-    gi: GridInfo,
-    si: GridInfo,
-    density: wp.array3d(dtype=float),
-    material: wp.array3d(dtype=wp.uint8),
-    tab: Tables,
-    q_in: Queue,
-    q_photon: Queue,
-    q_electron_out: Queue,
-    slots: wp.array(dtype=wp.uint32),
-    edep: wp.array(dtype=wp.int64),
-    escaped: wp.array(dtype=wp.int64),
-    unscored: wp.array(dtype=wp.int64),
-    deposited: wp.array(dtype=wp.int64),
-    pcut: float,
-    ecut: float,
-    step_energy_fraction: float,
-    deposit_resolution: float,
-    msc_model_gs: int,
-    dose_to_water: int,
-):
-    """One thread transports one electron or positron; Class II condensed history.
+photon_kernel = make_photon_kernel(PAIR_UNIFORM_SPLIT)
+"""The photon kernel of the default physics models; see :func:`make_photon_kernel`."""
 
-    Sequencing mirrors ``transport.electron.electron_steps`` statement for
-    statement; delta rays go to the electron out-queue instead of a stack, and
-    bremsstrahlung/annihilation photons to the photon queue. ``gi`` is the
-    transport grid; ``si`` the scoring grid deposits route into.
-    ``dose_to_water`` selects the tally weighting (``_spr_factor``): one factor
-    per substep, at the substep's initial energy and voxel material — the same
-    (E, material) the restricted stopping power charged the loss with.
+
+def photon_kernel_for(tab: Tables) -> wp.Kernel:
+    """Return the photon kernel compiled for the models ``tab`` was built under.
+
+    See :func:`electron_kernel_for`. Called on the host, before a launch.
     """
-    tid = wp.tid()
-    # Blind drain rounds launch at capacity; see photon_kernel.
-    if tid >= wp.min(q_in.count[0], q_in.capacity):
-        return
-    is_positron = q_in.kind[tid] == POSITRON
-    e = q_in.energy[tid]
-    # Nudge walked into the current voxel, charged by its first substep there.
-    carry = float(0.0)  # noqa: UP018 - Warp needs a dynamic var mutated in the loop
-    beamlet = q_in.beamlet[tid]
-    base = beamlet * si.n_voxels
-    w = q_in.weight[tid]
-    x = q_in.x[tid]
-    y = q_in.y[tid]
-    z = q_in.z[tid]
-    ux = q_in.ux[tid]
-    uy = q_in.uy[tid]
-    uz = q_in.uz[tid]
-    slots[tid] = q_in.rng[tid]
-    state = WarpRNGState()
-    state.slots = slots
-    state.idx = tid
+    return make_photon_kernel(int(tab.pair_model))
 
-    latent = 0.0
-    if is_positron:
-        latent = 2.0 * ELECTRON_MASS_MEV
 
-    if not point_inside(x, y, z, gi.x_lo, gi.y_lo, gi.z_lo, gi.x_hi, gi.y_hi, gi.z_hi):
-        t = slab_entry_distance(
-            x, y, z, ux, uy, uz, gi.x_lo, gi.y_lo, gi.z_lo, gi.x_hi, gi.y_hi, gi.z_hi
-        )
-        if t >= _INFINITY_CM:
-            _escape(escaped, w * (e + latent))
+@wp.struct
+class ElectronModelTables:
+    """Data of the electron kernel's non-default physics models; read-only.
+
+    The ``model`` argument of an electron kernel compiled for a non-default model
+    (:func:`make_electron_kernel`). The default kernel does not take it: its
+    ``model`` argument is an ``int`` placeholder, so the clinical path carries no
+    model data at all. Measured on CUDA against develop b858f86 (thin-target,
+    per-round ratios, sd 0.001 to 0.003): these three arrays as fields of
+    :class:`Tables` 1.011 to 1.016 with nothing reading them (that struct is
+    copied into the helper calls of every kernel); as this struct passed to the
+    default kernel too 0.994 to 1.000; with the ``int`` placeholder 0.989 to
+    0.990, which is where the kernel stood before any second model existed.
+
+    ``brems_cross_section``, ``stopping_radiative_restricted`` and
+    ``brems_screening`` are the screened Bethe-Heitler model's data
+    (:class:`pyradmc.data.bethe_heitler.BetheHeitlerTables`), on the electron grid
+    of :class:`Tables`, whose lookup metadata they share.
+
+    ``bhabha``, ``annihilation`` and ``positron_restricted_range`` are the
+    ``"bhabha-in-flight"`` positron model's data
+    (:class:`pyradmc.data.positron.PositronTables`) on the same electron grid;
+    ``positron_energy_of_restricted_range`` is the inverse of the last on a
+    log-range grid of its own, with ``positron_r_log_min`` and
+    ``positron_r_inv_dlog`` as its lookup metadata (the positron counterparts of
+    ``Tables.energy_of_restricted_range``, ``r_log_min`` and ``r_inv_dlog``).
+
+    A ``wp.struct`` needs a valid array on every field, so a kernel that takes
+    this struct gets a 1-element placeholder on the fields of the models it was
+    not compiled for.
+    """
+
+    brems_cross_section: wp.array2d(dtype=float)
+    stopping_radiative_restricted: wp.array2d(dtype=float)
+    brems_screening: wp.array2d(dtype=float)
+    bhabha: wp.array2d(dtype=float)
+    annihilation: wp.array2d(dtype=float)
+    positron_restricted_range: wp.array2d(dtype=float)
+    positron_energy_of_restricted_range: wp.array2d(dtype=float)
+    positron_r_log_min: float
+    positron_r_inv_dlog: float
+
+
+_ELECTRON_KERNELS: dict[tuple[int, int], wp.Kernel] = {}
+
+
+def make_electron_kernel(
+    brems_model: int, positron_model: int = POSITRON_MOLLER_AT_REST
+) -> wp.Kernel:
+    """Compile-time specialisation of the electron kernel on its physics models (cached).
+
+    One kernel per model combination, from one source: the model is a Python value
+    captured by the kernel body and read through ``wp.static``, so Warp resolves
+    every "model dispatch" site while generating code and the other model's arm
+    is not in the kernel at all. The alternative, a run-time branch on
+    ``tab.brems_model``, was measured on the thin-target path at 1.067 (12 MeV
+    electrons), 1.072 (6 MeV photons) and 1.081 (18 MeV photons) of develop
+    b858f86 on CUDA (interleaved per-round ratios, sd 0.001 to 0.004; RTX 4070,
+    2026-11-14) although the branch is never taken there: a code-generation cost
+    of the second arm existing in the loop. Compiled per model, the same three
+    cases stand at 0.990, 0.989 and 0.989, where the kernel stood before a second
+    model existed; the CPU does not resolve either (1.00, sd 0.01 to 0.04).
+
+    The default combination (``BREMS_THIN_TARGET`` with
+    ``POSITRON_MOLLER_AT_REST``) lives in this module, as
+    :data:`electron_kernel`. Every other combination is compiled in a Warp module
+    of its own (``module="unique"``, same options), on the first run that selects
+    it: the shared module's binary, and with it the default path, does not depend
+    on which other models exist or have been used. A non-default kernel reads its
+    model's tables from ``model``, an :class:`ElectronModelTables`; the default
+    kernel's ``model`` is an ``int`` placeholder (measurements on that class).
+
+    The positron model is the second key. It is compiled in the same way, but a
+    thread learns only at run time whether it carries a positron, so the
+    ``"bhabha-in-flight"`` arm sits under ``wp.static`` *and* ``is_positron``: a
+    kernel compiled for it runs electrons through the electron arms unchanged,
+    and a kernel not compiled for it does not contain it.
+
+    A further process is one more argument: the model code joins the cache key,
+    the body reads it through ``wp.static`` at its marked sites, and
+    :func:`electron_kernel_for` passes it on. :func:`make_photon_kernel` is the
+    same shape for pair production.
+    """
+    key = (brems_model, positron_model)
+    cached = _ELECTRON_KERNELS.get(key)
+    if cached is not None:
+        return cached
+    if brems_model not in (BREMS_THIN_TARGET, BREMS_BETHE_HEITLER):
+        raise ValueError(f"no electron kernel for bremsstrahlung model code {brems_model}")
+    if positron_model not in (POSITRON_MOLLER_AT_REST, POSITRON_BHABHA_IN_FLIGHT):
+        raise ValueError(f"no electron kernel for positron model code {positron_model}")
+    bethe_heitler = brems_model == BREMS_BETHE_HEITLER
+    in_flight_model = positron_model == POSITRON_BHABHA_IN_FLIGHT
+    if key == (BREMS_THIN_TARGET, POSITRON_MOLLER_AT_REST):
+        decorate = wp.kernel
+        model_type: type = int  # placeholder: the default kernel takes no model data
+    else:
+        decorate = wp.kernel(module="unique", module_options=dict(_MODULE_OPTIONS))
+        model_type = ElectronModelTables
+
+    def electron_kernel(
+        gi: GridInfo,
+        si: GridInfo,
+        density: wp.array3d(dtype=float),
+        material: wp.array3d(dtype=wp.uint8),
+        tab: Tables,
+        model: ElectronModelTables,
+        q_in: Queue,
+        q_photon: Queue,
+        q_electron_out: Queue,
+        slots: wp.array(dtype=wp.uint32),
+        edep: wp.array(dtype=wp.int64),
+        escaped: wp.array(dtype=wp.int64),
+        unscored: wp.array(dtype=wp.int64),
+        deposited: wp.array(dtype=wp.int64),
+        pcut: float,
+        ecut: float,
+        step_energy_fraction: float,
+        deposit_resolution: float,
+        msc_model_gs: int,
+        dose_to_water: int,
+    ):
+        """One thread transports one electron or positron; Class II condensed history.
+
+        Sequencing mirrors ``transport.electron.electron_steps`` statement for
+        statement; delta rays go to the electron out-queue instead of a stack, and
+        bremsstrahlung/annihilation photons to the photon queue. ``gi`` is the
+        transport grid; ``si`` the scoring grid deposits route into.
+        ``dose_to_water`` selects the tally weighting (``_spr_factor``): one factor
+        per substep, at the substep's initial energy and voxel material — the same
+        (E, material) the restricted stopping power charged the loss with.
+        """
+        tid = wp.tid()
+        # Blind drain rounds launch at capacity; see photon_kernel.
+        if tid >= wp.min(q_in.count[0], q_in.capacity):
             return
-        t += _ENTRY_NUDGE_CM
-        x += t * ux
-        y += t * uy
-        z += t * uz
+        is_positron = q_in.kind[tid] == POSITRON
+        e = q_in.energy[tid]
+        # Nudge walked into the current voxel, charged by its first substep there.
+        carry = float(0.0)  # noqa: UP018 - Warp needs a dynamic var mutated in the loop
+        beamlet = q_in.beamlet[tid]
+        base = beamlet * si.n_voxels
+        w = q_in.weight[tid]
+        x = q_in.x[tid]
+        y = q_in.y[tid]
+        z = q_in.z[tid]
+        ux = q_in.ux[tid]
+        uy = q_in.uy[tid]
+        uz = q_in.uz[tid]
+        slots[tid] = q_in.rng[tid]
+        state = WarpRNGState()
+        state.slots = slots
+        state.idx = tid
+
+        latent = 0.0
+        if is_positron:
+            latent = 2.0 * ELECTRON_MASS_MEV
+
         if not point_inside(x, y, z, gi.x_lo, gi.y_lo, gi.z_lo, gi.x_hi, gi.y_hi, gi.z_hi):
-            _escape(escaped, w * (e + latent))
-            return
+            t = slab_entry_distance(
+                x, y, z, ux, uy, uz, gi.x_lo, gi.y_lo, gi.z_lo, gi.x_hi, gi.y_hi, gi.z_hi
+            )
+            if t >= _INFINITY_CM:
+                _escape(escaped, w * (e + latent))
+                return
+            t += _ENTRY_NUDGE_CM
+            x += t * ux
+            y += t * uy
+            z += t * uz
+            if not point_inside(x, y, z, gi.x_lo, gi.y_lo, gi.z_lo, gi.x_hi, gi.y_hi, gi.z_hi):
+                _escape(escaped, w * (e + latent))
+                return
 
-    while True:
-        if e <= ecut:
-            # Terminal: local deposit; the material lookup is needed for the
-            # dose-to-water factor (a source may inject a sub-cutoff electron,
-            # so the loop body's lookup may not have run yet).
-            t_ix = point_axis_index(x, gi.x_lo, gi.sx, gi.nx)
-            t_iy = point_axis_index(y, gi.y_lo, gi.sy, gi.ny)
-            t_iz = point_axis_index(z, gi.z_lo, gi.sz, gi.nz)
-            t_mat = int(material[t_ix, t_iy, t_iz])  # uint8 voxel map -> table row index
-            f = _spr_factor(tab, dose_to_water, e, t_mat, ecut)
-            _deposit(edep, deposited, unscored, si, base, x, y, z, w * e, f, dose_to_water)
-            if is_positron:
-                _annihilate_at_rest(
+        while True:
+            if e <= ecut:
+                # Terminal: local deposit; the material lookup is needed for the
+                # dose-to-water factor (a source may inject a sub-cutoff electron,
+                # so the loop body's lookup may not have run yet).
+                t_ix = point_axis_index(x, gi.x_lo, gi.sx, gi.nx)
+                t_iy = point_axis_index(y, gi.y_lo, gi.sy, gi.ny)
+                t_iz = point_axis_index(z, gi.z_lo, gi.sz, gi.nz)
+                t_mat = int(material[t_ix, t_iy, t_iz])  # uint8 voxel map -> table row index
+                f = _spr_factor(tab, dose_to_water, e, t_mat, ecut)
+                _deposit(edep, deposited, unscored, si, base, x, y, z, w * e, f, dose_to_water)
+                if is_positron:
+                    _annihilate_at_rest(
+                        x,
+                        y,
+                        z,
+                        si,
+                        state,
+                        q_photon,
+                        edep,
+                        deposited,
+                        unscored,
+                        pcut,
+                        beamlet,
+                        base,
+                        w,
+                        _spr_factor(tab, dose_to_water, ELECTRON_MASS_MEV, t_mat, ecut),
+                        dose_to_water,
+                    )
+                return
+
+            ix = point_axis_index(x, gi.x_lo, gi.sx, gi.nx)
+            iy = point_axis_index(y, gi.y_lo, gi.sy, gi.ny)
+            iz = point_axis_index(z, gi.z_lo, gi.sz, gi.nz)
+            rho = density[ix, iy, iz]
+            mat = int(material[ix, iy, iz])  # uint8 voxel map -> table row index
+
+            # --- magnetic field at the substep start (mirror of the reference loop) --
+            # b_mode == FIELD_NONE is the field-free world: nothing below executes, so
+            # the kernel's arithmetic and random stream are those of the pre-field code.
+            has_field = False
+            b_mag = 0.0
+            b_ux = 0.0
+            b_uy = 0.0
+            b_uz = 0.0
+            if gi.b_mode != FIELD_NONE:
+                bx, by, bz = field_at(
+                    gi.b_values,
+                    gi.b_mode,
+                    gi.b0x,
+                    gi.b0y,
+                    gi.b0z,
+                    gi.b_ox,
+                    gi.b_oy,
+                    gi.b_oz,
+                    gi.b_sx,
+                    gi.b_sy,
+                    gi.b_sz,
+                    gi.b_nx,
+                    gi.b_ny,
+                    gi.b_nz,
                     x,
                     y,
                     z,
-                    si,
-                    state,
-                    q_photon,
-                    edep,
-                    deposited,
-                    unscored,
-                    pcut,
-                    beamlet,
-                    base,
-                    w,
-                    _spr_factor(tab, dose_to_water, ELECTRON_MASS_MEV, t_mat, ecut),
-                    dose_to_water,
                 )
-            return
+                b2 = bx * bx + by * by + bz * bz
+                if b2 > 0.0:
+                    b_mag = math.sqrt(b2)
+                    b_ux = bx / b_mag
+                    b_uy = by / b_mag
+                    b_uz = bz / b_mag
+                    has_field = True
 
-        ix = point_axis_index(x, gi.x_lo, gi.sx, gi.nx)
-        iy = point_axis_index(y, gi.y_lo, gi.sy, gi.ny)
-        iz = point_axis_index(z, gi.z_lo, gi.sz, gi.nz)
-        rho = density[ix, iy, iz]
-        mat = int(material[ix, iy, iz])  # uint8 voxel map -> table row index
+            # Long exact-helix step in exterior air (mirror of the reference loop): zero is
+            # the current stepping, and a field-free substep never reads the map.
+            exterior = 0.0
+            if has_field and gi.air_on != 0:
+                exterior = gi.air_safety[ix, iy, iz]
 
-        # --- magnetic field at the substep start (mirror of the reference loop) --
-        # b_mode == FIELD_NONE is the field-free world: nothing below executes, so
-        # the kernel's arithmetic and random stream are those of the pre-field code.
-        has_field = False
-        b_mag = 0.0
-        b_ux = 0.0
-        b_uy = 0.0
-        b_uz = 0.0
-        if gi.b_mode != FIELD_NONE:
-            bx, by, bz = field_at(
-                gi.b_values,
-                gi.b_mode,
-                gi.b0x,
-                gi.b0y,
-                gi.b0z,
-                gi.b_ox,
-                gi.b_oy,
-                gi.b_oz,
-                gi.b_sx,
-                gi.b_sy,
-                gi.b_sz,
-                gi.b_nx,
-                gi.b_ny,
-                gi.b_nz,
+            # --- substep length ----------------------------------------------------
+            range_cm = (
+                lookup_2d(tab.csda_range, mat, tab.e_log_e_min, tab.e_inv_dlog, tab.n_points, e)
+                / rho
+            )
+            s_max = step_energy_fraction * range_cm
+            if msc_model_gs == 0:
+                # Angular cap: bound each hinge's mean-square deflection (see
+                # STEP_HINGE_THETA2_MAX); mirrors the reference loop's s_theta. A
+                # *Gaussian-validity* limit: under Goudsmit-Saunderson the exact
+                # deflection is sampled at arbitrary step length, so the
+                # energy-limited step stands (same conditional as the reference
+                # loop; the Gaussian branch's arithmetic is unchanged).
+                s_theta = STEP_HINGE_THETA2_MAX / (
+                    lookup_2d(
+                        tab.scattering_power, mat, tab.e_log_e_min, tab.e_inv_dlog, tab.n_points, e
+                    )
+                    * rho
+                )
+                s_max = min(s_max, s_theta)
+            if has_field:
+                # Curvature cap (LORENTZ_STEP_ANGLE_MAX), as in the reference loop; the
+                # safety replaces it on a long step, whose chords are exact at any angle.
+                if exterior > 0.0:
+                    s_max = min(s_max, exterior)
+                else:
+                    s_max = min(s_max, LORENTZ_STEP_ANGLE_MAX * gyroradius_cm(e, b_mag))
+            # Cap at the next voxel face (plus the nudge across it) so the substep's
+            # density and material stay those of the voxel it starts in (to within the
+            # chord's bend under a field; see the reference loop).
+            # A long step has no face cap (mirror of the reference loop).
+            s_boundary = _INFINITY_CM
+            if exterior <= 0.0:
+                s_boundary = (
+                    distance_to_voxel_boundary(
+                        x,
+                        y,
+                        z,
+                        ux,
+                        uy,
+                        uz,
+                        gi.x_lo,
+                        gi.y_lo,
+                        gi.z_lo,
+                        gi.sx,
+                        gi.sy,
+                        gi.sz,
+                        gi.nx,
+                        gi.ny,
+                        gi.nz,
+                    )
+                    + BOUNDARY_NUDGE_CM
+                )
+            s_geometry = min(s_max, s_boundary)
+            sigma_moller = rho * lookup_2d(
+                tab.moller, mat, tab.e_log_e_min, tab.e_inv_dlog, tab.n_points, e
+            )
+            # Positron model dispatch (compile time, wp.static), first site: the
+            # collision cross-section and the annihilation channel beside it.
+            # POSITRON_MOLLER_AT_REST: a positron keeps the electron's Moller
+            # cross-section above, and this block is not part of the kernel.
+            # POSITRON_BHABHA_IN_FLIGHT: a positron takes Bhabha (open from ECUT)
+            # and two-photon annihilation in flight, both at the substep-start
+            # energy (mirror of the reference loop).
+            if wp.static(in_flight_model):
+                sigma_annihilation = 0.0
+                if is_positron:
+                    sigma_moller = rho * lookup_2d(
+                        model.bhabha, mat, tab.e_log_e_min, tab.e_inv_dlog, tab.n_points, e
+                    )
+                    sigma_annihilation = rho * lookup_2d(
+                        model.annihilation, mat, tab.e_log_e_min, tab.e_inv_dlog, tab.n_points, e
+                    )
+            # Bremsstrahlung model dispatch (compile time, wp.static), first site.
+            # BREMS_THIN_TARGET has no discrete cross-section: the flight is sampled
+            # from Moller alone. BREMS_BETHE_HEITLER: photons above PCUT are a
+            # discrete channel competing with Moller, and the flight is sampled from
+            # the sum (mirror of the reference loop). On a long exterior-air step
+            # both are the start voxel's, like every other rate of that step.
+            sigma_discrete = sigma_moller
+            if wp.static(bethe_heitler):
+                sigma_brems = rho * lookup_2d(
+                    model.brems_cross_section,
+                    mat,
+                    tab.e_log_e_min,
+                    tab.e_inv_dlog,
+                    tab.n_points,
+                    e,
+                )
+                sigma_discrete = sigma_moller + sigma_brems
+            if wp.static(in_flight_model):
+                # The flight competes among all the positron's discrete channels
+                # (zero for an electron).
+                sigma_discrete = sigma_discrete + sigma_annihilation
+            s = s_geometry
+            event_pending = False
+            if sigma_discrete > 0.0:
+                s_interaction = sample_path_length(sigma_discrete, state)
+                if s_interaction <= s_geometry:
+                    s = s_interaction
+                    event_pending = True
+
+            # --- continuous loss over the substep (exact, DPM-style) ----------------
+            # Mirror of the reference loop: E_end = r^-1(r(E) - rho*s) through the
+            # flattened restricted-range table and its inverse; clamped so table
+            # interpolation can never gain energy or undershoot the cutoff.
+            # The nudge past a face is a geometric move: the loss covers the path inside
+            # this voxel plus the carried nudge (mirror of the reference loop).
+            face_limited = s == s_boundary
+            s_in = s
+            if face_limited:
+                s_in = s - BOUNDARY_NUDGE_CM
+            crossing = False
+            path = s_in + carry
+            available = lookup_2d(
+                tab.restricted_range, mat, tab.e_log_e_min, tab.e_inv_dlog, tab.n_points, e
+            )
+            # Positron model dispatch, second site: the range map of the continuous
+            # collision loss. POSITRON_BHABHA_IN_FLIGHT reads the positron's own;
+            # the substep *length* above still came from the electron's CSDA range
+            # (named approximation of the model, see the reference loop).
+            if wp.static(in_flight_model):  # noqa: SIM102 - resolved at compile time
+                if is_positron:
+                    available = lookup_2d(
+                        model.positron_restricted_range,
+                        mat,
+                        tab.e_log_e_min,
+                        tab.e_inv_dlog,
+                        tab.n_points,
+                        e,
+                    )
+            if rho * path >= available:
+                s_in = max(available / rho - carry, 0.0)
+                path = s_in + carry
+                de = e - ecut
+                event_pending = False
+            else:
+                # Both ends of the loss through the *same* inverse table. The reference
+                # loop inverts one range grid exactly; here range-of-energy and
+                # energy-of-range are two tables on different grids, and their round
+                # trip E(R(e)) - e is a fixed error per substep (~1e-6 MeV) that the
+                # loss of a short step cannot absorb: a gyration-capped substep in air
+                # loses tens of micro-eV, and whenever the error exceeded it the clamp
+                # e_end <= e zeroed the whole step's loss. Measured 2026-10-18 on the
+                # Fano cavity at air density, 1 MeV, 1.5 T: gap-to-wall 0.855 at a cap
+                # of 0.05 rad and 0.984 at 0.2 with e - e_end; 1.000 and 1.004 this way.
+                e_end = lookup_2d(
+                    tab.energy_of_restricted_range,
+                    mat,
+                    tab.r_log_min,
+                    tab.r_inv_dlog,
+                    tab.n_points,
+                    available - rho * path,
+                )
+                e_start = lookup_2d(
+                    tab.energy_of_restricted_range,
+                    mat,
+                    tab.r_log_min,
+                    tab.r_inv_dlog,
+                    tab.n_points,
+                    available,
+                )
+                if wp.static(in_flight_model):  # noqa: SIM102 - resolved at compile time
+                    if is_positron:
+                        # The same pattern through the positron's one inverse table,
+                        # which has a range grid of its own: both ends of the loss,
+                        # so their round-trip error cancels (AGENTS.md section 8).
+                        e_end = lookup_2d(
+                            model.positron_energy_of_restricted_range,
+                            mat,
+                            model.positron_r_log_min,
+                            model.positron_r_inv_dlog,
+                            tab.n_points,
+                            available - rho * path,
+                        )
+                        e_start = lookup_2d(
+                            model.positron_energy_of_restricted_range,
+                            mat,
+                            model.positron_r_log_min,
+                            model.positron_r_inv_dlog,
+                            tab.n_points,
+                            available,
+                        )
+                de = min(max(e_start - e_end, 0.0), e - ecut)
+            # Bremsstrahlung model dispatch, second site: the radiative loss that
+            # stays continuous, and the thin-target emission decision.
+            if wp.static(bethe_heitler):
+                # Only the radiative stopping power of photons below PCUT, read at
+                # the same (E, material) as the discrete cross-section above and
+                # charged over the same path as the collision loss (the in-voxel
+                # path plus the carried nudge); the total would count every
+                # transported photon twice.
+                continuous = (
+                    de
+                    + lookup_2d(
+                        model.stopping_radiative_restricted,
+                        mat,
+                        tab.e_log_e_min,
+                        tab.e_inv_dlog,
+                        tab.n_points,
+                        e,
+                    )
+                    * rho
+                    * path
+                )
+            else:
+                # BREMS_THIN_TARGET: a Bernoulli emission per substep, one uniform;
+                # the sub-PCUT remainder of the 1/k spectrum joins the continuous loss.
+                emit_probability, local_brems = bremsstrahlung_step_parameters(
+                    e,
+                    lookup_2d(
+                        tab.stopping_radiative,
+                        mat,
+                        tab.e_log_e_min,
+                        tab.e_inv_dlog,
+                        tab.n_points,
+                        e,
+                    ),
+                    rho,
+                    path,
+                    pcut,
+                )
+                continuous = de + local_brems
+                emit_brems = uniform(state) < emit_probability
+            substep_factor = _spr_factor(tab, dose_to_water, e, mat, ecut)
+
+            # --- random hinge: move, deflect, move ----------------------------------
+            # The carry's share of the loss rides with the first chord (mirror of the
+            # reference loop).
+            s1 = uniform(state) * s_in
+            s2 = s_in - s1
+            d1 = 0.0
+            if path > 0.0:
+                d1 = continuous * ((s1 + carry) / path)
+            d2 = continuous - d1
+            carry = 0.0
+
+            # Under a field each chord runs along its midpoint direction: half the
+            # gyration angle before, half after (mirror of the reference loop).
+            half = 0.0
+            cut = False
+            if has_field:
+                half = 0.5 * lorentz_rotation_angle(
+                    s1, gyroradius_cm(e - 0.5 * d1, b_mag), is_positron
+                )
+                ux, uy, uz = rotate_about_axis(ux, uy, uz, b_ux, b_uy, b_uz, half)
+                if exterior <= 0.0:
+                    # Bent chord may reach a face sooner than the pre-rotation cap allowed:
+                    # stop there and end the substep (mirror of the reference loop).
+                    s1_face = distance_to_voxel_boundary(
+                        x,
+                        y,
+                        z,
+                        ux,
+                        uy,
+                        uz,
+                        gi.x_lo,
+                        gi.y_lo,
+                        gi.z_lo,
+                        gi.sx,
+                        gi.sy,
+                        gi.sz,
+                        gi.nx,
+                        gi.ny,
+                        gi.nz,
+                    )
+                    if s1 >= s1_face:
+                        d1_scale = 0.0
+                        if s1 > 0.0:
+                            d1_scale = s1_face / s1
+                        d1 = d1 * d1_scale
+                        s1 = s1_face
+                        cut = True
+                        axis = voxel_face_axis(
+                            x,
+                            y,
+                            z,
+                            ux,
+                            uy,
+                            uz,
+                            gi.x_lo,
+                            gi.y_lo,
+                            gi.z_lo,
+                            gi.sx,
+                            gi.sy,
+                            gi.sz,
+                            gi.nx,
+                            gi.ny,
+                            gi.nz,
+                        )
+                        # Whole turn = the cut chord's (mirror of the reference loop).
+                        half = (
+                            lorentz_rotation_angle(
+                                s1, gyroradius_cm(e - 0.5 * d1, b_mag), is_positron
+                            )
+                            - half
+                        )
+            # A long step's chord is the true helix displacement (mirror of the reference
+            # loop); its midpoint is inside the safety ball, so the deposit stays exterior.
+            cx = ux
+            cy = uy
+            cz = uz
+            if exterior > 0.0:
+                cx, cy, cz = helix_chord(ux, uy, uz, b_ux, b_uy, b_uz, half)
+            _deposit_spread(
+                edep,
+                escaped,
+                deposited,
+                unscored,
+                gi,
+                si,
+                base,
                 x,
                 y,
                 z,
+                cx,
+                cy,
+                cz,
+                s1,
+                w * d1,
+                w,
+                substep_factor,
+                dose_to_water,
+                deposit_resolution,
             )
-            b2 = bx * bx + by * by + bz * bz
-            if b2 > 0.0:
-                b_mag = math.sqrt(b2)
-                b_ux = bx / b_mag
-                b_uy = by / b_mag
-                b_uz = bz / b_mag
-                has_field = True
+            e -= d1
+            x += cx * s1
+            y += cy * s1
+            z += cz * s1
+            if has_field:
+                ux, uy, uz = rotate_about_axis(ux, uy, uz, b_ux, b_uy, b_uz, half)
+            if cut:
+                # On the face: carry across along the face normal (a direction-aligned
+                # micron is below a float32 ulp at grazing incidence and the lane sits
+                # on the face for ever), or stop just inside if terminal; the micron is
+                # charged by the next substep, in that voxel.
+                nudge = BOUNDARY_NUDGE_CM
+                if e <= ecut:
+                    nudge = -BOUNDARY_NUDGE_CM
+                dx, dy, dz = nudge_across_face(axis, ux, uy, uz, nudge)
+                x += dx
+                y += dy
+                z += dz
+                carry = BOUNDARY_NUDGE_CM
+                if not point_inside(x, y, z, gi.x_lo, gi.y_lo, gi.z_lo, gi.x_hi, gi.y_hi, gi.z_hi):
+                    _escape(escaped, w * (e + latent))
+                    return
+                continue
+            if not point_inside(x, y, z, gi.x_lo, gi.y_lo, gi.z_lo, gi.x_hi, gi.y_hi, gi.z_hi):
+                _escape(escaped, w * (e + latent))
+                return
 
-        # Long exact-helix step in exterior air (mirror of the reference loop): zero is
-        # the current stepping, and a field-free substep never reads the map.
-        exterior = 0.0
-        if has_field and gi.air_on != 0:
-            exterior = gi.air_safety[ix, iy, iz]
-
-        # --- substep length ----------------------------------------------------
-        range_cm = (
-            lookup_2d(tab.csda_range, mat, tab.e_log_e_min, tab.e_inv_dlog, tab.n_points, e) / rho
-        )
-        s_max = step_energy_fraction * range_cm
-        if msc_model_gs == 0:
-            # Angular cap: bound each hinge's mean-square deflection (see
-            # STEP_HINGE_THETA2_MAX); mirrors the reference loop's s_theta. A
-            # *Gaussian-validity* limit: under Goudsmit-Saunderson the exact
-            # deflection is sampled at arbitrary step length, so the
-            # energy-limited step stands (same conditional as the reference
-            # loop; the Gaussian branch's arithmetic is unchanged).
-            s_theta = STEP_HINGE_THETA2_MAX / (
+            mean_square = (
                 lookup_2d(
                     tab.scattering_power, mat, tab.e_log_e_min, tab.e_inv_dlog, tab.n_points, e
                 )
                 * rho
+                * path
             )
-            s_max = min(s_max, s_theta)
-        if has_field:
-            # Curvature cap (LORENTZ_STEP_ANGLE_MAX), as in the reference loop; the
-            # safety replaces it on a long step, whose chords are exact at any angle.
-            if exterior > 0.0:
-                s_max = min(s_max, exterior)
+            # Both laws take the same <theta^2> and one uniform (stream parity is
+            # test-pinned through the device RNG), mirroring the reference loop's
+            # msc_model branch. GS keys its table grid on (log eta, log <theta^2>)
+            # at the same post-deposit energy the scattering power was read at.
+            if msc_model_gs == 1:
+                fx = (
+                    lookup_2d(tab.log_eta, mat, tab.e_log_e_min, tab.e_inv_dlog, tab.n_points, e)
+                    * _GS_BINS_PER_LOG
+                )
+                fy = math.log(max(mean_square, _GS_THETA2_MIN)) * _GS_BINS_PER_LOG
+                cos_hinge = sample_gs_cos_theta_grid(
+                    tab.gs_values,
+                    tab.gs_ix0,
+                    tab.gs_iy0,
+                    tab.gs_n_eta,
+                    tab.gs_n_theta2,
+                    tab.gs_n_u,
+                    fx,
+                    fy,
+                    mean_square,
+                    state,
+                )
             else:
-                s_max = min(s_max, LORENTZ_STEP_ANGLE_MAX * gyroradius_cm(e, b_mag))
-        # Cap at the next voxel face (plus the nudge across it) so the substep's
-        # density and material stay those of the voxel it starts in (to within the
-        # chord's bend under a field; see the reference loop).
-        # A long step has no face cap (mirror of the reference loop).
-        s_boundary = _INFINITY_CM
-        if exterior <= 0.0:
-            s_boundary = (
-                distance_to_voxel_boundary(
+                cos_hinge = sample_hinge_cos_theta(mean_square, state)
+            phi = 2.0 * math.pi * uniform(state)
+            ux, uy, uz = rotate_direction(ux, uy, uz, cos_hinge, phi)
+
+            # Bremsstrahlung model dispatch, third site. BREMS_THIN_TARGET: 1/k energy,
+            # one uniform, photon along the post-hinge direction. BREMS_BETHE_HEITLER
+            # has nothing here: its photon is the discrete event at the end of the
+            # substep, and this block is not part of its kernel.
+            if wp.static(not bethe_heitler):  # noqa: SIM102 - resolved at compile time
+                if emit_brems and e > pcut:
+                    k = sample_bremsstrahlung_energy(e, pcut, state)
+                    k = min(k, e - d2)
+                    if k > pcut:
+                        photon_w = w
+                        if k < PHOTON_ROULETTE_MEV and wp.abs(w) < PHOTON_ROULETTE_WEIGHT_CAP:
+                            # Basic VR, mirror of the reference loop: roulette the soft
+                            # bremsstrahlung photon at birth; signed ledger keeps balance.
+                            photon_w = roulette_weight(w, PHOTON_ROULETTE_SURVIVAL, state)
+                            _escape(escaped, (w - photon_w) * k)
+                        if photon_w != 0.0:
+                            _queue_push(
+                                q_photon,
+                                PHOTON,
+                                beamlet,
+                                k,
+                                photon_w,
+                                x,
+                                y,
+                                z,
+                                ux,
+                                uy,
+                                uz,
+                                spawn_stream(state),
+                            )
+                    else:
+                        _deposit_or_escape(
+                            edep,
+                            escaped,
+                            deposited,
+                            unscored,
+                            gi,
+                            si,
+                            base,
+                            x,
+                            y,
+                            z,
+                            w * k,
+                            w,
+                            _spr_factor(tab, dose_to_water, k, mat, ecut),
+                            dose_to_water,
+                        )
+                    e -= k
+
+            half = 0.0
+            if has_field:
+                half = 0.5 * lorentz_rotation_angle(
+                    s2, gyroradius_cm(e - 0.5 * d2, b_mag), is_positron
+                )
+                ux, uy, uz = rotate_about_axis(ux, uy, uz, b_ux, b_uy, b_uz, half)
+            # The deflected second chord stops at the voxel face it would cross, so this
+            # voxel's energy loss never lands in the neighbour (mirror of the reference
+            # loop; the second-leg interface rule of the random hinge).
+            # A long step has no interface to stop at (mirror of the reference loop).
+            cx = ux
+            cy = uy
+            cz = uz
+            if exterior > 0.0:
+                cx, cy, cz = helix_chord(ux, uy, uz, b_ux, b_uy, b_uz, half)
+            else:
+                s2_face = distance_to_voxel_boundary(
                     x,
                     y,
                     z,
@@ -1874,131 +2588,18 @@ def electron_kernel(
                     gi.ny,
                     gi.nz,
                 )
-                + BOUNDARY_NUDGE_CM
-            )
-        s_geometry = min(s_max, s_boundary)
-        # Positron model dispatch (tab.positron_model), first site.
-        # POSITRON_MOLLER_AT_REST: a positron takes the electron's Moller
-        # cross-section. A second model selects its own tables here.
-        sigma_moller = rho * lookup_2d(
-            tab.moller, mat, tab.e_log_e_min, tab.e_inv_dlog, tab.n_points, e
-        )
-        s = s_geometry
-        moller_pending = False
-        if sigma_moller > 0.0:
-            s_interaction = sample_path_length(sigma_moller, state)
-            if s_interaction <= s_geometry:
-                s = s_interaction
-                moller_pending = True
-
-        # --- continuous loss over the substep (exact, DPM-style) ----------------
-        # Mirror of the reference loop: E_end = r^-1(r(E) - rho*s) through the
-        # flattened restricted-range table and its inverse; clamped so table
-        # interpolation can never gain energy or undershoot the cutoff.
-        # The nudge past a face is a geometric move: the loss covers the path inside
-        # this voxel plus the carried nudge (mirror of the reference loop).
-        face_limited = s == s_boundary
-        s_in = s
-        if face_limited:
-            s_in = s - BOUNDARY_NUDGE_CM
-        crossing = False
-        path = s_in + carry
-        available = lookup_2d(
-            tab.restricted_range, mat, tab.e_log_e_min, tab.e_inv_dlog, tab.n_points, e
-        )
-        if rho * path >= available:
-            s_in = max(available / rho - carry, 0.0)
-            path = s_in + carry
-            de = e - ecut
-            moller_pending = False
-        else:
-            # Both ends of the loss through the *same* inverse table. The reference
-            # loop inverts one range grid exactly; here range-of-energy and
-            # energy-of-range are two tables on different grids, and their round
-            # trip E(R(e)) - e is a fixed error per substep (~1e-6 MeV) that the
-            # loss of a short step cannot absorb: a gyration-capped substep in air
-            # loses tens of micro-eV, and whenever the error exceeded it the clamp
-            # e_end <= e zeroed the whole step's loss. Measured 2026-10-18 on the
-            # Fano cavity at air density, 1 MeV, 1.5 T: gap-to-wall 0.855 at a cap
-            # of 0.05 rad and 0.984 at 0.2 with e - e_end; 1.000 and 1.004 this way.
-            e_end = lookup_2d(
-                tab.energy_of_restricted_range,
-                mat,
-                tab.r_log_min,
-                tab.r_inv_dlog,
-                tab.n_points,
-                available - rho * path,
-            )
-            e_start = lookup_2d(
-                tab.energy_of_restricted_range,
-                mat,
-                tab.r_log_min,
-                tab.r_inv_dlog,
-                tab.n_points,
-                available,
-            )
-            de = min(max(e_start - e_end, 0.0), e - ecut)
-        # Bremsstrahlung model dispatch (tab.brems_model), first site.
-        # BREMS_THIN_TARGET: a Bernoulli emission per substep, one uniform. A
-        # second model replaces this decision and the sub-PCUT remainder.
-        emit_probability, local_brems = bremsstrahlung_step_parameters(
-            e,
-            lookup_2d(
-                tab.stopping_radiative, mat, tab.e_log_e_min, tab.e_inv_dlog, tab.n_points, e
-            ),
-            rho,
-            path,
-            pcut,
-        )
-        continuous = de + local_brems
-        emit_brems = uniform(state) < emit_probability
-        substep_factor = _spr_factor(tab, dose_to_water, e, mat, ecut)
-
-        # --- random hinge: move, deflect, move ----------------------------------
-        # The carry's share of the loss rides with the first chord (mirror of the
-        # reference loop).
-        s1 = uniform(state) * s_in
-        s2 = s_in - s1
-        d1 = 0.0
-        if path > 0.0:
-            d1 = continuous * ((s1 + carry) / path)
-        d2 = continuous - d1
-        carry = 0.0
-
-        # Under a field each chord runs along its midpoint direction: half the
-        # gyration angle before, half after (mirror of the reference loop).
-        half = 0.0
-        cut = False
-        if has_field:
-            half = 0.5 * lorentz_rotation_angle(s1, gyroradius_cm(e - 0.5 * d1, b_mag), is_positron)
-            ux, uy, uz = rotate_about_axis(ux, uy, uz, b_ux, b_uy, b_uz, half)
-            if exterior <= 0.0:
-                # Bent chord may reach a face sooner than the pre-rotation cap allowed:
-                # stop there and end the substep (mirror of the reference loop).
-                s1_face = distance_to_voxel_boundary(
-                    x,
-                    y,
-                    z,
-                    ux,
-                    uy,
-                    uz,
-                    gi.x_lo,
-                    gi.y_lo,
-                    gi.z_lo,
-                    gi.sx,
-                    gi.sy,
-                    gi.sz,
-                    gi.nx,
-                    gi.ny,
-                    gi.nz,
-                )
-                if s1 >= s1_face:
-                    d1_scale = 0.0
-                    if s1 > 0.0:
-                        d1_scale = s1_face / s1
-                    d1 = d1 * d1_scale
-                    s1 = s1_face
-                    cut = True
+                if s2 >= s2_face or (face_limited and s2_face - s2 <= BOUNDARY_NUDGE_CM):
+                    # A face-limited substep ends on its face unless the hinge turned the
+                    # particle away by more than a nudge; the exact test alone leaves a
+                    # particle a rounding residue short of the face stuck for ever (mirror
+                    # of the reference loop).
+                    d2_scale = 0.0
+                    if s2 > 0.0:
+                        d2_scale = s2_face / s2
+                    d2 = d2 * d2_scale
+                    s2 = s2_face
+                    event_pending = False
+                    crossing = True
                     axis = voxel_face_axis(
                         x,
                         y,
@@ -2016,276 +2617,288 @@ def electron_kernel(
                         gi.ny,
                         gi.nz,
                     )
-                    # Whole turn = the cut chord's (mirror of the reference loop).
-                    half = (
-                        lorentz_rotation_angle(s1, gyroradius_cm(e - 0.5 * d1, b_mag), is_positron)
-                        - half
-                    )
-        # A long step's chord is the true helix displacement (mirror of the reference
-        # loop); its midpoint is inside the safety ball, so the deposit stays exterior.
-        cx = ux
-        cy = uy
-        cz = uz
-        if exterior > 0.0:
-            cx, cy, cz = helix_chord(ux, uy, uz, b_ux, b_uy, b_uz, half)
-        _deposit_spread(
-            edep,
-            escaped,
-            deposited,
-            unscored,
-            gi,
-            si,
-            base,
-            x,
-            y,
-            z,
-            cx,
-            cy,
-            cz,
-            s1,
-            w * d1,
-            w,
-            substep_factor,
-            dose_to_water,
-            deposit_resolution,
-        )
-        e -= d1
-        x += cx * s1
-        y += cy * s1
-        z += cz * s1
-        if has_field:
-            ux, uy, uz = rotate_about_axis(ux, uy, uz, b_ux, b_uy, b_uz, half)
-        if cut:
-            # On the face: carry across along the face normal (a direction-aligned
-            # micron is below a float32 ulp at grazing incidence and the lane sits
-            # on the face for ever), or stop just inside if terminal; the micron is
-            # charged by the next substep, in that voxel.
-            nudge = BOUNDARY_NUDGE_CM
-            if e <= ecut:
-                nudge = -BOUNDARY_NUDGE_CM
-            dx, dy, dz = nudge_across_face(axis, ux, uy, uz, nudge)
-            x += dx
-            y += dy
-            z += dz
-            carry = BOUNDARY_NUDGE_CM
+                    if has_field:
+                        half = (
+                            lorentz_rotation_angle(
+                                s2, gyroradius_cm(e - 0.5 * d2, b_mag), is_positron
+                            )
+                            - half
+                        )
+            _deposit_spread(
+                edep,
+                escaped,
+                deposited,
+                unscored,
+                gi,
+                si,
+                base,
+                x,
+                y,
+                z,
+                cx,
+                cy,
+                cz,
+                s2,
+                w * d2,
+                w,
+                substep_factor,
+                dose_to_water,
+                deposit_resolution,
+            )
+            e -= d2
+            x += cx * s2
+            y += cy * s2
+            z += cz * s2
+            if has_field:
+                ux, uy, uz = rotate_about_axis(ux, uy, uz, b_ux, b_uy, b_uz, half)
+            if crossing:
+                # On the face: carry across along the normal (see the cut above), or
+                # stop just inside if terminal; the micron is charged next substep.
+                nudge = BOUNDARY_NUDGE_CM
+                if e <= ecut:
+                    nudge = -BOUNDARY_NUDGE_CM
+                dx, dy, dz = nudge_across_face(axis, ux, uy, uz, nudge)
+                x += dx
+                y += dy
+                z += dz
+                carry = BOUNDARY_NUDGE_CM
             if not point_inside(x, y, z, gi.x_lo, gi.y_lo, gi.z_lo, gi.x_hi, gi.y_hi, gi.z_hi):
                 _escape(escaped, w * (e + latent))
                 return
-            continue
-        if not point_inside(x, y, z, gi.x_lo, gi.y_lo, gi.z_lo, gi.x_hi, gi.y_hi, gi.z_hi):
-            _escape(escaped, w * (e + latent))
-            return
 
-        mean_square = (
-            lookup_2d(tab.scattering_power, mat, tab.e_log_e_min, tab.e_inv_dlog, tab.n_points, e)
-            * rho
-            * path
-        )
-        # Both laws take the same <theta^2> and one uniform (stream parity is
-        # test-pinned through the device RNG), mirroring the reference loop's
-        # msc_model branch. GS keys its table grid on (log eta, log <theta^2>)
-        # at the same post-deposit energy the scattering power was read at.
-        if msc_model_gs == 1:
-            fx = (
-                lookup_2d(tab.log_eta, mat, tab.e_log_e_min, tab.e_inv_dlog, tab.n_points, e)
-                * _GS_BINS_PER_LOG
-            )
-            fy = math.log(max(mean_square, _GS_THETA2_MIN)) * _GS_BINS_PER_LOG
-            cos_hinge = sample_gs_cos_theta_grid(
-                tab.gs_values,
-                tab.gs_ix0,
-                tab.gs_iy0,
-                tab.gs_n_eta,
-                tab.gs_n_theta2,
-                tab.gs_n_u,
-                fx,
-                fy,
-                mean_square,
-                state,
-            )
-        else:
-            cos_hinge = sample_hinge_cos_theta(mean_square, state)
-        phi = 2.0 * math.pi * uniform(state)
-        ux, uy, uz = rotate_direction(ux, uy, uz, cos_hinge, phi)
-
-        if emit_brems and e > pcut:
-            # Bremsstrahlung model dispatch, second site. BREMS_THIN_TARGET: 1/k
-            # energy, one uniform, photon along the post-hinge direction. A
-            # second model samples its own energy and emission angle here.
-            k = sample_bremsstrahlung_energy(e, pcut, state)
-            k = min(k, e - d2)
-            if k > pcut:
-                photon_w = w
-                if k < PHOTON_ROULETTE_MEV and wp.abs(w) < PHOTON_ROULETTE_WEIGHT_CAP:
-                    # Basic VR, mirror of the reference loop: roulette the soft
-                    # bremsstrahlung photon at birth; signed ledger keeps balance.
-                    photon_w = roulette_weight(w, PHOTON_ROULETTE_SURVIVAL, state)
-                    _escape(escaped, (w - photon_w) * k)
-                if photon_w != 0.0:
-                    _queue_push(
-                        q_photon,
-                        PHOTON,
-                        beamlet,
-                        k,
-                        photon_w,
-                        x,
-                        y,
-                        z,
-                        ux,
-                        uy,
-                        uz,
-                        spawn_stream(state),
-                    )
-            else:
-                _deposit_or_escape(
-                    edep,
-                    escaped,
-                    deposited,
-                    unscored,
-                    gi,
-                    si,
-                    base,
-                    x,
-                    y,
-                    z,
-                    w * k,
+            # --- discrete event at the end of the substep -----------------------------
+            # Positron model dispatch, third site. POSITRON_BHABHA_IN_FLIGHT: one
+            # uniform decides among the positron's channels, each at the
+            # substep-start value the flight was sampled from: annihilation with
+            # probability sigma_annihilation / sigma_discrete, bremsstrahlung (where
+            # it is a discrete channel) with sigma_brems / sigma_discrete, else
+            # Bhabha. Mirror of the reference loop.
+            if wp.static(in_flight_model):
+                annihilation_event = False
+                positron_brems_event = False
+                if event_pending and is_positron:
+                    pick = uniform(state) * sigma_discrete
+                    if pick < sigma_annihilation:
+                        annihilation_event = True
+                    elif wp.static(bethe_heitler):
+                        positron_brems_event = pick < sigma_annihilation + sigma_brems
+                if annihilation_event:
+                    # A positron already at or below ECUT is stopped instead: the
+                    # terminal branch annihilates it at rest.
+                    event_pending = False
+                    if e > ecut:
+                        # Two-photon annihilation in flight, at the end of the
+                        # substep (on a long exterior-air step: at the chord end).
+                        # The photons share the kinetic energy and both rest masses,
+                        # with polar angles from energy-momentum conservation and
+                        # back-to-back azimuths. The thread ends here and books no
+                        # latent rest mass: it is in the photons.
+                        k_first = sample_annihilation_photon_energy(e, state)
+                        cos_first, cos_second = annihilation_direction_cosines(e, k_first)
+                        phi = 2.0 * math.pi * uniform(state)
+                        for j in range(2):
+                            k_ann = k_first
+                            cos_ann = cos_first
+                            azimuth = phi
+                            if j == 1:
+                                k_ann = e + 2.0 * ELECTRON_MASS_MEV - k_first
+                                cos_ann = cos_second
+                                azimuth = phi + math.pi
+                            ax, ay, az = rotate_direction(ux, uy, uz, cos_ann, azimuth)
+                            if k_ann > pcut:
+                                ann_w = w
+                                if (
+                                    k_ann < PHOTON_ROULETTE_MEV
+                                    and wp.abs(w) < PHOTON_ROULETTE_WEIGHT_CAP
+                                ):
+                                    # The softer photon of a slow positron can fall
+                                    # below the roulette threshold: same game, same
+                                    # signed ledger entry as a bremsstrahlung photon.
+                                    ann_w = roulette_weight(w, PHOTON_ROULETTE_SURVIVAL, state)
+                                    _escape(escaped, (w - ann_w) * k_ann)
+                                if ann_w != 0.0:
+                                    _queue_push(
+                                        q_photon,
+                                        PHOTON,
+                                        beamlet,
+                                        k_ann,
+                                        ann_w,
+                                        x,
+                                        y,
+                                        z,
+                                        ax,
+                                        ay,
+                                        az,
+                                        spawn_stream(state),
+                                    )
+                            else:
+                                # Not transportable (only for a PCUT above 255 keV).
+                                _deposit_or_escape(
+                                    edep,
+                                    escaped,
+                                    deposited,
+                                    unscored,
+                                    gi,
+                                    si,
+                                    base,
+                                    x,
+                                    y,
+                                    z,
+                                    w * k_ann,
+                                    w,
+                                    _spr_factor(tab, dose_to_water, k_ann, mat, ecut),
+                                    dose_to_water,
+                                )
+                        return
+            # Bremsstrahlung model dispatch, fourth site. BREMS_BETHE_HEITLER: a
+            # pending event is a photon with probability sigma_brems / sigma_discrete
+            # (one uniform), else a Moller collision; both are the substep-start
+            # values the flight was sampled from. BREMS_THIN_TARGET draws nothing:
+            # every pending event is Moller. (A positron under
+            # POSITRON_BHABHA_IN_FLIGHT made this choice with its one uniform above.)
+            if wp.static(bethe_heitler):
+                brems_event = False
+                if event_pending:
+                    if wp.static(in_flight_model):
+                        if is_positron:
+                            brems_event = positron_brems_event
+                        else:
+                            brems_event = uniform(state) * sigma_discrete < sigma_brems
+                    else:
+                        brems_event = uniform(state) * sigma_discrete < sigma_brems
+                if brems_event:
+                    event_pending = False
+                    if e > pcut:
+                        # Mirror of the reference loop: photon energy from the screened
+                        # shape at the current energy, emission angle about the
+                        # electron's direction, uniform azimuth; the electron keeps its
+                        # direction and pays k. The angle travels as 1 - cos(theta):
+                        # float32 cannot hold the cosine of an angle of order 1/gamma.
+                        k = sample_bethe_heitler_photon_energy(
+                            e,
+                            pcut,
+                            model.brems_screening[mat, 0],
+                            model.brems_screening[mat, 1],
+                            model.brems_screening[mat, 2],
+                            model.brems_screening[mat, 3],
+                            model.brems_screening[mat, 4],
+                            state,
+                        )
+                        one_minus_cos = sample_bremsstrahlung_one_minus_cos_theta(e, state)
+                        phi = 2.0 * math.pi * uniform(state)
+                        px, py, pz = rotate_direction_one_minus_cos(ux, uy, uz, one_minus_cos, phi)
+                        if k > pcut:
+                            photon_w = w
+                            if k < PHOTON_ROULETTE_MEV and wp.abs(w) < PHOTON_ROULETTE_WEIGHT_CAP:
+                                photon_w = roulette_weight(w, PHOTON_ROULETTE_SURVIVAL, state)
+                                _escape(escaped, (w - photon_w) * k)
+                            if photon_w != 0.0:
+                                _queue_push(
+                                    q_photon,
+                                    PHOTON,
+                                    beamlet,
+                                    k,
+                                    photon_w,
+                                    x,
+                                    y,
+                                    z,
+                                    px,
+                                    py,
+                                    pz,
+                                    spawn_stream(state),
+                                )
+                        else:
+                            _deposit_or_escape(
+                                edep,
+                                escaped,
+                                deposited,
+                                unscored,
+                                gi,
+                                si,
+                                base,
+                                x,
+                                y,
+                                z,
+                                w * k,
+                                w,
+                                _spr_factor(tab, dose_to_water, k, mat, ecut),
+                                dose_to_water,
+                            )
+                        e -= k
+            # Positron model dispatch, fourth site: the collision itself.
+            # POSITRON_BHABHA_IN_FLIGHT: a positron's is Bhabha, whose delta ray is
+            # an electron of ECUT up to the positron's whole kinetic energy, so the
+            # gate is ECUT, not 2 ECUT; a positron left at or below ECUT is stopped
+            # and the terminal branch annihilates it at rest. POSITRON_MOLLER_AT_REST
+            # (and every electron): sampled as Moller, below.
+            if wp.static(in_flight_model):  # noqa: SIM102 - resolved at compile time
+                if event_pending and is_positron:
+                    event_pending = False
+                    if e > ecut:
+                        delta_energy = sample_bhabha_delta_energy(e, ecut, state)
+                        cos_delta, cos_primary = bhabha_direction_cosines(e, delta_energy)
+                        phi = 2.0 * math.pi * uniform(state)
+                        dx, dy, dz = rotate_direction(ux, uy, uz, cos_delta, phi)
+                        _queue_push(
+                            q_electron_out,
+                            ELECTRON,
+                            beamlet,
+                            delta_energy,
+                            w,
+                            x,
+                            y,
+                            z,
+                            dx,
+                            dy,
+                            dz,
+                            spawn_stream(state),
+                        )
+                        ux, uy, uz = rotate_direction(ux, uy, uz, cos_primary, phi + math.pi)
+                        e -= delta_energy
+            if event_pending and e > 2.0 * ecut:
+                delta_energy = sample_moller_delta_energy(e, ecut, state)
+                cos_delta, cos_primary = moller_direction_cosines(e, delta_energy)
+                phi = 2.0 * math.pi * uniform(state)
+                dx, dy, dz = rotate_direction(ux, uy, uz, cos_delta, phi)
+                _queue_push(
+                    q_electron_out,
+                    ELECTRON,
+                    beamlet,
+                    delta_energy,
                     w,
-                    _spr_factor(tab, dose_to_water, k, mat, ecut),
-                    dose_to_water,
-                )
-            e -= k
-
-        half = 0.0
-        if has_field:
-            half = 0.5 * lorentz_rotation_angle(s2, gyroradius_cm(e - 0.5 * d2, b_mag), is_positron)
-            ux, uy, uz = rotate_about_axis(ux, uy, uz, b_ux, b_uy, b_uz, half)
-        # The deflected second chord stops at the voxel face it would cross, so this
-        # voxel's energy loss never lands in the neighbour (mirror of the reference
-        # loop; the second-leg interface rule of the random hinge).
-        # A long step has no interface to stop at (mirror of the reference loop).
-        cx = ux
-        cy = uy
-        cz = uz
-        if exterior > 0.0:
-            cx, cy, cz = helix_chord(ux, uy, uz, b_ux, b_uy, b_uz, half)
-        else:
-            s2_face = distance_to_voxel_boundary(
-                x,
-                y,
-                z,
-                ux,
-                uy,
-                uz,
-                gi.x_lo,
-                gi.y_lo,
-                gi.z_lo,
-                gi.sx,
-                gi.sy,
-                gi.sz,
-                gi.nx,
-                gi.ny,
-                gi.nz,
-            )
-            if s2 >= s2_face or (face_limited and s2_face - s2 <= BOUNDARY_NUDGE_CM):
-                # A face-limited substep ends on its face unless the hinge turned the
-                # particle away by more than a nudge; the exact test alone leaves a
-                # particle a rounding residue short of the face stuck for ever (mirror
-                # of the reference loop).
-                d2_scale = 0.0
-                if s2 > 0.0:
-                    d2_scale = s2_face / s2
-                d2 = d2 * d2_scale
-                s2 = s2_face
-                moller_pending = False
-                crossing = True
-                axis = voxel_face_axis(
                     x,
                     y,
                     z,
-                    ux,
-                    uy,
-                    uz,
-                    gi.x_lo,
-                    gi.y_lo,
-                    gi.z_lo,
-                    gi.sx,
-                    gi.sy,
-                    gi.sz,
-                    gi.nx,
-                    gi.ny,
-                    gi.nz,
+                    dx,
+                    dy,
+                    dz,
+                    spawn_stream(state),
                 )
-                if has_field:
-                    half = (
-                        lorentz_rotation_angle(s2, gyroradius_cm(e - 0.5 * d2, b_mag), is_positron)
-                        - half
-                    )
-        _deposit_spread(
-            edep,
-            escaped,
-            deposited,
-            unscored,
-            gi,
-            si,
-            base,
-            x,
-            y,
-            z,
-            cx,
-            cy,
-            cz,
-            s2,
-            w * d2,
-            w,
-            substep_factor,
-            dose_to_water,
-            deposit_resolution,
-        )
-        e -= d2
-        x += cx * s2
-        y += cy * s2
-        z += cz * s2
-        if has_field:
-            ux, uy, uz = rotate_about_axis(ux, uy, uz, b_ux, b_uy, b_uz, half)
-        if crossing:
-            # On the face: carry across along the normal (see the cut above), or
-            # stop just inside if terminal; the micron is charged next substep.
-            nudge = BOUNDARY_NUDGE_CM
-            if e <= ecut:
-                nudge = -BOUNDARY_NUDGE_CM
-            dx, dy, dz = nudge_across_face(axis, ux, uy, uz, nudge)
-            x += dx
-            y += dy
-            z += dz
-            carry = BOUNDARY_NUDGE_CM
-        if not point_inside(x, y, z, gi.x_lo, gi.y_lo, gi.z_lo, gi.x_hi, gi.y_hi, gi.z_hi):
-            _escape(escaped, w * (e + latent))
-            return
+                ux, uy, uz = rotate_direction(ux, uy, uz, cos_primary, phi + math.pi)
+                e -= delta_energy
 
-        # --- discrete Moller event at the end of the substep ---------------------
-        # Positron model dispatch, second site. POSITRON_MOLLER_AT_REST: a
-        # positron's discrete event is sampled as Moller, like an electron's.
-        if moller_pending and e > 2.0 * ecut:
-            delta_energy = sample_moller_delta_energy(e, ecut, state)
-            cos_delta, cos_primary = moller_direction_cosines(e, delta_energy)
-            phi = 2.0 * math.pi * uniform(state)
-            dx, dy, dz = rotate_direction(ux, uy, uz, cos_delta, phi)
-            _queue_push(
-                q_electron_out,
-                ELECTRON,
-                beamlet,
-                delta_energy,
-                w,
-                x,
-                y,
-                z,
-                dx,
-                dy,
-                dz,
-                spawn_stream(state),
-            )
-            ux, uy, uz = rotate_direction(ux, uy, uz, cos_primary, phi + math.pi)
-            e -= delta_energy
+    # The type of ``model`` is the one thing about the signature that depends on
+    # the models, so it is set here rather than written in the ``def``: the
+    # annotations of this module are strings, which Warp evaluates in the module's
+    # globals and which therefore cannot name a per-kernel type.
+    electron_kernel.__annotations__["model"] = model_type
+    kernel = decorate(electron_kernel)
+    _ELECTRON_KERNELS[key] = kernel
+    return kernel
+
+
+electron_kernel = make_electron_kernel(BREMS_THIN_TARGET, POSITRON_MOLLER_AT_REST)
+"""The electron kernel of the default physics models; see :func:`make_electron_kernel`."""
+
+
+def electron_kernel_for(tab: Tables) -> wp.Kernel:
+    """Return the electron kernel compiled for the models ``tab`` was built under.
+
+    The ``Tables`` struct carries the run's model codes (stamped by the engine
+    when it uploads the tables), so the kernel and the model data it reads are
+    chosen from the same record. Called on the host, before a launch.
+    """
+    return make_electron_kernel(int(tab.brems_model), int(tab.positron_model))
 
 
 @wp.kernel

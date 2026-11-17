@@ -38,7 +38,7 @@ from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
 
-from pyradmc import HIGH_ENERGY_PHYSICS_THRESHOLD_MEV
+from pyradmc import ELECTRON_MASS_MEV, HIGH_ENERGY_PHYSICS_THRESHOLD_MEV
 
 __all__ = [
     "AUTO",
@@ -50,6 +50,7 @@ __all__ = [
     "ResolvedPhysics",
     "require_implemented",
     "resolve_physics",
+    "run_energy_ceiling",
     "run_primary_kinds",
 ]
 
@@ -88,25 +89,33 @@ class ProcessModels:
 
 PHYSICS_MODELS: Mapping[str, ProcessModels] = MappingProxyType(
     {
-        # Thin-target 1/k spectrum, collinear emission (pyradmc.physics.brems).
+        # "thin-target": 1/k spectrum, collinear emission (pyradmc.physics.brems).
+        # "bethe-heitler": screened Bethe-Heitler spectrum, 1/gamma emission angle
+        # (pyradmc.physics.brems_bh). Both carry the same radiative stopping power.
         "bremsstrahlung": ProcessModels(
-            models=("thin-target",),
+            models=("thin-target", "bethe-heitler"),
             auto_clinical="thin-target",
-            auto_high_energy="thin-target",
+            auto_high_energy="bethe-heitler",
         ),
-        # Kinetic energy shared uniformly, both leptons forward
-        # (pyradmc.transport.photon).
+        # "uniform-split": kinetic energy shared uniformly, both leptons forward
+        # (pyradmc.transport.photon). "bethe-heitler": screened Bethe-Heitler
+        # sharing, each lepton at its own leading-order angle
+        # (pyradmc.physics.pair). The pair cross-section is the same for both.
         "pair": ProcessModels(
-            models=("uniform-split",),
+            models=("uniform-split", "bethe-heitler"),
             auto_clinical="uniform-split",
-            auto_high_energy="uniform-split",
+            auto_high_energy="bethe-heitler",
         ),
-        # Transported as an electron (Moller, no Bhabha), annihilating at rest
-        # (pyradmc.transport.electron).
+        # "moller-at-rest": transported as an electron (Moller, no Bhabha),
+        # annihilating at rest. "bhabha-in-flight": the positron's own collision
+        # stopping power and range, Bhabha delta rays, and two-photon annihilation
+        # in flight as a competing channel (pyradmc.physics.bhabha,
+        # pyradmc.physics.annihilation); one option, because the discrete
+        # cross-sections are only consistent together (AGENTS.md 2.10).
         "positron": ProcessModels(
-            models=("moller-at-rest",),
+            models=("moller-at-rest", "bhabha-in-flight"),
             auto_clinical="moller-at-rest",
-            auto_high_energy="moller-at-rest",
+            auto_high_energy="bhabha-in-flight",
         ),
     }
 )
@@ -115,11 +124,12 @@ PHYSICS_MODELS: Mapping[str, ProcessModels] = MappingProxyType(
 The keys are the field names of :class:`PhysicsOptions` and
 :class:`ResolvedPhysics`, in the same order.
 
-Each process has exactly one registered model today, so both sides of the threshold
-name it and every run resolves to the same physics. Adding a model appends its name
-to ``models``; making it the above-threshold default changes ``auto_high_energy``.
-Changing ``auto_clinical`` changes what every clinical run computes: that is
-replacing a default, and needs the dosimetric evidence AGENTS.md 2.8 asks for.
+Every process has two models: the one every clinical run has always computed, which
+``"auto"`` keeps at or below the threshold, and a more detailed one that ``"auto"``
+takes above it. Adding a model appends its name to ``models``; making it the
+above-threshold default changes ``auto_high_energy``. Changing ``auto_clinical``
+changes what every clinical run computes: that is replacing a default, and needs
+the dosimetric evidence AGENTS.md 2.8 asks for.
 """
 
 
@@ -148,15 +158,44 @@ class PhysicsOptions:
 
     ``bremsstrahlung``
         ``"thin-target"`` — a ``1/k`` photon spectrum, emitted along the electron's
-        direction (:mod:`pyradmc.physics.brems`).
+        direction (:mod:`pyradmc.physics.brems`). What ``"auto"`` selects at or
+        below the high-energy threshold.
+
+        ``"bethe-heitler"`` — the screened Bethe-Heitler photon spectrum with the
+        Coulomb correction, emitted at an angle of order ``1/gamma`` to the
+        electron (:mod:`pyradmc.physics.brems_bh`, which lists its
+        approximations). Normalized to the same radiative stopping power as
+        ``"thin-target"``: the two differ in how the radiated energy is shared
+        among photons, not in how much is radiated. What ``"auto"`` selects above
+        the threshold.
     ``pair``
         ``"uniform-split"`` — the kinetic energy is shared uniformly between the
         electron and the positron, both emitted forward
-        (:mod:`pyradmc.transport.photon`).
+        (:mod:`pyradmc.transport.photon`). What ``"auto"`` selects at or below
+        the high-energy threshold.
+
+        ``"bethe-heitler"`` — the sharing follows the screened Bethe-Heitler
+        differential cross-section (uniform below 2 MeV, where that expression
+        fails), and each lepton leaves at its own angle of order ``1/gamma`` to
+        the photon, with independent azimuths (:mod:`pyradmc.physics.pair`;
+        approximations in :mod:`pyradmc.data.pair`). The pair cross-section is
+        the source's either way: the two differ in how a pair's energy and
+        direction are distributed, not in how often a pair is made. What
+        ``"auto"`` selects above the threshold.
     ``positron``
         ``"moller-at-rest"`` — a positron is transported as an electron (Moller
         scattering, no Bhabha distinction) and annihilates at rest
-        (:mod:`pyradmc.transport.electron`).
+        (:mod:`pyradmc.transport.electron`). What ``"auto"`` selects at or below
+        the high-energy threshold.
+
+        ``"bhabha-in-flight"`` — a positron loses energy by its own restricted
+        collision stopping power, throws Bhabha delta rays (up to its whole
+        kinetic energy) and may annihilate in flight into two photons that share
+        its kinetic energy and both rest masses; one that reaches the cutoff
+        still annihilates at rest (:mod:`pyradmc.physics.bhabha`,
+        :mod:`pyradmc.physics.annihilation`; what remains the electron's is
+        listed in :mod:`pyradmc.transport.electron`). What ``"auto"`` selects
+        above the threshold.
 
     An unknown name raises ``ValueError`` listing the valid ones.
     """
@@ -341,3 +380,37 @@ def run_primary_kinds(source: object, fallback: str) -> frozenset[str]:
     """
     declared: Collection[str] | None = getattr(source, "particle_kinds", None)
     return frozenset({fallback}) if declared is None else frozenset(declared)
+
+
+def run_energy_ceiling(
+    max_energy_mev: float, primary_kinds: Collection[str], physics: ResolvedPhysics
+) -> float:
+    r"""Return the highest energy any particle of a run can have, in MeV.
+
+    What the engines size their tables to and check the cross-section source's
+    energy domain against. It is the source's maximum energy, because a secondary
+    never has more energy than its parent — with one exception. A positron
+    annihilating **in flight** (``positron="bhabha-in-flight"``) hands its
+    kinetic energy :math:`T` *and* both rest masses to two photons, and the
+    harder one can carry up to
+
+    .. math::
+
+        k_{max}(T) = \tfrac12 (T + 2 m_e c^2) + \tfrac12 \sqrt{T (T + 2 m_e c^2)},
+
+    which lies between :math:`T + m_e c^2` and :math:`T + \tfrac32 m_e c^2`. A
+    positron made by a photon has at least :math:`2 m_e c^2` less kinetic energy
+    than that photon, so its annihilation photons stay below the photon's energy;
+    only a positron *the source starts* can exceed the source's maximum. So the
+    ceiling is :math:`k_{max}` of the source's maximum energy when the run starts
+    positrons under that model, and exactly ``max_energy_mev`` otherwise (the same
+    float: no clinical run's tables move).
+
+    Annihilation *at rest* emits 511 keV photons whatever the model, which a
+    positron source softer than that also exceeds; that is the behaviour of the
+    engines before this function and is left as it is.
+    """
+    if physics.positron == "bhabha-in-flight" and "positron" in primary_kinds:
+        total = max_energy_mev + 2.0 * ELECTRON_MASS_MEV
+        return 0.5 * total + 0.5 * math.sqrt(max_energy_mev * total)
+    return max_energy_mev

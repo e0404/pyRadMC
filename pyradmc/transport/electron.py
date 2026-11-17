@@ -15,14 +15,40 @@ One particle at a time, for the reference backend. The scheme, per docs/decision
   from precomputed tables anchored to the scattering power; the shipped
   configuration since 2026-07-23); the Gaussian Fermi-Eyges hinge it replaced
   survives as the ``msc_model="gaussian"`` test instrument.
-- **Discrete thin-target bremsstrahlung** (see :mod:`pyradmc.physics.brems`): at most
-  one photon per substep, emitted forward from the hinge point, Bernoulli probability
-  matched to the radiative stopping power; the sub-PCUT remainder joins the
-  continuous deposit. This is the ``"thin-target"`` bremsstrahlung model.
-- **Positrons are transported as electrons** (no Bhabha distinction — a stated,
-  maintainer-approved approximation) and annihilate at rest into two back-to-back
-  511 keV photons wherever they stop; a positron leaving the grid carries its
-  annihilation energy with it. This is the ``"moller-at-rest"`` positron model.
+- **Discrete bremsstrahlung**, in one of two models, both normalized to the same
+  radiative stopping power:
+
+  - ``"thin-target"`` (see :mod:`pyradmc.physics.brems`): at most one photon per
+    substep, emitted forward from the hinge point, Bernoulli probability matched to
+    the radiative stopping power, ``1/k`` spectrum; the sub-PCUT remainder joins
+    the continuous deposit.
+  - ``"bethe-heitler"`` (see :mod:`pyradmc.physics.brems_bh`): a discrete channel
+    distance-sampled together with Moller from the cross-section for photons above
+    PCUT, the event at the end of the substep; photon energy from the screened
+    Bethe-Heitler shape, emission angle from the Lorentz-boosted law, the electron
+    not deflected; the radiative stopping power restricted to photons below PCUT
+    joins the continuous deposit.
+- **Positrons**, in one of two models (:mod:`pyradmc.physics_options`). Under
+  either, a positron that reaches ECUT annihilates **at rest** into two
+  back-to-back 511 keV photons where it stops, and one leaving the grid carries
+  its annihilation energy (2 m_e c^2) out with it.
+
+  - ``"moller-at-rest"``: **transported as an electron** (no Bhabha distinction
+    — a stated, maintainer-approved approximation) and never annihilating in
+    flight. What ``"auto"`` selects at clinical energies.
+  - ``"bhabha-in-flight"`` (see :mod:`pyradmc.physics.bhabha`,
+    :mod:`pyradmc.physics.annihilation`, :mod:`pyradmc.data.positron`): the
+    continuous loss follows the positron's own restricted collision stopping
+    power and range; the discrete collision is **Bhabha**, open from ECUT (not
+    2 ECUT: the positron may hand over everything, and one left below ECUT stops
+    there); and **two-photon annihilation in flight** competes with it as a
+    second discrete channel, ending the positron and emitting two photons that
+    carry its kinetic energy and both rest masses. What stays the *electron's*
+    under this model, each a named approximation: the CSDA range that sets the
+    substep length, the scattering power and the Goudsmit-Saunderson angular
+    law (multiple scattering), the radiative stopping power and the
+    bremsstrahlung model (either), and the dose-to-water stopping-power ratio.
+    One- and three-photon annihilation are neglected.
 - **Static magnetic field** (:mod:`pyradmc.physics.lorentz`; Bielajew 1988,
   doi:10.1007/978-1-4613-1059-4_19; Malkov & Rogers 2016, doi:10.1118/1.4954318):
   the field is sampled once per substep and each of the hinge's two straight chords
@@ -40,7 +66,7 @@ One particle at a time, for the reference backend. The scheme, per docs/decision
   alone: no gyration cap, no voxel face. Path bounds displacement, so the whole step
   stays in the exterior. Each chord is the exact helix
   (:func:`~pyradmc.physics.lorentz.helix_chord`) at the chord's mid-energy radius.
-  Hinge, loss, Moller, brems and the ledger are the ordinary loop's. What is
+  Hinge, loss, Moller, brems (either model) and the ledger are the ordinary loop's. What is
   approximate, and only here: **the deposit of a long step is not spatially resolved**
   (it files at the two chord midpoints, which lie in exterior voxels and never in the
   body, or along the straight chords under ``deposit_resolution_cm``, never along the
@@ -49,9 +75,8 @@ One particle at a time, for the reference backend. The scheme, per docs/decision
   Rotation draws no random number, and the hinge decouples from the field exactly as
   above, over a larger angle.
 
-Each named model is the only one registered for its process
-(:mod:`pyradmc.physics_options`); the loop is handed the run's resolved choice and
-refuses one it does not implement.
+The loop is handed the run's resolved choice per process
+(:mod:`pyradmc.physics_options`) and refuses a model it does not implement.
 
 Substeps are limited four ways: a fraction of the CSDA range (energy-loss
 accuracy), a mean-square hinge-angle ceiling (multiple-scattering accuracy — the
@@ -90,8 +115,17 @@ from pyradmc.geometry.grid import (
     nudge_across_face,
     voxel_face_axis,
 )
+from pyradmc.physics.annihilation import (
+    annihilation_direction_cosines,
+    sample_annihilation_photon_energy,
+)
+from pyradmc.physics.bhabha import bhabha_direction_cosines, sample_bhabha_delta_energy
 from pyradmc.physics.brems import bremsstrahlung_step_parameters, sample_bremsstrahlung_energy
-from pyradmc.physics.direction import rotate_direction
+from pyradmc.physics.brems_bh import (
+    sample_bethe_heitler_photon_energy,
+    sample_bremsstrahlung_one_minus_cos_theta,
+)
+from pyradmc.physics.direction import rotate_direction, rotate_direction_one_minus_cos
 from pyradmc.physics.lorentz import (
     gyroradius_cm,
     helix_chord,
@@ -129,23 +163,26 @@ __all__ = [
     "substep_pieces",
 ]
 
-BREMSSTRAHLUNG_MODELS: tuple[str, ...] = ("thin-target",)
+BREMSSTRAHLUNG_MODELS: tuple[str, ...] = ("thin-target", "bethe-heitler")
 """The bremsstrahlung models :func:`electron_steps` implements.
 
 Must equal the registered set (``PHYSICS_MODELS["bremsstrahlung"].models``;
-test-pinned). A new model is implemented at the two bremsstrahlung sites of
-:func:`electron_steps` — the per-substep emission decision and the photon sampled
-at the hinge — and named here.
+test-pinned). A model is implemented at the sites of :func:`electron_steps` marked
+"bremsstrahlung model dispatch" — the discrete cross-section, the per-substep
+radiative loss and emission decision, and the photon itself, at the hinge
+(``"thin-target"``) or at the end of the substep (``"bethe-heitler"``) — and named
+here.
 """
 
-POSITRON_MODELS: tuple[str, ...] = ("moller-at-rest",)
+POSITRON_MODELS: tuple[str, ...] = ("moller-at-rest", "bhabha-in-flight")
 """The positron models :func:`electron_steps` implements.
 
 Must equal the registered set (``PHYSICS_MODELS["positron"].models``;
-test-pinned). A new model is implemented where a positron's transport would
-differ from an electron's in :func:`electron_steps` — the discrete cross-section
-and its event at the end of the substep, and a competing in-flight channel — and
-named here. Annihilation of a *stopped* positron is not model-dependent.
+test-pinned). A model is implemented at the sites of :func:`electron_steps`
+marked "positron model dispatch" — the discrete cross-sections the flight is
+sampled from, the range map of the continuous loss, and the event at the end of
+the substep (Moller; or Bhabha, or annihilation in flight) — and named here.
+Annihilation of a *stopped* positron is not model-dependent.
 """
 
 STEP_ENERGY_FRACTION: float = 0.05
@@ -329,8 +366,10 @@ def electron_steps(
 
     Returns the weight-energy removed from the transported population: physical
     escape (for a positron including the 2 m_e c^2 of latent annihilation energy
-    it carries out) plus the net ledger effect of rouletting sub-threshold
-    bremsstrahlung photons at birth (see :mod:`pyradmc.transport.photon`). The
+    it carries out; a positron that annihilated, in flight or at rest, has handed
+    that energy to its photons and books none) plus the net ledger effect of
+    rouletting sub-threshold bremsstrahlung or annihilation photons at birth
+    (see :mod:`pyradmc.transport.photon`). The
     electron itself never plays; its ``weight`` is constant and scales every
     deposit, so the engine's exact energy balance extends over this loop
     unchanged.
@@ -406,6 +445,10 @@ def electron_steps(
     # One float carries the option from here down, matching what the kernels take:
     # non-positive is the "single midpoint deposit" sentinel.
     resolution = 0.0 if deposit_resolution_cm is None else deposit_resolution_cm
+    bethe_heitler = physics.bremsstrahlung == "bethe-heitler"
+    # A positron under the model with its own collision physics; an electron, and
+    # a positron under "moller-at-rest", take the electron arms everywhere below.
+    in_flight = is_positron and physics.positron == "bhabha-in-flight"
     escaped = 0.0
     e = energy
     w = weight
@@ -569,17 +612,48 @@ def electron_steps(
                 + BOUNDARY_NUDGE_CM
             )
         s_geometry = min(s_max, s_boundary)
-        # Positron model dispatch (physics.positron), first site. "moller-at-rest":
-        # a positron takes the electron's Moller cross-section. A second model
-        # selects the positron's own discrete cross-sections here.
-        sigma_moller = rho * cross_sections.moller_cross_section(e, material, ecut)
+        # Positron model dispatch (physics.positron), first site: the discrete
+        # collision cross-section, and the annihilation channel beside it.
+        # "moller-at-rest": a positron takes the electron's Moller cross-section
+        # and has no second channel. "bhabha-in-flight": Bhabha, which is open
+        # from ECUT rather than 2 ECUT, plus two-photon annihilation in flight;
+        # both at the substep-start energy, like every rate of the substep.
+        # (``sigma_moller`` is the collision channel's cross-section under either.)
+        sigma_annihilation = 0.0
+        if in_flight:
+            sigma_moller = rho * cross_sections.bhabha_cross_section(e, material, ecut)
+            sigma_annihilation = rho * cross_sections.annihilation_cross_section(e, material)
+        else:
+            sigma_moller = rho * cross_sections.moller_cross_section(e, material, ecut)
+        # Bremsstrahlung model dispatch (physics.bremsstrahlung), first site.
+        # "thin-target" has no discrete cross-section: its emission is decided per
+        # substep below, and the flight is sampled from Moller alone.
+        # "bethe-heitler": photons above PCUT are a discrete channel competing
+        # with Moller, so the flight is sampled from the sum. Both halves of the
+        # radiative split are read at this same (E, material, PCUT) — the pair
+        # whose sum is the radiative stopping power. On a long exterior-air step
+        # both are the start voxel's, like every other rate of that step: the
+        # flight competes with the safety, the sub-PCUT loss is charged over the
+        # whole step, and a photon is emitted where the step ends.
+        sigma_discrete = sigma_moller
+        sigma_brems = 0.0
+        restricted_radiative = 0.0
+        if bethe_heitler:
+            brems_per_mass, restricted_radiative = cross_sections.bremsstrahlung_step_coefficients(
+                e, material, pcut
+            )
+            sigma_brems = rho * brems_per_mass
+            sigma_discrete = sigma_moller + sigma_brems
+        if in_flight:
+            # The flight competes among all the positron's discrete channels.
+            sigma_discrete += sigma_annihilation
         s_interaction = (
-            sample_path_length(sigma_moller, rng_state) if sigma_moller > 0.0 else math.inf
+            sample_path_length(sigma_discrete, rng_state) if sigma_discrete > 0.0 else math.inf
         )
         s = min(s_interaction, s_geometry)
-        # A Moller event fires only if the sampled flight is the actual limiter — a
+        # A discrete event fires only if the sampled flight is the actual limiter — a
         # geometry-truncated substep ends at the boundary with no interaction.
-        moller_pending = s_interaction <= s_geometry
+        event_pending = s_interaction <= s_geometry
 
         # The face cap ends the substep a nudge past the face. That micron is a
         # geometric device for crossing, not path in this voxel: the chords split
@@ -599,23 +673,42 @@ def electron_steps(
         # the first-order S(E_start)*rho*path linearization; the range-out shortening
         # is exact by the same map. Sempau et al. 2000, doi:10.1088/0031-9155/45/8/315.
         path = s_in + carry
-        available = cross_sections.restricted_range(e, material, ecut)
+        # Positron model dispatch, second site: the range map of the continuous
+        # collision loss. "bhabha-in-flight" reads the positron's own (its
+        # restricted stopping power differs from the electron's by a few
+        # percent); the substep *length* above still came from the electron's
+        # CSDA range, a named approximation of the model.
+        if in_flight:
+            available = cross_sections.positron_restricted_range(e, material, ecut)
+        else:
+            available = cross_sections.restricted_range(e, material, ecut)
         if rho * path >= available:
             # The electron ranges out inside this substep, in this voxel.
             s_in = max(available / rho - carry, 0.0)
             path = s_in + carry
             de = e - ecut
-            moller_pending = False
+            event_pending = False
+        elif in_flight:
+            de = e - cross_sections.positron_energy_after_mass_path(e, material, ecut, rho * path)
         else:
             de = e - cross_sections.energy_after_mass_path(e, material, ecut, rho * path)
-        # Bremsstrahlung model dispatch (physics.bremsstrahlung), first site.
-        # "thin-target": a Bernoulli emission per substep, one uniform. A second
-        # model replaces this decision and the sub-PCUT remainder.
-        emit_probability, local_brems = bremsstrahlung_step_parameters(
-            e, cross_sections.radiative_stopping_power(e, material), rho, path, pcut
-        )
-        continuous = de + local_brems
-        emit_brems = uniform(rng_state) < emit_probability
+        # Bremsstrahlung model dispatch, second site: the radiative loss that stays
+        # continuous, and the thin-target emission decision.
+        if bethe_heitler:
+            # Only the radiative stopping power of photons below PCUT is charged
+            # here; photons above it are the discrete channel. Charging the total
+            # would count every transported photon twice. Over ``path``, like the
+            # collision loss: the in-voxel path plus the nudge carried into it.
+            continuous = de + restricted_radiative * rho * path
+            emit_brems = False
+        else:
+            # "thin-target": a Bernoulli emission per substep, one uniform; the
+            # sub-PCUT remainder of the 1/k spectrum joins the continuous loss.
+            emit_probability, local_brems = bremsstrahlung_step_parameters(
+                e, cross_sections.radiative_stopping_power(e, material), rho, path, pcut
+            )
+            continuous = de + local_brems
+            emit_brems = uniform(rng_state) < emit_probability
         # Dose-to-water: one factor per substep, at the (E, material) that set the
         # stopping power above; 1.0 exactly under the dose-to-medium default.
         substep_factor = deposit_weight(e, material)
@@ -702,9 +795,10 @@ def electron_steps(
         ux, uy, uz = rotate_direction(ux, uy, uz, cos_hinge, phi)
 
         if emit_brems and e > pcut:
-            # Bremsstrahlung model dispatch, second site. "thin-target": 1/k
-            # energy, one uniform, photon along the post-hinge direction. A
-            # second model samples its own energy and emission angle here.
+            # Bremsstrahlung model dispatch, third site. "thin-target": 1/k
+            # energy, one uniform, photon along the post-hinge direction.
+            # ("bethe-heitler" never sets emit_brems: its photon is the discrete
+            # event at the end of the substep.)
             k = sample_bremsstrahlung_energy(e, pcut, rng_state)
             # Rare tail: the sampled photon would overdraw the energy still owed to
             # the second continuous deposit. Cap it; a capped photon at or below
@@ -752,7 +846,7 @@ def electron_steps(
                 # and the exact test is false for ever, so the particle never moves.
                 d2 = d2 * (s2_face / s2) if s2 > 0.0 else 0.0
                 s2 = s2_face
-                moller_pending = False
+                event_pending = False
                 crossing = True
                 axis = voxel_face_axis(
                     x, y, z, ux, uy, uz, *grid.origin, *grid.spacing, *grid.shape
@@ -781,10 +875,105 @@ def electron_steps(
         if not grid.contains(x, y, z):
             return escaped + w * (e + latent)
 
-        # --- discrete Moller event at the end of the substep -------------------------
-        # Positron model dispatch, second site. "moller-at-rest": a positron's
-        # discrete event is sampled as Moller, like an electron's.
-        if moller_pending and e > 2.0 * ecut:
+        # --- discrete event at the end of the substep ---------------------------------
+        if not event_pending:
+            continue
+        # Which channel the pending event is. One uniform decides among the
+        # channels the flight was sampled from, each at its substep-start value:
+        #
+        # - Positron model dispatch, third site. "bhabha-in-flight": annihilation
+        #   with probability sigma_annihilation / sigma_discrete, bremsstrahlung
+        #   (if it is a discrete channel) with sigma_brems / sigma_discrete, else
+        #   Bhabha.
+        # - Bremsstrahlung model dispatch, fourth site. "bethe-heitler": a photon
+        #   with probability sigma_brems / sigma_discrete, else the collision.
+        #   "thin-target" has no discrete bremsstrahlung and, for an electron,
+        #   draws nothing: every pending event is Moller.
+        annihilation_event = False
+        brems_event = False
+        if in_flight:
+            pick = uniform(rng_state) * sigma_discrete
+            annihilation_event = pick < sigma_annihilation
+            brems_event = (not annihilation_event) and pick < sigma_annihilation + sigma_brems
+        elif bethe_heitler:
+            brems_event = uniform(rng_state) * sigma_discrete < sigma_brems
+
+        if annihilation_event:
+            if e > ecut:
+                # Two-photon annihilation in flight, at the end of the substep (on a
+                # long exterior-air step: at the chord end). The photons share the
+                # kinetic energy and both rest masses, with polar angles from
+                # energy-momentum conservation and back-to-back azimuths; the
+                # positron ends here, and the 2 m_e c^2 it carried is in the
+                # photons: it is not booked again (``latent`` is for a positron
+                # that leaves the grid un-annihilated).
+                k_first = sample_annihilation_photon_energy(e, rng_state)
+                cos_first, cos_second = annihilation_direction_cosines(e, k_first)
+                phi = 2.0 * math.pi * uniform(rng_state)
+                for k, cos_photon, azimuth in (
+                    (k_first, cos_first, phi),
+                    (e + 2.0 * ELECTRON_MASS_MEV - k_first, cos_second, phi + math.pi),
+                ):
+                    photon_dir = rotate_direction(ux, uy, uz, cos_photon, azimuth)
+                    if k > pcut:
+                        photon_w = w
+                        if k < PHOTON_ROULETTE_MEV and abs(w) < PHOTON_ROULETTE_WEIGHT_CAP:
+                            # The softer photon of a slow positron can fall below
+                            # the roulette threshold: the same game and signed
+                            # ledger entry as a bremsstrahlung photon's.
+                            photon_w = roulette_weight(w, PHOTON_ROULETTE_SURVIVAL, rng_state)
+                            escaped += (w - photon_w) * k
+                        if photon_w != 0.0:
+                            spawn((PHOTON, k, photon_w, x, y, z, *photon_dir))
+                    else:
+                        # Not transportable (only for a PCUT above 255 keV).
+                        escaped += deposit_or_escape(x, y, z, w * k, deposit_weight(k, material))
+                return escaped
+            # A positron already at or below ECUT (a thin-target photon at the hinge
+            # took the rest) is stopped: the terminal branch annihilates it at rest.
+            continue
+        if brems_event:
+            if e > pcut:
+                # Photon energy from the screened shape at the electron's current
+                # energy; emission angle from the boosted-isotropic law about the
+                # electron's direction, uniform azimuth. The electron keeps its
+                # direction (stated approximation of the model) and pays k.
+                k = sample_bethe_heitler_photon_energy(
+                    e, pcut, *cross_sections.bremsstrahlung_screening(material)[:5], rng_state
+                )
+                one_minus_cos = sample_bremsstrahlung_one_minus_cos_theta(e, rng_state)
+                phi = 2.0 * math.pi * uniform(rng_state)
+                photon_dir = rotate_direction_one_minus_cos(ux, uy, uz, one_minus_cos, phi)
+                if k > pcut:
+                    photon_w = w
+                    if k < PHOTON_ROULETTE_MEV and abs(w) < PHOTON_ROULETTE_WEIGHT_CAP:
+                        # Same game, same signed ledger entry as the thin-target
+                        # photon; a negative-weight history keeps its sign.
+                        photon_w = roulette_weight(w, PHOTON_ROULETTE_SURVIVAL, rng_state)
+                        escaped += (w - photon_w) * k
+                    if photon_w != 0.0:
+                        spawn((PHOTON, k, photon_w, x, y, z, *photon_dir))
+                else:
+                    # A photon sampled at the cutoff itself is not transportable.
+                    escaped += deposit_or_escape(x, y, z, w * k, deposit_weight(k, material))
+                e -= k
+            continue
+        # Positron model dispatch, fourth site: the collision itself.
+        if in_flight:
+            # "bhabha-in-flight": the delta ray is an electron of ECUT up to the
+            # positron's whole kinetic energy, so the gate is ECUT, not 2 ECUT. A
+            # positron left at or below ECUT is stopped: the terminal branch
+            # deposits what it kept and annihilates it at rest.
+            if e > ecut:
+                delta_energy = sample_bhabha_delta_energy(e, ecut, rng_state)
+                cos_delta, cos_primary = bhabha_direction_cosines(e, delta_energy)
+                phi = 2.0 * math.pi * uniform(rng_state)
+                delta_dir = rotate_direction(ux, uy, uz, cos_delta, phi)
+                spawn((ELECTRON, delta_energy, w, x, y, z, *delta_dir))
+                ux, uy, uz = rotate_direction(ux, uy, uz, cos_primary, phi + math.pi)
+                e -= delta_energy
+        elif e > 2.0 * ecut:
+            # "moller-at-rest" (and every electron): sampled as Moller.
             delta_energy = sample_moller_delta_energy(e, ecut, rng_state)
             cos_delta, cos_primary = moller_direction_cosines(e, delta_energy)
             phi = 2.0 * math.pi * uniform(rng_state)

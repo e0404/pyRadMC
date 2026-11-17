@@ -107,8 +107,322 @@ every registered model is validated reference-against-backend on its own, and an
 explicit override is the user's responsibility. The selector shipped first with one
 model per process (`thin-target`, `uniform-split`, `moller-at-rest`), so introducing it
 moved no result: fixed-seed dose is byte-identical before and after on the reference
-backend, Warp CPU and Warp CUDA. The 30 MeV threshold above which `"auto"` will select
+backend, Warp CPU and Warp CUDA. The 30 MeV threshold above which `"auto"` selects
 high-energy models is the default table ceiling and is provisional.
+
+**Screened Bethe-Heitler bremsstrahlung is the second model, and `"auto"` takes it above
+30 MeV.** `bethe-heitler` samples the photon energy from the screened Bethe-Heitler
+cross-section (Tsai's Thomas-Fermi fits, Davies-Bethe-Maximon Coulomb correction) and the
+emission angle from a Lorentz-boosted isotropic law; photons above PCUT are a discrete
+channel distance-sampled with Møller, and only the radiative stopping power below PCUT
+stays continuous. It is normalized to the radiative stopping power the data layer already
+carries, so it radiates what `thin-target` radiates. Un-normalized, the model needs a
+rescaling of 0.984 to 1.006 against every ESTAR node from 30 MeV to 1 GeV in all seven
+registry media, and it singled out the water 20 MeV anchor before that was corrected
+(0.979 with the transcription error, 0.998 after). Its named approximations:
+
+- no Landau-Pomeranchuk-Migdal and no dielectric suppression (they matter well above
+  1 GeV in condensed media);
+- the electron is not deflected by the emission;
+- the emission angle does not depend on the photon energy or on Z;
+- the Coulomb correction, a high-energy result, is applied at every energy — the total
+  is unaffected, being imposed by the normalization, but the shape below 1-2 MeV is
+  the Born shape, not a partial-wave one;
+- one averaged set of screening parameters per compound instead of a sum over its
+  elements (within 0.17 percent of the element sum for every registry material).
+
+In a long exterior-air step the model's rates are the start voxel's, like every other
+rate of that step, and its photon leaves from the end of the step. Compared with the
+ordinary stepping of the same half-turn (15 MeV, 0.35 T, water at 0.009 g/cm³, 6000
+electrons a side): photons per electron 0.0775 ± 0.0036 against 0.0702 ± 0.0035, radiated
+energy 0.127 ± 0.010 against 0.123 ± 0.011 MeV, local deposit 0.6971 ± 0.0019 against
+0.6998 ± 0.0024 MeV. A negative-weight history mirrors its positive twin bit for bit on
+the reference engine and to the fixed-point quantum on Warp.
+
+**The two bremsstrahlung models give measurably different doses at every energy.** Same
+radiated energy, different straggling: the 1/k spectrum puts half the radiated energy
+into photons above half the electron energy, the screened shape less, so under
+`bethe-heitler` fewer electrons stop early and fewer run long. Measured in water with
+8 x 10^6 histories per model (analytic data), the depth of half-maximum dose of an
+electron beam moves shallower by 0.10 ± 0.01 mm at 6 MeV and 1.03 ± 0.01 mm at 20 MeV,
+with up to 0.8 and 2.7 percent of the maximum dose in the falloff; the bremsstrahlung
+tail rises 3 and 6 percent; an 18 MeV photon depth dose changes by 0.61 ± 0.06 percent
+of the maximum. On water compiled to 250 MeV from EPICS 2023 the shift at 40 MeV is
+2.83 ± 0.07 mm. `"auto"` keeps `thin-target` up to 30 MeV, so no clinical result moved.
+Which model is right below 30 MeV is **not decided by this measurement** — it needs an
+external benchmark — and neither is the threshold.
+
+**One compiled electron kernel per bremsstrahlung model, because a run-time branch costs
+the GPU 7 to 8 percent on the path that never takes it.** Develop b858f86 against the
+branch, thin-target, interleaved, eight rounds of best-of-five, per-round ratios for
+12 MeV electrons, 6 MeV photons and 18 MeV photons on CUDA (RTX 4070, 2026-11-14):
+
+| Kernel | electrons | 6 MeV photons | 18 MeV photons |
+|---|---|---|---|
+| selector only (three ints on `Tables`) | 0.990 | 0.987 | 0.989 |
+| run-time branch on `tab.brems_model` | 1.067 | 1.072 | 1.081 |
+| per-model kernel, model arrays on `Tables` | 1.011 | — | 1.016 |
+| per-model kernel, arrays in a struct argument | 0.996 | 1.001 | 1.000 |
+| per-model kernel, `int` placeholder (shipped) | 0.990 | 0.989 | 0.989 |
+
+Spreads are 0.001 to 0.004. Results are byte-identical in every row. The cost of the
+branch is not executed work: the generated code of the per-model thin-target kernel
+differs from develop's by one float copy and an unused `int` argument. Two smaller costs turned up on the way and set
+the shape of the mechanism. Three more array fields on `Tables` cost every kernel 2 to
+2.7 percent with nothing reading them, because that struct is copied into the helper
+calls; and the same arrays as an unused struct argument of the electron kernel still
+cost 1 percent. So the model is a `wp.static` constant of a kernel factory
+(`kernels.make_electron_kernel`), the default kernel stays in the shared module and
+takes an `int` where a model's kernel takes its `ElectronModelTables`, and a
+non-default kernel is compiled in a module of its own on first use. The CPU resolves
+none of this (1.00, spread 0.01 to 0.04). A further model, for pair production or the
+positron, is one more argument of the factory (and a `photon_kernel` factory of the
+same shape); a model's tables never go on `Tables`.
+
+**The batched chi-squared is anticonservative for electron beams, on a lattice and on a
+column.** Measured with both sides the same backend: on a 10 x 10 voxel lattice 6 of
+100 pairs fall below a nominal p of 0.01 for a 15 MeV broad beam and 16 of 100 for a
+pencil beam, because voxels along a column share the number of primaries that entered
+it. A pencil beam binned in depth only removes that, and the statistic then has the
+right mean (1.008 of its null mean over 1000 pairs), but with 15 bins its upper tail is
+heavier than the oracle's normal approximation: 5.1 percent of pairs below a nominal
+0.01, 9.6 percent below 0.05, 99 percent quantile 2.45 times the null mean. (An earlier
+measurement on a stale base, 1 of 100, was a small sample.) The Bethe-Heitler
+cross-backend tests use the column and read their verdict against that measured null:
+1.28 at 15 MeV (empirical p = 0.20), with the two wiring mutants at 8.5 and 79. At
+40 MeV on tabulated data a single pair gave 1.47 (nominal p = 0.034); 40 replicates a
+side resolved no difference (chi-squared 44.7 on 33 bins, p = 0.085; R50 16.371 ± 0.014
+against 16.354 ± 0.009 cm).
+
+**The Fano gates pass under either bremsstrahlung model and do not tell them apart.**
+All 22 gates of `tests/validation/test_fano_magnetic.py` and
+`test_fano_exterior_air.py` were run unmodified with `bethe-heitler` forced for every
+run (CUDA, 2026-11-14, by replacing what `"auto"` resolves to from outside the test
+files); all pass, as they do under `thin-target`. Gap-to-wall dose ratios, thin-target
+then bethe-heitler, at 0.5 / 1 MeV: 2 cm gap at a tenth of the wall density, 0 T,
+0.9999 / 0.9981 then 1.0008 / 0.9973; 0.2 cm air gap, 0 T, 0.9703 / 0.9777 then
+0.9795 / 0.9747, and at 1.5 T 0.9960 / 0.9951 then 0.9999 / 0.9901; 2 cm air gap, 0 T,
+0.9993 / 0.9971 then 0.9946 / 0.9965, and at 1.5 T 0.9918 / 0.9918 then 0.9894 /
+0.9912; exterior-air cavity on the long-step path at 1.5 T, 0.9865 / 0.9895 then
+0.9899 / 0.9894. Over the 58 reported ratios the model moves a ratio by at most 0.9 %
+and by 0.30 % in the root mean square, 1.8 times what the quoted sigmas allow — but the
+quoted sigmas understate the scatter: five further seeds of the case that moved most
+significantly (exterior cavity, 1 MeV, 1.5 T, current stepping; 0.9912 then 0.9864 at
+the gate's seed) give 0.9869 ± 0.0006 under thin-target and 0.9884 ± 0.0004 under
+bethe-heitler, a seed-to-seed spread of 0.0014 against a quoted 0.0009 and a model
+difference of +0.15 ± 0.07 %. The nearest approach to a gate is the field's movement of
+the 2 cm air gap on the long-step path at 0.5 MeV and 1.5 T: −0.96 % under
+bethe-heitler against a 1 % gate (−0.76 % under thin-target). The fast-tier air-gap
+check, the signed-weight mirrors and the field and exterior-air transport tests also
+pass with the model forced (118 tests).
+
+**Above 30 MeV the data decides whether a run exists.** The analytic source declares a
+20 MeV domain and both engines refuse a 40, 80 or 200 MeV source on it before any
+transport, whatever the model. A source with the interface's unbounded default domain
+(a test instrument) runs at 40 MeV and is refused at 80 and 200 MeV by the
+restricted-range lookup, whose reference grid ends at 64 MeV. A source that *declares*
+a wider domain gets its range, table and bremsstrahlung grids extended to it: a
+tabulated water compile to 250 MeV (six seconds from EPICS 2023) runs at all three
+energies on the reference backend, Warp CPU and Warp CUDA with closed books, and its
+entrance bin holds 1.11 times the restricted collision loss across it. The 16 MeV an
+80 MeV electron used to leave at the surface, with the range map clamped at 64 MeV, is
+gone. What remains unvalidated above 30 MeV is everything an external benchmark would
+check; since the pair and positron models below, all three processes run their detailed
+model there.
+
+**Pair production and the positron each get a second model; both stay optional
+(2026-11-14).** `pair="bethe-heitler"` samples the pair's energy sharing from the
+screened Bethe-Heitler cross-section (Butcher-Messel screening functions, the EGS4 and
+Geant4 `G4BetheHeitlerModel` form) and gives each lepton its own leading-order polar
+angle. `positron="bhabha-in-flight"` gives a positron its own restricted collision
+stopping power and range, Bhabha delta rays, and two-photon annihilation in flight as a
+second discrete channel; the two are one option because the discrete cross-sections are
+only consistent together (AGENTS.md 2.10). `"auto"` takes both above the 30 MeV
+threshold and keeps `uniform-split` and `moller-at-rest` at or below it, by maintainer
+decision: fixed-seed dose, sigma, energy books and Dij of every clinical configuration
+are byte-identical to develop b858f86 on the reference backend, Warp CPU and Warp CUDA,
+with no `physics` argument, with `"auto"` and with the clinical models named (16 cases
+on the reference, 19 on each device: 6 and 18 MeV photons, 12 and 20 MeV electrons, a
+mixed photon/electron/positron phase space, dose to water, correlated and independent
+Dij, 1.5 T with and without exterior-air stepping, `run_dij_device`, concurrent lanes).
+The pair cross-section is the source's under either pair model: the model distributes a
+pair's energy and directions, it does not decide how often one is made.
+
+Named approximations of the pair model, each also stated where it is implemented:
+
+- **below 2 MeV the sharing is uniform.** The screened Born expression is negative over
+  the whole kinematic interval near threshold; EGS4 (2.1 MeV) and Geant4 (2 MeV) make
+  the same substitution. The lepton angles are the model's at every energy;
+- **triplet production is not distinguished**: the source's pair channel is the sum of
+  the nuclear and electron fields and every event is sampled as nuclear;
+- **one effective Z per material** for the screening variable, the EGS4 mixture rule
+  (weights `p Z (Z + xi)`), exact for an element;
+- **the two leptons' polar angles and azimuths are independent** and the nuclear recoil
+  is not modelled, so a pair conserves energy but not the photon's momentum;
+- **the Coulomb correction is applied at and above 50 MeV only** (EGS4 convention), a
+  step of the sampled shape of at most 0.08 percent in water and 6 percent in tungsten.
+  It is one constant (`PAIR_COULOMB_ENERGY_MEV` in `pyradmc/physics/pair.py`, mirrored
+  in the data module's oracle); whether to apply it at all energies, as the
+  bremsstrahlung model does, is an open maintainer question;
+- symmetric sharing (the Born approximation does not tell the charges apart) and no
+  Landau-Pomeranchuk-Migdal suppression.
+
+Named approximations of the positron model:
+
+- **the substep length is still set by the electron's CSDA range**, and the multiple
+  scattering (scattering power and the Goudsmit-Saunderson law) is the electron's;
+- **radiative stopping is the electron's**, under either bremsstrahlung model (it
+  overestimates positron bremsstrahlung where bremsstrahlung is a minor loss);
+- **the dose-to-water stopping-power ratio is the electron's**;
+- **two-photon annihilation only**, on free electrons at rest: one-photon annihilation
+  (of order alpha^4 Z^5 per atom) and three-photon annihilation (1/372) are neglected;
+- a positron that reaches ECUT annihilates at rest where it stops, as before;
+- the mean excitation energy and density effect are the electron's, and shell
+  corrections are neglected, as for electrons.
+
+The duplicated screening helpers of the two Bethe-Heitler data modules (fine-structure
+constant, Coulomb correction, Tsai's radiation logarithms and fit constants) are one
+implementation now, `pyradmc/data/screening.py`; no number of either model moved (hex
+dump of every element and every registry material identical before and after). The
+mixture rules and screening functions are different quantities and stay apart.
+
+**What the reference loop measures for the two models (water, analytic data).** Pair, 40 000
+photons of 18 MeV: the pair fraction of first interactions is 0.4079 under
+`bethe-heitler` and 0.4090 under `uniform-split` against 0.4096 from the interface
+(z = -0.7 and -0.2); the electron's share follows the screened DCS (p = 0.88) and
+rejects the uniform law (p = 4e-130), and the uniform split rejects the DCS (p = 7e-244);
+each lepton's angle follows the law at its own energy (p = 0.76, 0.89) and rejects it
+at the other lepton's energy; the relative azimuth is uniform (p = 0.43). Positron:
+delta rays over 0.5 cm at 10 MeV, 0.1773 +- 0.0038 per positron against 0.1842 from the
+Bhabha cross-section (z = -1.8) with the Bhabha spectrum at p = 0.59, where the clinical
+model gives 0.2111 against Moller's 0.2093 and fails the Bhabha spectrum at p = 4e-14
+(Bhabha throws 12 percent fewer delta rays above 200 keV, and they reach the full
+kinetic energy instead of half). The fraction annihilating in flight, on an instrument
+with continuous loss only so that the expectation is exactly
+`1 - exp(-int sigma_ann / S+ dE)`: 0.0314 for 0.0303 at 1 MeV and 0.1022 for 0.1040 at
+5 MeV. With all physics on it is 0.030 +- 0.003, 0.095 +- 0.005 and 0.130 +- 0.005 at 1,
+5 and 10 MeV against a CSDA estimate of 0.029, 0.096 and 0.132; the estimate integrates
+from ECUT up, because below it a positron annihilates at rest by construction (from
+10 keV up it would read 0.036, 0.10, 0.14). A 10 MeV positron stops 2.6 +- 0.5 percent
+deeper than under the electron-like model, for a CSDA range ratio of 1.025. Every
+history's books close to rounding whether the positron ends in flight, at rest or
+outside the grid: its 2 m_e c^2 is booked once.
+
+**Annihilation in flight is the one secondary that can exceed the source energy.** The
+harder photon carries up to `(T + 2m)/2 + sqrt(T (T + 2m))/2`, 0.51 to 0.77 MeV above
+the positron's kinetic energy. A pair-born positron stays below its photon, so this
+only matters for positrons the source starts; `run_energy_ceiling` is what both engines
+size tables to and check the energy domain against for such a run, and it is the
+source energy, unchanged, for every other.
+
+**One compiled photon kernel per pair model and one electron kernel per
+(bremsstrahlung, positron) pair.** The mechanism of the bremsstrahlung model, extended:
+`make_photon_kernel(pair_model)` and `make_electron_kernel(brems_model,
+positron_model)`, the default kernels in the shared module with an `int` placeholder,
+every other combination in a module of its own, the model read through `wp.static`.
+The positron arm is additionally guarded by `is_positron`, because the particle kind
+is run-time data; an electron run through the model's kernel gives the default
+kernel's bits. Default path against develop b858f86 on CUDA, interleaved, ten rounds of
+best-of-three in fresh processes (RTX 4070, 2520 MHz, no throttle reason under load):
+0.991 (sd 0.002) for 12 MeV electrons, 0.992 (0.005) for 6 MeV photons and 0.990 (0.002)
+for 18 MeV photons, where the bremsstrahlung model left it (0.990, 0.989, 0.989); the
+photon cases are the ones that run the new photon-kernel factory's default kernel. The
+statements of the default arms are unchanged; only an unused `int` argument was added
+to the photon kernel.
+
+**Reference against Warp with the models forced, and what the comparison is worth.**
+Positron pencil of 12 MeV in the water/lung column, 3000 histories a side, 13 depth
+bins above half the maximum. Null from 1000 same-backend pairs: mean 1.011 (sd 0.48),
+5.3 percent below a nominal p of 0.01, 99 percent quantile 2.41, maximum 4.2. Reference
+against Warp: 0.67 on CPU and CUDA under `bhabha-in-flight` alone (nominal p = 0.79,
+empirical 0.72) and 1.07 / 1.08 with all three detailed models (null mean 0.987,
+4.1 percent below a nominal 0.01; nominal p = 0.43, empirical 0.35). Energy-conserving
+mutants on the Warp side: no annihilation channel 7.9 and 8.6; the clinical positron
+model in the model's place 20 and 18; no discrete bremsstrahlung for the positron in
+the combined kernel 7.0 (total radiative stopping power on top of the photons: 67); all
+beyond every null pair. Not resolved at this size: the electron's Moller rate and range
+map in the positron's tables (2.2 and 3.5, above 98 and 99.9 percent of the null), and
+the electron's range map alone (0.65 and 1.27; it moves the depth of half-maximum dose
+by 0.09 mm, the Moller rate with it by 0.85 mm). Those are pinned node by node against
+the interface and through the reference loop instead. A rest mass booked twice is not
+an energy-conserving mutant: it opens the books by 1 percent against a 1e-6 gate.
+For the pair model no dose comparison of this size has power: its largest effect is
+1.4 percent of the maximum dose in the build-up of an 18 MeV beam, which needs millions
+of histories a side. Its equivalence across backends rests on the compiled samplers
+passing the host oracles in float32 on both devices (sharing, angle, and the rotation
+keeping the angle) and on the kernel reading the interface's screening scalars.
+
+All eight combinations of the three options close their books on the reference, Warp
+CPU and Warp CUDA (run, `run_dij` and `run_dij_device`), and agree with the reference
+on a mixed photon/electron/positron pencil at 3000 histories a side: 0.47 to 0.76 times
+the null mean (empirical p 0.48 to 0.78). That source makes the oracle more
+anticonservative (8 to 11 percent below a nominal 0.01), because the number of charged
+primaries per batch moves every bin together.
+
+**The Fano gates do not exercise either model; a positron Fano cavity does.**
+The 22 gates of `tests/validation/test_fano_magnetic.py` and `test_fano_exterior_air.py`
+start 0.5 and 1 MeV electrons: no photon can make a pair and no positron exists. Run
+unmodified with `bethe-heitler` pair and `bhabha-in-flight` forced (CUDA, 2026-11-14, by
+replacing what `"auto"` resolves to from outside the test files; 50 resolutions, all to
+the forced models) all 22 pass, and every one of the 26 reported gap-to-wall lines is
+identical, digit for digit, to the default run. That is an empty pass and is recorded as
+one. The positron-sensitive equivalent was run instead, outside the gate files: the
+same phantom, regions and analysis with a per-mass isotropic *positron* source of 1 MeV,
+ECUT at the gates' 0.05 MeV and PCUT raised to 0.99 MeV, so that an annihilation
+deposits its photons where it happens (a source uniform per unit mass, which keeps the
+Fano conditions; with photons transported the phantom is far too small for photon
+equilibrium). Gap-to-wall dose ratio under `bhabha-in-flight`, then `moller-at-rest`,
+then an electron source at the same cuts:
+
+| Gap | Field | `bhabha-in-flight` | `moller-at-rest` | electrons |
+|---|---|---|---|---|
+| 2 cm at a tenth of the wall density | 0 T | 0.9983 ± 0.0010 | 0.9989 ± 0.0010 | 0.9980 ± 0.0007 |
+| | 1.5 T | 0.9992 ± 0.0010 | 1.0005 ± 0.0010 | 0.9997 ± 0.0007 |
+| 0.2 cm at air density | 0 T | 0.998 ± 0.014 | 0.973 ± 0.013 | 0.9751 ± 0.0018 |
+| | 1.5 T | 1.018 ± 0.014 | 0.967 ± 0.014 | 0.9955 ± 0.0019 |
+| 2 cm at air density | 0 T | 1.009 ± 0.005 | 1.005 ± 0.005 | 0.9971 ± 0.0008 |
+| | 1.5 T | 1.000 ± 0.005 | 0.991 ± 0.005 | 0.9924 ± 0.0009 |
+| 2 cm at air density, long steps | 1.5 T | 1.000 ± 0.005 | 0.998 ± 0.005 | 0.9942 ± 0.0009 |
+
+Upstream and downstream walls agree within 0.12 percent in every run and the books close
+to 1.5e-8. At a tenth of the wall density the model sits within 0.2 percent of unity
+with and without the field, inside the electron gates' 1 percent. At air density a
+positron source is five to eight times noisier than an electron source at the same
+40 to 60 million histories (the rare positron that stops in the gap deposits 1.022 MeV
+there), so those rows say only that nothing is off by more than about a percent, or
+three in the thin gap; the model is consistent with unity within 1.8 sigma everywhere.
+This is a one-off measurement, not a gate: making it one needs a decision on the
+raised PCUT as an instrument and several times the histories at air density.
+
+**Dosimetric effect of an explicit choice below the threshold**
+(`examples/pair_positron_model_demo.py`, eight replicates of 3 to 4 million photons, in
+percent of the maximum dose): the pair model raises the build-up, by up to 0.82 +- 0.07
+at 6 MeV and 1.40 +- 0.07 at 18 MeV, and leaves the dose beyond the maximum within
+0.02 +- 0.06; the positron model lowers the dose at every depth, by 0.16 +- 0.03 at
+6 MeV and 0.83 +- 0.06 at 18 MeV (up to 1.1 near the maximum); with a lung slab in an
+18 MeV beam the same two numbers are +1.40 and -0.89 +- 0.07. For a 12 MeV positron
+beam the positron model is not a small effect: the plateau drops by 2 to 8 percent, the
+dose integral by 3.4 percent, and the photon tail beyond the range rises by 30 to 40
+percent of itself. Which model is closer to a benchmark is not decided by any of this.
+**Above 30 MeV `"auto"` now runs all three detailed models, on data that reaches there.**
+Water compiled to 250 MeV from EPICS 2023 reports EPDL's total pair production (nuclear
+plus triplet, MT 516) as its pair channel, not a fit: 0.0109, 0.0137 and 0.0167 cm²/g at
+40, 80 and 200 MeV, which is 65, 81 and 92 percent of the total attenuation and 51, 64
+and 78 percent of the complete-screening limit (7/9)/X0; the totals (0.01675, 0.01699,
+0.01826 cm²/g) are the library's. The analytic source's pair channel is a least-squares
+fit to NIST/XCOM water totals that include coherent scattering, and ends at 20 MeV
+(0.00811 against the library's 0.00797 there). Photon and positron beams at 40, 80 and
+200 MeV resolve to the three models on both backends with closed books (1e-13 on the
+reference, 2e-9 on Warp, a source positron's rest mass included). Reference against Warp
+on a positron pencil, 2000 histories a side, each against the null of its own geometry
+(300 same-backend pairs; 5.3, 6.7 and 9.3 percent below a nominal 0.01): 0.74, 0.64 and
+0.90 times the null mean (empirical p = 0.77, 0.85, 0.56). The switch itself, for a
+photon depth dose in percent of the maximum against the same run with the clinical pair
+and positron models: at 40 MeV -0.57 over the build-up and -1.16 behind the maximum
+(largest -1.66 ± 0.12), of which the positron model alone is -1.40 and -1.32 and the
+pair model alone +0.75 and +0.07; at 80 MeV -0.92 and -1.05 (largest -1.78 ± 0.09). The
+bremsstrahlung gate of the same tier is unmoved by the new set (R50 shift at 40 MeV
+-2.83 ± 0.07 mm). No external benchmark exists for any of it.
 
 ## Cross-section data
 

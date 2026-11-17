@@ -42,6 +42,7 @@ from pyradmc.physics_options import (
     PhysicsOptions,
     ResolvedPhysics,
     resolve_physics,
+    run_energy_ceiling,
     run_primary_kinds,
 )
 from pyradmc.progress import ProgressCallback, ProgressEmitter
@@ -301,10 +302,12 @@ class ReferenceEngine:
         deposit_weight = _deposit_weight_for(
             scoring_mode, self.cross_sections, ecut, transport_electrons
         )
-        resolved = resolve_physics(
-            physics,
-            max_energy_mev=source.max_energy,
-            primary_kinds=run_primary_kinds(source, primary_kind),
+        kinds = run_primary_kinds(source, primary_kind)
+        resolved = resolve_physics(physics, max_energy_mev=source.max_energy, primary_kinds=kinds)
+        # A source positron annihilating in flight can make a photon harder than
+        # the source's maximum energy; the data must reach that too.
+        require_energy_domain(
+            self.cross_sections, run_energy_ceiling(source.max_energy, kinds, resolved)
         )
         logger.info("physics models: %s (%s)", resolved.summary(), resolved.reason)
 
@@ -324,7 +327,8 @@ class ReferenceEngine:
                 primary = source.emit(state)
                 kind_name = primary.kind if primary.kind is not None else primary_kind
                 kind = _KIND_TO_PARTICLE[kind_name]
-                # A positron primary will annihilate at rest, injecting 2*m_e c^2 of
+                # A positron primary will annihilate (at rest, or in flight under the
+                # "bhabha-in-flight" model) or leave the grid, injecting 2*m_e c^2 of
                 # photons from rest mass that its kinetic energy does not account for.
                 # (For a photon that pair-produces, that 1.022 MeV is already inside
                 # the photon's energy; a positron primary brings it as rest mass.)
