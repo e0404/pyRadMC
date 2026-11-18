@@ -85,11 +85,58 @@ def test_composite_with_an_undeclared_component_declares_nothing() -> None:
     assert mixture.particle_kinds is None
 
 
-def test_weight_wrapper_passes_the_declaration_through() -> None:
-    def wrapped(inner: Source) -> TransmissionMaskSource:
-        return TransmissionMaskSource(
-            inner, mask=np.ones((2, 2)), plane_center=(4.0, 4.0, 0.0), width_u=4.0, width_v=4.0
-        )
+def _wrapped(inner: Source) -> TransmissionMaskSource:
+    return TransmissionMaskSource(
+        inner, mask=np.ones((2, 2)), plane_center=(4.0, 4.0, 0.0), width_u=4.0, width_v=4.0
+    )
 
-    assert wrapped(_in_memory([1, 2])).particle_kinds == frozenset({"photon", "electron"})
-    assert wrapped(_pencil()).particle_kinds is None
+
+def test_weight_wrapper_passes_the_declaration_through() -> None:
+    assert _wrapped(_in_memory([1, 2])).particle_kinds == frozenset({"photon", "electron"})
+    assert _wrapped(_pencil()).particle_kinds is None
+
+
+class TestRunKindsOfAMixture:
+    """A mixture's run kinds: declared components as declared, the rest the fallback.
+
+    ``particle_kinds`` of a mixture with an engine-decided component is ``None``,
+    because the source cannot know ``primary_kind``. The kinds the run starts are
+    still knowable once the engine supplies it, and must keep what the declaring
+    components hold: a positron phase space mixed with a beam starts positrons.
+    """
+
+    def test_a_declared_positron_survives_an_undeclared_beam(self) -> None:
+        mixture = CompositeSource([(_in_memory([3]), 0.5), (_pencil(), 0.5)])
+        assert run_primary_kinds(mixture, "photon") == frozenset({"photon", "positron"})
+        assert run_primary_kinds(mixture, "electron") == frozenset({"electron", "positron"})
+
+    def test_the_source_resolves_its_own_fallback(self) -> None:
+        mixture = CompositeSource([(_in_memory([2, 3]), 0.5), (_pencil(), 0.5)])
+        assert mixture.primary_kinds("photon") == frozenset({"photon", "electron", "positron"})
+
+    def test_a_single_source_resolves_like_run_primary_kinds(self) -> None:
+        assert _pencil().primary_kinds("electron") == frozenset({"electron"})
+        assert _UserSource().primary_kinds("photon") == frozenset({"photon"})
+        assert _in_memory([3]).primary_kinds("photon") == frozenset({"positron"})
+
+    def test_nested_mixtures_resolve_recursively(self) -> None:
+        inner = CompositeSource([(_in_memory([3]), 0.5), (_pencil(), 0.5)])
+        outer = CompositeSource([(inner, 0.5), (_in_memory([2]), 0.5)])
+        assert outer.particle_kinds is None
+        assert run_primary_kinds(outer, "photon") == frozenset({"photon", "electron", "positron"})
+
+    def test_a_wrapped_mixture_resolves_through_the_wrapper(self) -> None:
+        mixture = CompositeSource([(_in_memory([3]), 0.5), (_pencil(), 0.5)])
+        assert run_primary_kinds(_wrapped(mixture), "photon") == frozenset({"photon", "positron"})
+        inside = CompositeSource([(_wrapped(mixture), 0.5), (_pencil(), 0.5)])
+        assert run_primary_kinds(inside, "electron") == frozenset({"electron", "positron"})
+
+    def test_a_fully_declared_mixture_ignores_the_fallback(self) -> None:
+        mixture = CompositeSource([(_in_memory([1]), 0.5), (_in_memory([3]), 0.5)])
+        assert run_primary_kinds(mixture, "electron") == frozenset({"photon", "positron"})
+
+    def test_an_undeclared_mixture_starts_the_fallback_only(self) -> None:
+        """The clinical case: beams only, the engine's ``primary_kind`` alone."""
+        mixture = CompositeSource([(_pencil(), 0.5), (_wrapped(_pencil()), 0.5)])
+        assert run_primary_kinds(mixture, "photon") == frozenset({"photon"})
+        assert run_primary_kinds(_wrapped(mixture), "electron") == frozenset({"electron"})

@@ -26,8 +26,9 @@ import pytest
 from pyradmc import ELECTRON_MASS_MEV, PhysicsOptions
 from pyradmc.backends.ref.engine import ReferenceEngine
 from pyradmc.data.analytic import AnalyticCrossSections
+from pyradmc.geometry.collimation import TransmissionMaskSource
 from pyradmc.geometry.grid import VoxelGrid
-from pyradmc.geometry.source import PencilBeamSource, Primary, Source
+from pyradmc.geometry.source import CompositeSource, PencilBeamSource, Primary, Source
 from pyradmc.physics.annihilation import sample_annihilation_photon_energy
 from pyradmc.physics_options import CLINICAL_PHYSICS, ResolvedPhysics, run_energy_ceiling
 from pyradmc.rng import RNGState
@@ -52,6 +53,16 @@ class _PositronPencil(Source):
 
     def emit(self, rng_state: RNGState) -> Primary:
         return Primary(self._energy, 4.0, 4.0, -1.0, 0.0, 0.0, 1.0, kind="positron")
+
+
+def _pencil(energy: float) -> PencilBeamSource:
+    return PencilBeamSource(energy=energy, position=(4.0, 4.0, -1.0), direction=(0, 0, 1.0))
+
+
+def _mask(inner: Source) -> TransmissionMaskSource:
+    return TransmissionMaskSource(
+        inner, mask=np.ones((2, 2)), plane_center=(4.0, 4.0, 0.0), width_u=4.0, width_v=4.0
+    )
 
 
 def _grid() -> VoxelGrid:
@@ -121,6 +132,27 @@ class TestTheDomainIsCheckedAtTheCeiling:
         clinical = engine.run(_PositronPencil(19.8), **common)
         assert clinical.dose.max() > 0.0
 
+    @pytest.mark.parametrize("wrap", [False, True], ids=["mixture", "wrapped-mixture"])
+    def test_a_mixture_starting_positrons_is_refused_under_the_model(
+        self, backend: str, wrap: bool
+    ) -> None:
+        """A positron component keeps its ceiling when mixed with a beam.
+
+        The beam leaves its kind to the engine, so the mixture cannot declare its
+        kinds itself; the positrons it starts still reach 20.56 MeV photons.
+        """
+        engine = self._engine(backend)
+        common = dict(n_histories=8, n_batches=2, seed=SEED, msc_model="gaussian")
+
+        def mixture() -> Source:
+            mixed = CompositeSource([(_PositronPencil(19.8), 0.5), (_pencil(19.8), 0.5)])
+            return _mask(mixed) if wrap else mixed
+
+        with pytest.raises(ValueError, match="energy domain"):
+            engine.run(mixture(), **common, physics=PhysicsOptions(positron="bhabha-in-flight"))
+        clinical = engine.run(mixture(), **common)
+        assert clinical.dose.max() > 0.0
+
     def test_a_photon_source_at_the_domain_edge_runs_under_the_model(self, backend: str) -> None:
         engine = self._engine(backend)
         beam = PencilBeamSource(energy=20.0, position=(4.0, 4.0, -1.0), direction=(0, 0, 1.0))
@@ -154,3 +186,26 @@ def test_warp_tables_are_built_to_the_ceiling() -> None:
     ceiling = run_energy_ceiling(12.0, {"positron"}, IN_FLIGHT)
     assert tops[kernels.POSITRON_BHABHA_IN_FLIGHT] >= ceiling
     assert tops[kernels.POSITRON_MOLLER_AT_REST] == pytest.approx(12.0, rel=1e-5)
+
+
+@pytest.mark.warp
+def test_warp_tables_of_a_mixture_are_built_to_the_ceiling() -> None:
+    """A positron component mixed with a beam sizes the photon grid like it alone."""
+    pytest.importorskip("warp", reason="warp-lang optional dependency not installed")
+    from pyradmc.backends.warp import kernels
+    from pyradmc.backends.warp.engine import WarpEngine
+
+    grid = _grid()
+    engine = WarpEngine(grid=grid, cross_sections=_xs(grid), device="cpu")
+    mixture = CompositeSource([(_PositronPencil(12.0), 0.5), (_pencil(12.0), 0.5)])
+    engine.run(
+        mixture,
+        n_histories=400,
+        n_batches=2,
+        seed=SEED,
+        physics=PhysicsOptions(positron="bhabha-in-flight"),
+    )
+    (tab,) = engine._state("cpu").tables.values()
+    assert int(tab.positron_model) == kernels.POSITRON_BHABHA_IN_FLIGHT
+    top = float(np.exp(tab.p_log_e_min + (tab.n_points - 1) / tab.p_inv_dlog))
+    assert top >= run_energy_ceiling(12.0, {"positron"}, IN_FLIGHT)

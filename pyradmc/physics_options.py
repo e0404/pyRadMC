@@ -34,7 +34,7 @@ host before any history starts. The engines log the resolved choice once at INFO
 from __future__ import annotations
 
 import math
-from collections.abc import Collection, Mapping
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
 
@@ -377,7 +377,17 @@ def run_primary_kinds(source: object, fallback: str) -> frozenset[str]:
     through ``particle_kinds`` (:attr:`pyradmc.geometry.source.Source.particle_kinds`).
     One that leaves the kind to the engine declares ``None``, and the run starts
     ``fallback`` — the engine's ``primary_kind``.
+
+    A :class:`~pyradmc.geometry.source.Source` is asked through
+    :meth:`~pyradmc.geometry.source.Source.primary_kinds`, which applies
+    ``fallback`` per component: a mixture of a declaring and an undeclared source
+    starts the declared kinds *and* ``fallback``, although its own
+    ``particle_kinds`` is ``None``. Any other object (the Warp pre-solve's device
+    handle) is read through ``particle_kinds`` alone.
     """
+    resolve: Callable[[str], Collection[str]] | None = getattr(source, "primary_kinds", None)
+    if resolve is not None:
+        return frozenset(resolve(fallback))
     declared: Collection[str] | None = getattr(source, "particle_kinds", None)
     return frozenset({fallback}) if declared is None else frozenset(declared)
 

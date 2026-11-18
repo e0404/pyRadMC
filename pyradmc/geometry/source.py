@@ -144,6 +144,21 @@ class Source(ABC):
         """
         return None
 
+    def primary_kinds(self, fallback: str) -> frozenset[str]:
+        """Return the kinds a run of this source starts, given the engine's ``primary_kind``.
+
+        ``fallback`` is the kind an unset ``Primary.kind`` becomes. The default
+        returns :attr:`particle_kinds` when declared and ``{fallback}`` otherwise.
+        A source made of other sources overrides it to resolve the fallback per
+        component (:class:`CompositeSource`) or to delegate (the collimation
+        wrappers), because only there is it known which primaries the engine
+        decides: a mixture's own :attr:`particle_kinds` is ``None`` as soon as one
+        component's is. What :func:`pyradmc.physics_options.run_primary_kinds`
+        reads; descriptive only, like :attr:`particle_kinds`.
+        """
+        declared = self.particle_kinds
+        return frozenset({fallback}) if declared is None else frozenset(declared)
+
     @abstractmethod
     def emit(self, rng_state: RNGState) -> Primary:
         """Emit one primary, drawing from the per-history RNG ``state``."""
@@ -248,12 +263,23 @@ class CompositeSource(Source):
         """Union of the components' declared kinds; ``None`` unless every one declares.
 
         A component that leaves the kind to the engine makes the mixture's kinds
-        depend on ``primary_kind``, which this source cannot know.
+        depend on ``primary_kind``, which this source cannot know. The kinds a run
+        starts are :meth:`primary_kinds`, which keeps the declared components'
+        kinds in that case too.
         """
         declared = [source.particle_kinds for source in self._sources]
         if any(kinds is None for kinds in declared):
             return None
         return frozenset().union(*(kinds for kinds in declared if kinds is not None))
+
+    def primary_kinds(self, fallback: str) -> frozenset[str]:
+        """Union of the components' run kinds, each resolving ``fallback`` itself.
+
+        A declaring component contributes what it declares and an undeclared one
+        ``{fallback}``, recursively through nested mixtures and wrappers, so a
+        positron phase space mixed with a beam starts positrons and photons.
+        """
+        return frozenset().union(*(source.primary_kinds(fallback) for source in self._sources))
 
     def emit(self, rng_state: RNGState) -> Primary:
         """Choose a component by weight (one uniform), then emit from it."""

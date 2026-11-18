@@ -40,7 +40,10 @@ without a field, so results are not byte-identical to the previous release.
   A source that itself emits positrons needs, under `bhabha-in-flight`, cross-section
   data up to 0.77 MeV above its maximum energy (an annihilation photon can be that much
   harder than the positron); the engines build their tables to that ceiling and refuse
-  the run if the data ends below it (`pyradmc.physics_options.run_energy_ceiling`).
+  the run if the data ends below it (`pyradmc.physics_options.run_energy_ceiling`). A
+  `CompositeSource` that mixes such a source with a beam counts as one: the kinds a run
+  starts come from `Source.primary_kinds`, which resolves the engine's `primary_kind`
+  per component.
 
   **Performance: none lost on the default path.** The Warp photon kernel is now
   compiled per pair model and the electron kernel per (bremsstrahlung, positron) pair;
