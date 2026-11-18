@@ -8,7 +8,11 @@ import numpy as np
 import pytest
 from scipy import stats
 
-from pyradmc.physics.direction import rotate_direction, sample_isotropic_direction
+from pyradmc.physics.direction import (
+    rotate_direction,
+    rotate_direction_one_minus_cos,
+    sample_isotropic_direction,
+)
 from pyradmc.rng.host import HostRNG
 from tests.conftest import SEED
 
@@ -97,3 +101,42 @@ def test_rotation_azimuth_is_uniform_about_the_axis() -> None:
     observed, _ = np.histogram(phis, bins=np.linspace(-math.pi, math.pi, 17))
     chi2, p_value = stats.chisquare(observed)
     assert p_value > 0.01, f"cone azimuth not uniform: chi2={chi2:.1f}, p={p_value:.2e}"
+
+
+AXES = [
+    (0.0, 0.0, 1.0),
+    (0.0, 0.0, -1.0),
+    (1.0, 0.0, 0.0),
+    (0.6, -0.48, 0.64),
+    (1.0e-7, 0.0, 0.9999999999999949),
+]
+
+
+@pytest.mark.parametrize("axis", AXES)
+def test_one_minus_cos_rotation_is_the_cosine_rotation(axis: tuple[float, float, float]) -> None:
+    """At angles a double-precision cosine resolves, the two forms are one rotation."""
+    state = HostRNG().init_state(SEED, 14)
+    for _ in range(500):
+        one_minus_cos = 2.0 * state.random()
+        phi = 2.0 * math.pi * state.random()
+        expected = rotate_direction(*axis, 1.0 - one_minus_cos, phi)
+        got = rotate_direction_one_minus_cos(*axis, one_minus_cos, phi)
+        assert got == pytest.approx(expected, abs=1e-12)
+
+
+@pytest.mark.parametrize("axis", AXES)
+@pytest.mark.parametrize("one_minus_cos", [1.0e-18, 1.0e-12, 1.0e-6, 0.5, 2.0])
+def test_one_minus_cos_rotation_keeps_small_angles(
+    axis: tuple[float, float, float], one_minus_cos: float
+) -> None:
+    """The deflection survives where the cosine has rounded to one.
+
+    |v - u|^2 = 2 (1 - cos theta) for unit vectors: an identity that reads the
+    opening angle without forming the cosine. At 1 - cos = 1e-18 the cosine form
+    returns the incident direction unchanged; this one must not.
+    """
+    for phi in (0.0, 0.7, 2.0, 4.5):
+        vx, vy, vz = rotate_direction_one_minus_cos(*axis, one_minus_cos, phi)
+        assert abs(vx * vx + vy * vy + vz * vz - 1.0) < 1e-9
+        chord2 = (vx - axis[0]) ** 2 + (vy - axis[1]) ** 2 + (vz - axis[2]) ** 2
+        assert chord2 == pytest.approx(2.0 * one_minus_cos, rel=1e-6)

@@ -32,18 +32,45 @@ This biases the low-dose tail, which is where NTCP and LET-guided objectives ope
 It is tested against DVH endpoints, never against a matrix norm.
 """
 
+HIGH_ENERGY_PHYSICS_THRESHOLD_MEV: float = 30.0
+"""Maximum source energy above which ``"auto"`` physics selects the high-energy models.
+
+Read by :func:`pyradmc.physics_options.resolve_physics`: a run whose source can emit
+above this resolves each ``"auto"`` process to its high-energy model, a run at or
+below it to its clinical model. Accuracy-defining in the sense of AGENTS.md 2.8: it
+decides which physics a run near it computes.
+
+**Provisional.** 30 MeV is the ceiling the default tabulated data is compiled to,
+i.e. the edge of what the clinical models are validated over; it has not been
+derived from a dosimetric comparison of the two model sets. It takes effect for all
+three processes: above it ``"auto"`` selects ``"bethe-heitler"`` bremsstrahlung,
+``"bethe-heitler"`` pair sharing and the ``"bhabha-in-flight"`` positron, at or below
+it ``"thin-target"``, ``"uniform-split"`` and ``"moller-at-rest"``. The models of each
+process differ measurably on *both* sides of it (bremsstrahlung: the depth of
+half-maximum dose of an electron beam in water moves shallower by 1.0 mm at 20 MeV,
+``examples/bremsstrahlung_model_demo.py``, and by 2.8 mm at 40 MeV,
+``tests/validation/test_bethe_heitler_high_energy.py``; pair and positron: percent-level
+changes of an 18 MeV photon depth dose, ``examples/pair_positron_model_demo.py``), so
+where the switch sits — and whether the clinical side should switch too — is a decision
+the maintainer has still to take with a benchmark, not a property of 30 MeV. No
+shipped analytic run reaches it: that source's energy domain ends at 20 MeV.
+"""
+
 # --- variance-reduction parameters -------------------------------------
 # Russian roulette on low-energy photons (see pyradmc.physics.roulette and the
 # transport loops). Unbiased by construction — these change realizations and
 # efficiency, never expectations; unbiasedness is test-pinned against a
 # roulette-free run. They are still fixed project-wide values, not per-run options
-# (AGENTS.md 2.10): one configuration is what the validation tier certifies.
+# (AGENTS.md 2.10: the per-run physics choice is PhysicsOptions and nothing else).
 
 PHOTON_ROULETTE_MEV: float = 0.5
 """Photons below this energy play Russian roulette at their creation or scatter.
 
-Chosen just below the 511 keV annihilation line so annihilation photons are exempt
-and positron energy accounting stays analog.
+Chosen just below the 511 keV annihilation line so the photons of an annihilation
+at rest are exempt. Under the ``"bhabha-in-flight"`` positron model the softer
+photon of an annihilation *in flight* can be as low as 256 keV; it plays the game
+like any other photon born below the threshold, with the same signed ledger entry,
+so the energy books stay exact.
 """
 
 PHOTON_ROULETTE_SURVIVAL: float = 0.5
@@ -176,6 +203,7 @@ if TYPE_CHECKING:
         SpectralBeamSource,
     )
     from pyradmc.geometry.spectrum import ALI_ROGERS_BEAMS, Spectrum, ali_rogers_mv
+    from pyradmc.physics_options import PhysicsOptions
     from pyradmc.rng.host import HostRNG
     from pyradmc.scoring.cylinder import (
         CylindricalScoringGrid,
@@ -212,6 +240,7 @@ _LAZY_EXPORTS: dict[str, str] = {
     "PencilBeamSource": "pyradmc.geometry.source",
     "PhaseSpaceSource": "pyradmc.geometry.phasespace",
     "PhotonProcess": "pyradmc.data.interface",
+    "PhysicsOptions": "pyradmc.physics_options",
     "Primary": "pyradmc.geometry.source",
     "PrimaryFluenceBeamSource": "pyradmc.geometry.source",
     "PrimaryFluenceBeamletSource": "pyradmc.geometry.source",
@@ -274,6 +303,7 @@ __all__ = [
     "ECUT_MEV",
     "ELECTRON_MASS_MEV",
     "GY_PER_MEV_PER_G",
+    "HIGH_ENERGY_PHYSICS_THRESHOLD_MEV",
     "LUNG",
     "MATERIALS",
     "MEV_C_PER_TESLA_CM",
@@ -304,6 +334,7 @@ __all__ = [
     "PencilBeamSource",
     "PhaseSpaceSource",
     "PhotonProcess",
+    "PhysicsOptions",
     "Primary",
     "PrimaryFluenceBeamSource",
     "PrimaryFluenceBeamletSource",

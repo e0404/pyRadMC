@@ -9,8 +9,12 @@ launch and memory management only).
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import numpy as np
+
+if TYPE_CHECKING:
+    from pyradmc.physics_options import ResolvedPhysics
 
 __all__ = ["RunProvenance", "TransportResult"]
 
@@ -73,14 +77,22 @@ class RunProvenance:
     :attr:`~pyradmc.geometry.exterior.ExteriorAirMap.provenance`; ``None`` for the
     current stepping, including when a map was given but is inert (no field, a zero
     field, a non-uniform field). It distinguishes two otherwise identical field runs."""
+    physics: ResolvedPhysics | None = None
+    """The physics models the run used, resolved — never ``"auto"``.
+
+    What :func:`pyradmc.physics_options.resolve_physics` made of the call's
+    ``physics`` argument: one registered model per process. Every engine run fills
+    it; ``None`` only on a hand-built record."""
 
     def summary(self) -> str:
         """One-line human-readable digest, for logs and file headers."""
+        physics = "unrecorded" if self.physics is None else self.physics.summary()
         return (
             f"pyradmc {self.version} {self.backend}/{self.device} seed={self.seed} "
             f"pcut={self.pcut_mev} ecut={self.ecut_mev} msc={self.msc_model} "
             f"step={self.step_energy_fraction} deposit_res={self.deposit_resolution_cm} "
-            f"xs=[{self.cross_sections}] B=[{self.magnetic_field}] air=[{self.exterior_air}]"
+            f"physics=[{physics}] xs=[{self.cross_sections}] "
+            f"B=[{self.magnetic_field}] air=[{self.exterior_air}]"
         )
 
 

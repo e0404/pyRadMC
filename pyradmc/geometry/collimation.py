@@ -1119,6 +1119,15 @@ class _FactorWrappedSource(Source):
         """The inner source's maximum energy (a weight factor never raises it)."""
         return self._inner.max_energy
 
+    @property
+    def particle_kinds(self) -> frozenset[str] | None:
+        """The inner source's declared kinds (a weight factor never changes a kind)."""
+        return self._inner.particle_kinds
+
+    def primary_kinds(self, fallback: str) -> frozenset[str]:
+        """Return the inner source's run kinds, so a wrapped mixture resolves per component."""
+        return self._inner.primary_kinds(fallback)
+
     def emit(self, rng_state: RNGState) -> Primary:
         """Emit the inner primary with its weight rescaled; no draws consumed here."""
         primary = self._inner.emit(rng_state)

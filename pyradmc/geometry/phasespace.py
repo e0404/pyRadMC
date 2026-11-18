@@ -488,6 +488,9 @@ class PhaseSpaceSource(Source):
         del view
         self._max_energy = float(energies.max())
         supported = (codes == IAEA_PHOTON) | (codes == IAEA_ELECTRON) | (codes == IAEA_POSITRON)
+        self._particle_kinds = frozenset(
+            _IAEA_KIND[int(code)] for code in np.unique(codes[supported])
+        )
         unsupported = np.flatnonzero(~supported)
         if unsupported.size:
             if not skip_unsupported:
@@ -515,6 +518,11 @@ class PhaseSpaceSource(Source):
     def max_energy(self) -> float:
         """Highest particle energy in the file, in MeV (for table sizing)."""
         return self._max_energy
+
+    @property
+    def particle_kinds(self) -> frozenset[str]:
+        """The transportable particle kinds present in the file."""
+        return self._particle_kinds
 
     def _record_index(self, k: int) -> int:
         """Map the k-th *supported* record to its position in the full file.
@@ -734,6 +742,11 @@ class InMemoryPhaseSpaceSource(Source):
     def max_energy(self) -> float:
         """Highest stored particle energy in MeV (for table sizing)."""
         return float(self._columns["energy"].max())
+
+    @property
+    def particle_kinds(self) -> frozenset[str]:
+        """The particle kinds present in the stored population."""
+        return frozenset(_IAEA_KIND[int(code)] for code in np.unique(self._codes))
 
     def emit(self, rng_state: RNGState) -> Primary:
         """Emit one stored particle, sampled uniformly; consumes one uniform."""

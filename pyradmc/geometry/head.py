@@ -236,7 +236,8 @@ def _compton_cos_thetas(energies: _F64, ratios: _F64) -> _F64:
     """Vectorized Compton relation; see :func:`pyradmc.physics.compton.compton_cos_theta`."""
     alpha = np.asarray(energies, dtype=np.float64) / ELECTRON_MASS_MEV
     cos_theta = 1.0 + 1.0 / alpha - 1.0 / (alpha * np.asarray(ratios, dtype=np.float64))
-    return np.minimum(1.0, np.maximum(-1.0, cos_theta))
+    clipped: _F64 = np.minimum(1.0, np.maximum(-1.0, cos_theta))
+    return clipped
 
 
 def _compton_electron_cos_thetas(energies: _F64, ratios: _F64) -> _F64:
@@ -250,7 +251,8 @@ def _compton_electron_cos_thetas(energies: _F64, ratios: _F64) -> _F64:
     p_electron = np.sqrt(recoil * (recoil + 2.0 * ELECTRON_MASS_MEV))
     cos_gamma = _compton_cos_thetas(energies, ratios)
     cos_electron = (energies - ratios * energies * cos_gamma) / p_electron
-    return np.minimum(1.0, np.maximum(-1.0, cos_electron))
+    clipped: _F64 = np.minimum(1.0, np.maximum(-1.0, cos_electron))
+    return clipped
 
 
 def _rotate_directions(directions: _F64, cos_theta: _F64, phi: _F64) -> _F64:

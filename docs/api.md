@@ -18,6 +18,18 @@ installed; touching it then raises an error naming the extra to install.
 
 ::: pyradmc.backends.warp.engine.WarpEngine
 
+## Physics models
+
+::: pyradmc.physics_options.PhysicsOptions
+
+::: pyradmc.physics_options.ResolvedPhysics
+
+::: pyradmc.physics_options.resolve_physics
+
+::: pyradmc.physics_options.PHYSICS_MODELS
+
+::: pyradmc.physics_options.run_energy_ceiling
+
 ## Results
 
 ::: pyradmc.backends.results.TransportResult
@@ -119,6 +131,7 @@ not tuning knobs: changing one requires a test demonstrating the dosimetric effe
         - ECUT_MEV
         - PCUT_MEV
         - DIJ_TRUNCATION_RELATIVE
+        - HIGH_ENERGY_PHYSICS_THRESHOLD_MEV
         - PHOTON_ROULETTE_MEV
         - PHOTON_ROULETTE_SURVIVAL
         - PHOTON_ROULETTE_WEIGHT_CAP

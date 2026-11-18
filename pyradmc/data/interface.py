@@ -31,6 +31,8 @@ import numpy as np
 if TYPE_CHECKING:
     import numpy.typing as npt
 
+    from pyradmc.data.bethe_heitler import BremsScreening
+    from pyradmc.data.pair import PairScreening
     from pyradmc.data.tables import CrossSectionTables
 
 __all__ = ["DOMAIN_EDGE_RTOL", "CrossSectionSource", "PhotonProcess", "require_energy_domain"]
@@ -72,6 +74,12 @@ and the table would be built for a distribution indistinguishable from forward."
 _RANGE_GRID_POINTS: int = 4096
 """Nodes of the cached range grid; trapezoid error at this log spacing sits far
 below the 1e-4 pins of the derivative and round-trip tests."""
+
+_BREMS_GRID_POINTS: int = 1024
+"""Nodes of the cached bremsstrahlung grid of
+:meth:`CrossSectionSource.bremsstrahlung_step_coefficients`: a third of a second
+of quadrature per ``(material, k_cut)``, for an interpolation error of a few
+parts per million (measured values in that method's docstring)."""
 
 
 class PhotonProcess:
@@ -455,6 +463,355 @@ class CrossSectionSource(ABC):
             grids = (np.log(energies), cumulative)
             cache[key] = grids
         return grids
+
+    # -- screened Bethe-Heitler bremsstrahlung (concrete: derived from the above) --
+
+    def bremsstrahlung_screening(self, material: int) -> BremsScreening:
+        """Screening parameters of the screened Bethe-Heitler photon spectrum.
+
+        The per-material numbers that select the *shape* the sampler in
+        :mod:`pyradmc.physics.brems_bh` draws from; computed from the material's
+        elemental composition by
+        :func:`pyradmc.data.bethe_heitler.screening_parameters` (compound rule and
+        its measured error there). Concrete on the interface for the reason
+        :meth:`elastic_screening` is: no implementation can silently omit it, and
+        the analytic and tabulated backends cannot drift apart on the shape. A
+        source carrying real differential bremsstrahlung data would override the
+        three methods of this block together.
+        """
+        from pyradmc.data.bethe_heitler import screening_parameters
+        from pyradmc.data.materials import MATERIALS
+
+        if not 0 <= material < self.n_materials:
+            raise ValueError(f"material index {material} beyond this source")
+        cache: dict[int, BremsScreening] | None = getattr(self, "_brems_screening_cache", None)
+        if cache is None:
+            cache = {}
+            self._brems_screening_cache = cache
+        screening = cache.get(material)
+        if screening is None:
+            screening = screening_parameters(MATERIALS[material].composition)
+            cache[material] = screening
+        return screening
+
+    def bremsstrahlung_cross_section(self, energy: float, material: int, k_cut: float) -> float:
+        r"""Cross-section for emitting a photon above ``k_cut``, per unit mass, in cm^2/g.
+
+        The discrete channel of the screened Bethe-Heitler model,
+
+        .. math::
+
+            \frac{\sigma}{\rho} = \frac{S_{rad}}{\rho}\,
+                \frac{\int_{k_{cut}}^{T} G(k)/k\, dk}{\int_0^{T} G(k)\, dk},
+
+        i.e. the model's spectral shape ``G`` normalized so that its radiated
+        energy is exactly :meth:`radiative_stopping_power` (see
+        :mod:`pyradmc.data.bethe_heitler`). Zero for ``energy <= k_cut``.
+
+        Consistency contract (tested): this times the mean photon energy of the
+        shape on ``[k_cut, T]``, plus
+        :meth:`restricted_radiative_stopping_power`, equals
+        :meth:`radiative_stopping_power`. A transport loop using this channel must
+        therefore charge the electron the *restricted* radiative stopping power
+        continuously, never the total — the total would double-count every
+        photon above ``k_cut``.
+
+        Evaluated by quadrature on every call (no cache): exact. The reference
+        loop reads :meth:`bremsstrahlung_step_coefficients`, which interpolates
+        these values; kernels read the flattened
+        :class:`~pyradmc.data.bethe_heitler.BetheHeitlerTables`.
+        """
+        return self._bremsstrahlung_split(energy, material, k_cut)[0]
+
+    def restricted_radiative_stopping_power(
+        self, energy: float, material: int, k_cut: float
+    ) -> float:
+        r"""Radiative stopping power from photons below ``k_cut``, in MeV cm^2/g.
+
+        .. math::
+
+            \frac{S_{rad}^{<}}{\rho} = \frac{S_{rad}}{\rho}\,
+                \frac{\int_0^{k_{cut}} G(k)\, dk}{\int_0^{T} G(k)\, dk},
+
+        the part of the radiative loss that stays continuous (and, the photons
+        being below the transport cutoff, local) when photons above ``k_cut`` are
+        sampled as discrete events with :meth:`bremsstrahlung_cross_section`.
+        Equals :meth:`radiative_stopping_power` for ``energy <= k_cut``.
+        """
+        return self._bremsstrahlung_split(energy, material, k_cut)[1]
+
+    def _bremsstrahlung_split(
+        self, energy: float, material: int, k_cut: float
+    ) -> tuple[float, float]:
+        """``(discrete cross-section, restricted stopping power)`` for one query.
+
+        The last answer is remembered: a transport step asks for both halves at the
+        same ``(energy, material, k_cut)``, and they share one quadrature.
+        """
+        from pyradmc.data.bethe_heitler import shape_integrals
+
+        if energy <= 0.0:
+            raise ValueError(f"non-positive electron kinetic energy {energy} MeV")
+        if k_cut <= 0.0:
+            raise ValueError(f"non-positive photon threshold {k_cut} MeV")
+        key = (energy, material, k_cut)
+        last: tuple[tuple[float, int, float], tuple[float, float]] | None = getattr(
+            self, "_brems_split_last", None
+        )
+        if last is not None and last[0] == key:
+            return last[1]
+        screening = self.bremsstrahlung_screening(material)
+        total = self.radiative_stopping_power(energy, material)
+        if energy <= k_cut:
+            split = (0.0, total)
+        else:
+            below, above, count = shape_integrals(energy, k_cut, screening)
+            norm = total / (below + above)
+            split = (norm * count, norm * below)
+        self._brems_split_last = (key, split)
+        return split
+
+    def bremsstrahlung_step_coefficients(
+        self, energy: float, material: int, k_cut: float
+    ) -> tuple[float, float]:
+        """``(discrete cross-section, restricted radiative stopping power)``, interpolated.
+
+        The pair a transport substep needs — :meth:`bremsstrahlung_cross_section`
+        in cm^2/g and :meth:`restricted_radiative_stopping_power` in MeV cm^2/g at
+        one ``(energy, material, k_cut)`` — read from a grid instead of integrated.
+        The two exact methods cost a quadrature per call (about 0.3 ms), which a
+        per-substep caller cannot afford; this is to them what
+        :meth:`restricted_range` is to :meth:`restricted_stopping_power`.
+
+        Both are interpolated linearly in ``log E`` on
+        :data:`_BREMS_GRID_POINTS` log-spaced nodes from ``k_cut`` to
+        :data:`_RANGE_GRID_E_REF`, each node an exact evaluation, cached per
+        ``(material, k_cut)``. A source whose declared domain
+        (:attr:`energy_max`) reaches higher gets nodes appended at the same spacing
+        up to that domain (:func:`~pyradmc.data.grids.extendable_log_grid`, as for
+        the restricted range), so every value below 64 MeV is the same whatever
+        the domain (test-pinned). The grid starts *at* the threshold, where the
+        cross-section leaves zero as ``ln(E / k_cut)`` — linear in the
+        interpolation variable, so the onset is not smeared. Measured against the
+        exact methods in water at ``k_cut`` = 50 keV: at most 5.3e-6 relative on
+        the cross-section and 1.7e-6 on the stopping power for ``E`` >= 0.2 MeV;
+        within the first node spacing above the threshold, where the
+        cross-section itself vanishes, at most 1.1e-3 of it (test-pinned).
+
+        Outside the grid the exact methods answer: at or below ``k_cut`` there is
+        no discrete channel, and above the grid's upper edge nothing is clamped
+        or extrapolated. This method does not police the energy domain: the
+        restricted-range lookup the same substep makes is what raises above it.
+        """
+        if energy <= k_cut:
+            return self._bremsstrahlung_split(energy, material, k_cut)
+        cache: (
+            dict[
+                tuple[int, float],
+                tuple[npt.NDArray[np.float64], npt.NDArray[np.float64], npt.NDArray[np.float64]],
+            ]
+            | None
+        ) = getattr(self, "_brems_step_cache", None)
+        if cache is None:
+            cache = {}
+            self._brems_step_cache = cache
+        key = (material, k_cut)
+        grids = cache.get(key)
+        if grids is None:
+            from pyradmc.data.grids import extendable_log_grid
+
+            top = self.energy_max * (1.0 + DOMAIN_EDGE_RTOL)
+            energies = extendable_log_grid(
+                k_cut,
+                _RANGE_GRID_E_REF,
+                _BREMS_GRID_POINTS,
+                e_top=top if math.isfinite(top) else _RANGE_GRID_E_REF,
+            )
+            split = np.array(
+                [self._bremsstrahlung_split(float(e), material, k_cut) for e in energies]
+            )
+            grids = (np.log(energies), split[:, 0].copy(), split[:, 1].copy())
+            cache[key] = grids
+        log_e, cross_section, restricted = grids
+        x = math.log(energy)
+        if x > log_e[-1]:
+            return self._bremsstrahlung_split(energy, material, k_cut)
+        return (
+            float(np.interp(x, log_e, cross_section)),
+            float(np.interp(x, log_e, restricted)),
+        )
+
+    # -- positrons (concrete: closed forms over the material registry) ----------
+
+    def positron_restricted_stopping_power(
+        self, energy: float, material: int, delta_cut: float
+    ) -> float:
+        """Restricted *positron* collision stopping power, in MeV cm^2/g.
+
+        The positron twin of :meth:`restricted_stopping_power`: energy losses
+        above ``delta_cut`` are excluded, being handled as discrete Bhabha events
+        (:meth:`bhabha_cross_section`). Saturates at ``delta_cut >= energy`` (the
+        unrestricted value), where the electron's saturates at ``energy / 2``.
+        Berger-Seltzer positron formula, ICRU Report 37 (1984):
+        :func:`pyradmc.data.positron.positron_restricted_collision_stopping`
+        (governing equation and stated approximations there).
+
+        Concrete on the interface, evaluated from the registry material's
+        I-value, density effect and electron density — the same inputs every
+        implementation's electron stopping power is built from — so the analytic
+        and tabulated backends answer identically. A source carrying positron
+        stopping data of its own may override it, and must then override
+        :meth:`bhabha_cross_section` consistently (tested identity: restricted
+        plus the Bhabha energy moment above the cut equals the unrestricted
+        value).
+
+        **Radiative stopping of positrons is the electron's**
+        (:meth:`radiative_stopping_power`) — a stated approximation, see
+        :mod:`pyradmc.data.positron`.
+        """
+        from pyradmc.data.materials import MATERIALS
+        from pyradmc.data.positron import positron_restricted_collision_stopping
+
+        if not 0 <= material < self.n_materials:
+            raise ValueError(f"material index {material} beyond this source")
+        return positron_restricted_collision_stopping(energy, MATERIALS[material], delta_cut)
+
+    def bhabha_cross_section(self, energy: float, material: int, delta_cut: float) -> float:
+        """Restricted Bhabha cross-section per unit mass, in cm^2/g.
+
+        Total cross-section for a discrete positron-electron collision
+        transferring more than ``delta_cut`` (MeV, kinetic) to a delta electron.
+        Zero when ``energy`` is at or below ``delta_cut`` — *not* ``2 * delta_cut``
+        as for :meth:`moller_cross_section`: the particles are distinguishable and
+        the positron may transfer its whole kinetic energy. Bhabha (1936),
+        doi:10.1098/rspa.1936.0046;
+        :func:`pyradmc.data.positron.restricted_bhabha_cross_section`.
+        """
+        from pyradmc.data.materials import MATERIALS
+        from pyradmc.data.positron import restricted_bhabha_cross_section
+
+        if not 0 <= material < self.n_materials:
+            raise ValueError(f"material index {material} beyond this source")
+        return restricted_bhabha_cross_section(energy, MATERIALS[material], delta_cut)
+
+    def annihilation_cross_section(self, energy: float, material: int) -> float:
+        """Two-photon annihilation-in-flight cross-section per unit mass, in cm^2/g.
+
+        The Heitler cross-section per electron at positron kinetic energy
+        ``energy`` (MeV) times the material's electron density per gram:
+        :func:`pyradmc.data.positron.annihilation_cross_section_per_electron`.
+        Target electrons free and at rest; one- and three-photon annihilation
+        neglected. It diverges as ``1/v`` towards zero energy, which the
+        transport never sees: a positron at or below the cutoff annihilates at
+        rest.
+        """
+        from pyradmc.data.materials import MATERIALS
+        from pyradmc.data.positron import annihilation_cross_section_per_electron
+
+        if not 0 <= material < self.n_materials:
+            raise ValueError(f"material index {material} beyond this source")
+        return MATERIALS[material].electrons_per_gram * annihilation_cross_section_per_electron(
+            energy
+        )
+
+    def positron_restricted_range(self, energy: float, material: int, delta_cut: float) -> float:
+        """Restricted-collision range of a *positron* down to ``delta_cut``, in g/cm^2.
+
+        :meth:`restricted_range` with :meth:`positron_restricted_stopping_power`
+        in the integrand: the same nodes (reference span to 64 MeV, appended
+        above it up to :attr:`energy_max`), the same trapezoid, and the same
+        energy domain, enforced the same way — a query above ``energy_max``
+        raises instead of clamping (test-pinned against the electron lookup).
+        The two ranges differ at the percent level (water, 200 keV cut: the
+        positron's is 1.6 % shorter just above the cut and 1.3 % longer near
+        1 MeV), so a positron must not be stepped with the electron map once
+        its stopping power is its own.
+        """
+        log_e, cumulative = self._positron_range_grid(material, delta_cut)
+        e = max(energy, delta_cut)
+        if e > self.energy_max * (1.0 + DOMAIN_EDGE_RTOL) or math.log(e) > log_e[-1]:
+            raise ValueError(
+                f"positron restricted range queried at {energy} MeV, outside the energy "
+                f"domain of {type(self).__name__} (energy_max={self.energy_max} MeV)"
+            )
+        return float(np.interp(np.log(e), log_e, cumulative))
+
+    def positron_energy_after_mass_path(
+        self, energy: float, material: int, delta_cut: float, mass_path: float
+    ) -> float:
+        """Positron energy after a continuous-loss mass path; see :meth:`energy_after_mass_path`.
+
+        Clamped to ``[delta_cut, energy]`` in the same way, and raising above the
+        source's energy domain as :meth:`positron_restricted_range` does.
+        """
+        log_e, cumulative = self._positron_range_grid(material, delta_cut)
+        remaining = self.positron_restricted_range(energy, material, delta_cut) - mass_path
+        if remaining <= 0.0:
+            return delta_cut
+        e_end = float(np.exp(np.interp(remaining, cumulative, log_e)))
+        return min(max(e_end, delta_cut), energy)
+
+    def _positron_range_grid(
+        self, material: int, delta_cut: float
+    ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
+        """Return the cached positron ``(log E nodes, cumulative range)`` grid for one key."""
+        cache: (
+            dict[tuple[int, float], tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]] | None
+        ) = getattr(self, "_positron_restricted_range_cache", None)
+        if cache is None:
+            cache = {}
+            self._positron_restricted_range_cache = cache
+        key = (material, delta_cut)
+        grids = cache.get(key)
+        if grids is None:
+            from pyradmc.data.grids import extendable_log_grid
+
+            # The electron grid's nodes exactly (:meth:`_range_grid`), so the two
+            # maps share one rule and a wider domain only ever appends.
+            top = self.energy_max * (1.0 + DOMAIN_EDGE_RTOL)
+            energies = extendable_log_grid(
+                delta_cut,
+                _RANGE_GRID_E_REF,
+                _RANGE_GRID_POINTS,
+                e_top=top if math.isfinite(top) else _RANGE_GRID_E_REF,
+            )
+            inv_s = np.array(
+                [
+                    1.0 / self.positron_restricted_stopping_power(float(e), material, delta_cut)
+                    for e in energies
+                ]
+            )
+            cumulative = np.concatenate(
+                ([0.0], np.cumsum(np.diff(energies) * 0.5 * (inv_s[1:] + inv_s[:-1])))
+            )
+            grids = (np.log(energies), cumulative)
+            cache[key] = grids
+        return grids
+
+    # -- pair-production kinematics (concrete: derived from the composition) ----
+
+    def pair_screening(self, material: int) -> PairScreening:
+        """Screening scalars of the pair energy-sharing distribution, dimensionless.
+
+        The three per-material inputs of
+        :func:`pyradmc.physics.pair.sample_pair_electron_energy`
+        (``screening_constant``, ``coulomb_low``, ``coulomb_high``; see
+        :class:`pyradmc.data.pair.PairScreening`). They fix only the *shape* of the
+        electron/positron energy sharing; the pair cross-section itself stays
+        :meth:`mu_over_rho` with ``PhotonProcess.PAIR``.
+
+        Concrete on the interface for the reason :meth:`elastic_screening` is:
+        computed from the material's elemental composition
+        (:func:`pyradmc.data.pair.pair_screening_parameters`, EGS4 mixture rule),
+        so no implementation can omit it and no backend can drift on the shape. A
+        source with differential pair data of its own may override it.
+        """
+        from pyradmc.data.materials import MATERIALS
+        from pyradmc.data.pair import pair_screening_parameters
+
+        if not 0 <= material < self.n_materials:
+            raise ValueError(f"material index {material} beyond this source")
+        return pair_screening_parameters(MATERIALS[material].composition)
 
     # -- construction -------------------------------------------------------
 

@@ -140,24 +140,44 @@ Docstrings carry the governing equation and a DOI-cited reference. Stated approx
 (no fluorescence; no Rayleigh by default; positron annihilation at rest) are named explicitly
 at the point of implementation, not buried in a design document.
 
-### 2.10 Physics is data-driven, never flag-driven
+### 2.10 Physics models are selected per process; `"auto"` is the certified path
 
-What physics runs is decided by the data source and the phase plan — never by a per-run
-option. A planning engine's validation certifies **one configuration**; toggleable physics
-multiplies the configuration space every backend-equivalence test must cover and invites
-silent misconfiguration downstream. Concretely:
+A process may have more than one model. Which one runs is chosen per process through
+``PhysicsOptions`` (``pyradmc/physics_options.py``), the engines' ``physics`` argument:
+each field is ``"auto"`` or the name of a registered model. Selectable physics multiplies
+the configurations a backend-equivalence test must cover and invites silent
+misconfiguration downstream, so it is held to these rules:
 
+- **``"auto"`` is the default and the certified path.** It is resolved once per run from
+  the run configuration — the source's maximum energy and primary kinds — by one pure
+  function reading one table (``resolve_physics``, ``PHYSICS_MODELS``). The validation
+  tier certifies what ``"auto"`` resolves to. The resolved models and the reason are
+  logged once and recorded in the result's provenance.
+- **An explicit model is the user's responsibility.** Any user may pin a process to a
+  registered model. Nothing certifies that choice for their problem.
+- **Every registered model is validated on its own**, reference against backend, with the
+  oracles of section 4. A name enters ``PHYSICS_MODELS`` only with both backends
+  implementing it; a backend refuses a model it lacks and never runs another in its place.
+  What belongs to one piece of physics is one option: Bhabha scattering and annihilation
+  in flight are a single positron model.
+- **What ``"auto"`` resolves to is accuracy-defining** (section 2.8). Changing a row's
+  choice, or ``HIGH_ENERGY_PHYSICS_THRESHOLD_MEV``, needs a test showing the dosimetric
+  effect. An approximation is still retired by replacing it as what ``"auto"`` selects,
+  not by leaving users to find the option.
 - The transport loop is **channel-complete**: it samples every interaction channel the
   ``CrossSectionSource`` reports as nonzero. Enabling a channel (e.g. Rayleigh)
-  is a data change in the backend, not a transport flag.
-- An approximation is retired by **replacing it as the default**, with a test showing the
-  dosimetric effect — never by adding an option next to it. (If positron physics is ever
-  upgraded, Bhabha and annihilation in flight go in together, as the new default.)
-- The only sanctioned toggles are **test instruments** — options that exist so a test can
-  isolate one piece of physics or sampling, like the engine's KERMA mode (``transport_electrons``)
-  or ``run_dij``'s ``correlated=False`` independent-sampling mode (the shipped Dij is correlated;
-  the independent mapping survives only to isolate column independence for the fluence-sum test) —
-  and each must say so in its docstring.
+  is a data change in the backend, not a physics option.
+- **The world is engine data, not a physics option.** The grid, the cross-section
+  source, a static magnetic field and the exterior-air map are handed to the engine
+  when it is built; none of them is a run argument and none is a `PhysicsOptions`
+  field.
+- Nothing else is a per-run physics choice. Cutoffs and variance-reduction parameters are
+  project-wide values, and any other option that changes what is transported is a **test
+  instrument** — it exists so a test can isolate one piece of physics or sampling, like the
+  engine's KERMA mode (``transport_electrons``) or ``run_dij``'s ``correlated=False``
+  independent-sampling mode (the shipped Dij is correlated; the independent mapping survives
+  only to isolate column independence for the fluence-sum test) — and each must say so in
+  its docstring.
 
 ---
 
@@ -244,6 +264,9 @@ This ordering was established empirically, not assumed. Do not reorder it withou
   Warp kernels are exempt; mark them. Coverage exempts them too (`exclude_also` on
   `@wp.kernel` / `@wp.func` in pyproject.toml): Warp compiles those bodies from the
   AST and they never run as Python, so a "missing" kernel line is not a missing test.
+  A kernel a factory compiles by calling `wp.kernel(...)` on a nested `def` has no
+  decorator to match; its `def` line carries the marker comment
+  `# Warp kernel body: compiled from its AST, never run as Python` instead.
 - `ruff` for lint and format. No manual formatting debates.
 - Library output goes through `logging.getLogger(__name__)`; `warnings.warn` is reserved for
   result caveats and API misuse. No `print` in `pyradmc/` (ruff `T20` enforces this), and no
@@ -336,9 +359,36 @@ These outlive the work that produced them. Each is a live constraint, not histor
   real coherent channel without recalibrating pair against coherent-free totals
   double-counts attenuation. A backend must take its channels from one consistent
   decomposition of the same library.
-- **Positrons are Moller-approximated** (no Bhabha, annihilation at rest). If ever upgraded,
-  Bhabha and annihilation in flight land together as the new default per section 2.10, with
-  a test showing the dosimetric effect.
+- **At clinical energies positrons are Moller-approximated and pairs split uniformly; the
+  alternatives exist and are optional.** `"moller-at-rest"` (a positron transported as an
+  electron, annihilating only at rest) and `"uniform-split"` (kinetic energy shared
+  uniformly, both leptons forward) are what `"auto"` resolves to at or below
+  `HIGH_ENERGY_PHYSICS_THRESHOLD_MEV`, so no clinical result moved when the alternatives
+  landed. `"bhabha-in-flight"` (Bhabha and two-photon annihilation in flight, one option
+  per section 2.10) and `"bethe-heitler"` pair sharing are registered, validated on their
+  own, and what `"auto"` takes above the threshold. They change a dose measurably when
+  chosen below it (18 MeV photons in water: build-up up to +1.4 % of the maximum from the
+  pair model, -0.8 to -1.1 % at every depth from the positron model;
+  `examples/pair_positron_model_demo.py`), so making either the clinical choice is
+  replacing a default: it needs the dosimetric evidence of section 2.8 and a benchmark
+  that says which is closer, not an argument. What stays approximate under each is named
+  where it is implemented and listed in `docs/decisions.md`: under `"bhabha-in-flight"`
+  the substep length, multiple scattering, radiative stopping and the dose-to-water
+  stopping ratio are still the electron's, and one- and three-photon annihilation are
+  neglected; under `"bethe-heitler"` pair sharing is uniform below 2 MeV, triplet
+  production is not distinguished, the mixture rule is EGS4's effective Z, the two
+  lepton angles are independent, and the Coulomb correction switches on at 50 MeV.
+- **A run that starts positrons under `"bhabha-in-flight"` needs data 0.77 MeV above its
+  source.** Annihilation in flight is the one process whose secondary can be harder than
+  anything the source emits; `run_energy_ceiling` is what both engines size tables to and
+  check the energy domain against. Any future process that can do the same (it would have
+  to add rest mass) belongs in that function, not in a table margin.
+- **A physics model must not slow the default path.** A run-time branch on the model,
+  never taken, cost 7 to 8 % on CUDA in the electron kernel, and unread table fields on
+  `Tables` 1 to 2 % (interleaved ratios, 2026-11-14; cause not established). So each
+  model is compiled into a kernel of its own and its tables stay off `Tables`. Before a
+  model merges, re-measure the default path's timing ratio on CUDA; the CPU does not
+  resolve these effects.
 - **Variance-reduction CPU cost is unmeasured under controlled conditions.** The development
   laptop's power state drifts by several times, so only interleaved-median *ratios* are
   trustworthy on it. GPU cost is neutral (a warp retires with its longest thread). Absolute

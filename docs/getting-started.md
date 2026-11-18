@@ -49,12 +49,82 @@ the cheapest sanity check available, and worth keeping in your own scripts.
 
 ```python
 print(result.provenance.summary())
-# pyradmc 0.2.1 ref/cpu seed=20260726 pcut=0.05 ecut=0.2 msc=gs step=0.2 xs=[analytic ...]
+# pyradmc 0.2.1 ref/cpu seed=20260726 pcut=0.05 ecut=0.2 msc=gs step=0.2 deposit_res=None
+#   physics=[bremsstrahlung=thin-target pair=uniform-split positron=moller-at-rest] xs=[analytic ...]
 ```
 
 A dose array outlives the process that made it. `result.provenance` records the version,
-backend, device, seed, cutoffs, multiple-scattering model, resolved substep fraction and
-the cross-section citation, so an archived result still says how it was produced.
+backend, device, seed, cutoffs, multiple-scattering model, resolved substep fraction, the
+physics models and the cross-section citation, so an archived result still says how it
+was produced.
+
+### Physics models
+
+Three processes have a selectable model: bremsstrahlung, pair production and positron
+handling. Leave them alone and the engine chooses:
+
+```python
+result = engine.run(source, n_histories=100_000, n_batches=10, seed=20260726)  # physics="auto"
+print(result.provenance.physics.summary())
+# bremsstrahlung=thin-target pair=uniform-split positron=moller-at-rest
+```
+
+`"auto"` is the certified path. It is resolved once per run from the source's maximum
+energy and the kinds of particle the run starts, and the choice is logged at INFO with
+its reason (`logging.getLogger("pyradmc")`). To pin a process, name its model:
+
+```python
+from pyradmc import PhysicsOptions
+
+result = engine.run(
+    source,
+    n_histories=100_000,
+    n_batches=10,
+    seed=20260726,
+    physics=PhysicsOptions(pair="uniform-split"),  # the other two stay on "auto"
+)
+```
+
+| Process | Registered models | What it does |
+|---|---|---|
+| `bremsstrahlung` | `thin-target` | 1/k photon spectrum, emitted along the electron's direction |
+| | `bethe-heitler` | screened Bethe-Heitler spectrum, emitted at an angle of order 1/γ; same radiative stopping power |
+| `pair` | `uniform-split` | kinetic energy shared uniformly, both leptons emitted forward |
+| | `bethe-heitler` | screened Bethe-Heitler sharing (uniform below 2 MeV), each lepton at its own angle of order 1/γ; same pair cross-section |
+| `positron` | `moller-at-rest` | transported as an electron (no Bhabha), annihilation at rest |
+| | `bhabha-in-flight` | the positron's own collision stopping power, Bhabha delta rays, two-photon annihilation in flight |
+
+`"auto"` takes the first model of each row for a source whose maximum energy is at or
+below `pyradmc.HIGH_ENERGY_PHYSICS_THRESHOLD_MEV` (30 MeV, provisional) and the second
+of each row above it, so clinical runs compute what they always did.
+A source that high also needs cross-section data whose declared energy domain reaches it
+(`CrossSectionSource.energy_max`: 20 MeV for the analytic source, the compiled grid top
+for a tabulated one, see `--e-max` in [Cross-section data](data.md)); the engines refuse
+the run otherwise, whatever `physics` says. An unknown name raises a `ValueError`
+listing the valid ones. An explicit model is your responsibility: only what `"auto"`
+resolves to is what the validation tier certifies.
+
+The two bremsstrahlung models radiate the same energy and share it differently among
+photons: the screened spectrum emits about 1.5 times as many, softer. That is visible in
+a dose. Measured in water (`examples/bremsstrahlung_model_demo.py`), `bethe-heitler`
+against `thin-target` moves the depth of half-maximum dose of an electron beam shallower
+by 0.10 mm at 6 MeV and 1.0 mm at 20 MeV (2.8 mm at 40 MeV, on a tabulated compile),
+raises the bremsstrahlung tail at 20 MeV by about 6 percent of itself, and changes an
+18 MeV photon depth dose by 0.6 percent of its maximum. Choosing a model costs the
+default nothing: the GPU kernel is compiled per model, and a thin-target run is as fast
+as before (measured). The first run that selects `bethe-heitler` compiles its kernel.
+
+The pair and positron models are visible in a photon dose too
+(`examples/pair_positron_model_demo.py`). Against the clinical pair, `bethe-heitler`
+pair sharing raises the build-up of an 18 MeV beam in water by up to 1.4 percent of the
+maximum dose and leaves the dose behind the maximum alone; `bhabha-in-flight` lowers it
+at every depth by about 0.8 percent of the maximum, because a positron that annihilates
+in flight hands its remaining kinetic energy to photons. At 6 MeV the two are 0.8 and
+0.16 percent. What each model still approximates is listed in
+[Design decisions](decisions.md). One thing to know when a *source* emits positrons
+under `bhabha-in-flight`: an annihilation photon can be up to 0.77 MeV harder than the
+positron, so the cross-section data must reach that far above the source's maximum
+energy, and the engines refuse the run if it does not.
 
 ## Running on the GPU
 
@@ -251,7 +321,8 @@ figure beside itself that a physicist can sanity-check at a glance. They need th
 `examples` extra (matplotlib) and each runs in well under a minute:
 `reference_engine_demo.py` (scatter buildup against the primary-only exponential),
 `electron_transport_demo.py` (buildup vs the KERMA approximation, R50 tracking the CSDA
-range), `warp_backend_demo.py` (one physics source compiled three ways),
+range), `bremsstrahlung_model_demo.py` (what the bremsstrahlung model changes in a depth
+dose), `warp_backend_demo.py` (one physics source compiled three ways),
 `dij_demo.py` (a beamlet column, the fluence-sum identity, a wedge plan as
 `Dij @ weights`), `device_dij_demo.py` (the Dij kept on the GPU and a plan dose formed
 there, against the host route), `dij_plan_sigma_demo.py` (plan-dose sigma from the column variances:
