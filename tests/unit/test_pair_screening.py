@@ -213,6 +213,15 @@ class TestMixtureParameters:
         with pytest.raises(ValueError, match="composition"):
             pair_screening_parameters(())
 
+    def test_rejects_a_composition_without_mass(self) -> None:
+        with pytest.raises(ValueError, match="no positive mass fraction"):
+            pair_screening_parameters(((1, 0.0), (8, 0.0)))
+
+    def test_rejects_a_non_positive_atomic_number(self) -> None:
+        """Through the shared radiation logarithms (pyradmc.data.screening)."""
+        with pytest.raises(ValueError, match="atomic number must be positive"):
+            pair_screening_parameters(((0, 1.0),))
+
     def test_every_registry_material_has_parameters(self) -> None:
         for material in MATERIALS:
             params = pair_screening_parameters(material.composition)

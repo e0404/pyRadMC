@@ -15,8 +15,13 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from pyradmc import ELECTRON_MASS_MEV
 from pyradmc.data.analytic import AnalyticCrossSections
-from pyradmc.data.positron import PositronTables, build_positron_tables
+from pyradmc.data.positron import (
+    PositronTables,
+    annihilation_dcs_per_electron,
+    build_positron_tables,
+)
 from pyradmc.data.tables import build_cross_section_tables, lookup_loglinear_2d
 
 ECUT = 0.2
@@ -107,3 +112,23 @@ def test_a_grid_above_the_source_domain_is_refused() -> None:
     xs = AnalyticCrossSections(geometry_densities=((WATER, 1.0),))
     with pytest.raises(ValueError, match="energy domain"):
         build_positron_tables(xs, ecut=ECUT, e_max=40.0)
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        (dict(ecut=0.0, e_max=E_MAX), "non-positive cutoff"),
+        (dict(ecut=ECUT, e_max=ECUT), "transport range"),
+        (dict(ecut=ECUT, e_max=E_MAX, n_points=1), "two grid nodes"),
+    ],
+)
+def test_a_degenerate_grid_is_refused(kwargs: dict[str, float], match: str) -> None:
+    xs = AnalyticCrossSections(geometry_densities=((WATER, 1.0),))
+    with pytest.raises(ValueError, match=match):
+        build_positron_tables(xs, **kwargs)  # type: ignore[arg-type]
+
+
+def test_the_annihilation_spectrum_refuses_a_positron_at_rest() -> None:
+    """Annihilation in flight needs a moving positron; at rest is a separate branch."""
+    with pytest.raises(ValueError, match="non-positive positron kinetic energy"):
+        annihilation_dcs_per_electron(0.0, ELECTRON_MASS_MEV)

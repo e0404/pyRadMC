@@ -614,3 +614,44 @@ class TestFlattenedTables:
         np.testing.assert_array_equal(
             tables.screening[WATER], [s.z_ratio, s.c_nuc, s.c_el, s.g_nuc, s.g_el]
         )
+
+
+class TestInvalidInputIsRefused:
+    """Every entry point refuses a non-physical argument instead of computing on it."""
+
+    @pytest.mark.parametrize(
+        ("composition", "match"),
+        [
+            ((), "empty composition"),
+            (((0, 1.0),), "invalid composition entry"),
+            (((1, -0.1), (8, 1.1)), "invalid composition entry"),
+            (((1, 0.0), (8, 0.0)), "no mass"),
+        ],
+    )
+    def test_screening_parameters(
+        self, composition: tuple[tuple[int, float], ...], match: str
+    ) -> None:
+        with pytest.raises(ValueError, match=match):
+            screening_parameters(composition)
+
+    @pytest.mark.parametrize(("energy", "k_cut"), [(0.0, PCUT_MEV), (6.0, 0.0), (-1.0, 0.1)])
+    def test_shape_integrals(self, energy: float, k_cut: float) -> None:
+        with pytest.raises(ValueError, match="non-positive"):
+            shape_integrals(energy, k_cut, screening_parameters(MATERIALS[WATER].composition))
+
+    def test_interface_query_at_zero_energy(self) -> None:
+        with pytest.raises(ValueError, match="non-positive electron kinetic energy"):
+            AnalyticCrossSections().bremsstrahlung_cross_section(0.0, WATER, PCUT_MEV)
+
+    @pytest.mark.parametrize(
+        ("kwargs", "match"),
+        [
+            (dict(ecut=ECUT_MEV, pcut=0.0, e_max=20.0), "non-positive cutoff"),
+            (dict(ecut=0.0, pcut=PCUT_MEV, e_max=20.0), "non-positive cutoff"),
+            (dict(ecut=ECUT_MEV, pcut=PCUT_MEV, e_max=ECUT_MEV), "transport range"),
+            (dict(ecut=ECUT_MEV, pcut=PCUT_MEV, e_max=20.0, n_points=1), "two grid nodes"),
+        ],
+    )
+    def test_table_builder(self, kwargs: dict[str, float], match: str) -> None:
+        with pytest.raises(ValueError, match=match):
+            build_bethe_heitler_tables(AnalyticCrossSections(), **kwargs)  # type: ignore[arg-type]

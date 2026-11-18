@@ -1388,7 +1388,7 @@ def make_photon_kernel(pair_model: int) -> wp.Kernel:
         decorate = wp.kernel(module="unique", module_options=dict(_MODULE_OPTIONS))
         model_type = PhotonModelTables
 
-    def photon_kernel(
+    def photon_kernel(  # Warp kernel body: compiled from its AST, never run as Python
         gi: GridInfo,
         si: GridInfo,
         density: wp.array3d(dtype=float),
@@ -1968,7 +1968,7 @@ def make_electron_kernel(
         decorate = wp.kernel(module="unique", module_options=dict(_MODULE_OPTIONS))
         model_type = ElectronModelTables
 
-    def electron_kernel(
+    def electron_kernel(  # Warp kernel body: compiled from its AST, never run as Python
         gi: GridInfo,
         si: GridInfo,
         density: wp.array3d(dtype=float),

@@ -423,6 +423,50 @@ class TestRestMassIsBookedOnce:
                 assert sum(p[1] for p in h.photons) == TWO_M
 
 
+class TestAnAnnihilationPhotonBelowPcut:
+    """A PCUT above the softest in-flight photon (about m c^2 / 2) deposits that photon.
+
+    On the continuous-loss instrument a positron spawns nothing but its
+    annihilation photons, so a history that spawns exactly one ended in flight
+    with its partner below PCUT, deposited where the positron annihilated (a rest
+    annihilation's two 511 keV photons both clear this PCUT).
+    """
+
+    PCUT_MEV = 0.4
+    ENERGY_MEV = 6.0
+    N = 1_000
+
+    def test_the_partner_is_deposited_and_every_history_balances(self) -> None:
+        grid = _block()
+        xs = _xs(_ContinuousLossWater, grid)
+        rng = HostRNG()
+        weight = PHOTON_ROULETTE_WEIGHT_CAP  # analog: no photon plays roulette
+        emitted = weight * (self.ENERGY_MEV + TWO_M)
+        singles = []
+        for i in range(self.N):
+            spawned: list[StackEntry] = []
+            deposited = [0.0]
+
+            def deposit(x: float, y: float, z: float, amount: float, weighted: float) -> None:
+                deposited[0] += amount  # noqa: B023 - consumed within this iteration
+
+            escaped = electron_steps(
+                True, self.ENERGY_MEV, weight, 0.5 * BIG_CM, 0.5 * BIG_CM, 0.5 * BIG_CM,
+                0.0, 0.0, 1.0, grid, xs, rng.init_state(SEED + 40, i), deposit,
+                spawned.append, pcut=self.PCUT_MEV, ecut=ECUT_MEV, msc_model="gaussian",
+                physics=IN_FLIGHT,
+            )  # fmt: skip
+            assert all(entry[0] == PHOTON for entry in spawned)
+            assert len(spawned) in (1, 2)
+            carried = sum(entry[2] * entry[1] for entry in spawned)
+            assert abs(emitted - (deposited[0] + escaped + carried)) / emitted < 1.0e-12
+            if len(spawned) == 1:
+                singles.append(spawned[0][1])
+        assert len(singles) > 10
+        # The spawned photon is the harder one: the partner took less than PCUT.
+        assert min(singles) > TWO_M + ECUT_MEV - self.PCUT_MEV
+
+
 # -- where a positron stops -----------------------------------------------------------
 
 

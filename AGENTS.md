@@ -264,6 +264,9 @@ This ordering was established empirically, not assumed. Do not reorder it withou
   Warp kernels are exempt; mark them. Coverage exempts them too (`exclude_also` on
   `@wp.kernel` / `@wp.func` in pyproject.toml): Warp compiles those bodies from the
   AST and they never run as Python, so a "missing" kernel line is not a missing test.
+  A kernel a factory compiles by calling `wp.kernel(...)` on a nested `def` has no
+  decorator to match; its `def` line carries the marker comment
+  `# Warp kernel body: compiled from its AST, never run as Python` instead.
 - `ruff` for lint and format. No manual formatting debates.
 - Library output goes through `logging.getLogger(__name__)`; `warnings.warn` is reserved for
   result caveats and API misuse. No `print` in `pyradmc/` (ruff `T20` enforces this), and no

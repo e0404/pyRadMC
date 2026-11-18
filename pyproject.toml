@@ -127,7 +127,15 @@ source = ["pyradmc"]
 # counting them only hides real gaps (the electron kernel alone is ~2000 lines). The
 # same exemption mypy grants kernel code (AGENTS.md 5). The pure-scalar physics the
 # reference engine runs stays measured; only the decorated bodies are excluded.
-exclude_also = ['^\s*@wp\.kernel', '^\s*@wp\.func']
+# A kernel a factory compiles per physics model (`make_electron_kernel`) is a nested
+# `def` passed to `wp.kernel(...)` by call, with no decorator to match: its `def` line
+# carries the marker comment of the third pattern instead, which excludes that
+# function only, so the factory's own lines stay measured.
+exclude_also = [
+    '^\s*@wp\.kernel',
+    '^\s*@wp\.func',
+    '^\s*def \w+\(\s*# Warp kernel body: compiled from its AST',
+]
 
 [tool.mypy]
 # No pinned python_version: modern numpy ships PEP 695 stubs that mypy refuses to parse
