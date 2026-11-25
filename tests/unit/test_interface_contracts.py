@@ -102,6 +102,21 @@ class TestUniformContract:
         # Distinct histories must not share a stream.
         assert streams_sequential[0] != streams_sequential[1]
 
+    def test_uniform_block_is_the_scalar_stream(self) -> None:
+        """``uniform_block(state, n)`` is ``n`` successive ``uniform(state)`` calls.
+
+        Element for element and in how far it advances the state, so host scoring
+        code drawing in bulk sees the stream the interface defines.
+        """
+        from pyradmc.rng.host import HostRNG, uniform, uniform_block
+
+        rng = HostRNG()
+        a, b = rng.init_state(1234, 3), rng.init_state(1234, 3)
+        block = uniform_block(a, 100)
+        assert block.dtype == np.float64
+        assert np.array_equal(block, [uniform(b) for _ in range(100)])
+        assert uniform(a) == uniform(b)  # both advanced by the same 100 draws
+
 
 class TestTableIntegrationContract:
     """Sub-grid integration of products, not products of bin means.
