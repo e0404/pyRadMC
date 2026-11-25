@@ -15,7 +15,9 @@ The Dij pipeline has two host-side stages, shared by every backend:
     (AGENTS.md 2.8): it is a physics decision disguised as a memory optimization,
     biases the low-dose tail, and its default lives in :data:`pyradmc.DIJ_TRUNCATION_RELATIVE`.
     Its dosimetric effect is tested against DVH endpoints in the dij tier, never
-    against a matrix norm.
+    against a matrix norm. The opt-in ``truncation_mode="stochastic"`` replaces the
+    hard cut of the tail by Russian roulette, which removes that bias in
+    expectation (see :class:`DijAssembler`).
 
 Doses are per emitted history *of that beamlet*, in MeV/g, so a column scaled by a
 fluence weight is that beamlet's dose contribution; absolute calibration stays out
@@ -26,12 +28,14 @@ from __future__ import annotations
 
 import warnings
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal, TypeAlias
 
 import numpy as np
+import numpy.typing as npt
 
 from pyradmc import GY_PER_MEV_PER_G
 from pyradmc.geometry.grid import VoxelGrid
+from pyradmc.rng.host import HostRNG, uniform_block
 from pyradmc.scoring.grid import ScoringGrid
 
 if TYPE_CHECKING:
@@ -41,7 +45,68 @@ if TYPE_CHECKING:
     # through, so scoring keeps no runtime dependency on the backend layer.
     from pyradmc.backends.results import RunProvenance
 
-__all__ = ["BatchedBeamletScorer", "BeamletDoseBlock", "DijAssembler", "DijResult"]
+__all__ = [
+    "DIJ_ROULETTE_SALT",
+    "BatchedBeamletScorer",
+    "BeamletDoseBlock",
+    "DijAssembler",
+    "DijResult",
+    "TruncationMode",
+]
+
+TruncationMode: TypeAlias = Literal["hard", "stochastic"]
+"""How sub-threshold Dij entries are treated; see :class:`DijAssembler`."""
+
+_TRUNCATION_MODES: tuple[str, ...] = ("hard", "stochastic")
+
+DIJ_ROULETTE_SALT = 0x44494A52
+"""Salt of the stochastic truncation's stream (ASCII ``DIJR``).
+
+The roulette of column ``j`` draws from the counter-based stream
+``(seed ^ DIJ_ROULETTE_SALT, j)``. Transport streams are ``(seed, h)``, and under
+correlated sampling ``h`` runs over the within-beamlet indices ``0, 1, ...`` that
+column indices also take; the salt keeps the roulette off every transport stream of
+the same seed, the way the Warp pre-solve's ``_PRESOLVE_SAMPLING_SALT`` does."""
+
+
+def _roulette_uniforms(seed: int, column: int, n_voxels: int) -> npt.NDArray[np.float64]:
+    """Uniforms of column ``column``'s roulette, element ``v`` for voxel ``v``.
+
+    A pure function of ``(seed, column, v)``: the stream is keyed on the global
+    column index (never a block-local row), and voxel ``v`` takes the stream's
+    ``v``-th draw whatever the length requested, so the decision for an entry does
+    not depend on how columns are grouped into blocks, batches or devices.
+    Distinct columns get distinct counter-based streams and so draw independently,
+    also when a correlated Dij makes their contents coincide.
+    """
+    state = HostRNG().init_state(seed ^ DIJ_ROULETTE_SALT, column)
+    return uniform_block(state, n_voxels)
+
+
+def _roulette_row(
+    mean: npt.NDArray[np.float64],
+    sigma: npt.NDArray[np.float64],
+    threshold: float,
+    u: npt.NDArray[np.float64],
+) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
+    """Vectorized :func:`pyradmc.physics.roulette.roulette_dij_entry` over one column.
+
+    The same operations in the same order, so equal to the scalar rule element for
+    element and bit for bit (test-pinned); a zero value is a dropped entry.
+    """
+    value = np.zeros_like(mean)
+    stored = np.zeros_like(sigma)
+    above = (mean > 0.0) & (mean >= threshold)
+    value[above] = mean[above]
+    stored[above] = sigma[above]
+    tail = np.flatnonzero((mean > 0.0) & (mean < threshold))
+    m = mean[tail]
+    keep = u[tail] < m / threshold
+    kept = tail[keep]
+    m, s = m[keep], sigma[kept]
+    value[kept] = threshold
+    stored[kept] = np.sqrt(s * s * threshold / m + threshold * (threshold - m))
+    return value, stored
 
 
 @dataclass(frozen=True)
@@ -229,6 +294,13 @@ class DijResult:
     :class:`~pyradmc.backends.results.RunProvenance`. Every engine ``run_dij``
     populates it (test-pinned); optional on the dataclass so a hand-assembled or
     reloaded matrix need not fabricate one."""
+    truncation_mode: TruncationMode = "hard"
+    """How entries below ``truncation * column_max`` were treated (see
+    :class:`DijAssembler`): ``"hard"`` dropped them, ``"stochastic"`` played
+    Russian roulette on them, so each surviving tail entry is stored at the
+    threshold with an inflated sigma. Under ``"stochastic"`` the matrix is
+    unbiased but a tail entry's value is not its scored dose; the roulette's
+    stream is keyed on ``provenance.seed``."""
 
     @property
     def n_voxels(self) -> int:
@@ -330,8 +402,35 @@ class DijAssembler:
     """Assembles finalized dense blocks into one sparse :class:`DijResult`.
 
     Blocks arrive in ascending, gap-free beamlet order (the engines iterate groups
-    in order); ``finalize`` checks complete coverage. Truncation keeps an entry
-    when ``dose >= truncation * column_max`` and the dose is nonzero.
+    in order); ``finalize`` checks complete coverage. With ``t = truncation *
+    column_max``, an entry with ``dose >= t`` and nonzero dose is kept unchanged in
+    both modes. ``truncation_mode`` decides the rest:
+
+    ``"hard"`` (default)
+        Entries below ``t`` are dropped. This biases the low-dose tail, and by an
+        amount that grows with the histories per beamlet: at low statistics a
+        single hit in a tail voxel exceeds ``t`` and survives, at high statistics
+        the tail converges below ``t`` and is dropped whole (body dose kept
+        0.992 / 0.979 / 0.947 / 0.894 at 20k / 40k / 80k / 160k histories per
+        beamlet on a TG-119 arc, while the untruncated matrix is independent of the
+        histories within 0.03 %).
+    ``"stochastic"``
+        Entries below ``t`` play Russian roulette,
+        :func:`~pyradmc.physics.roulette.roulette_dij_entry`: kept with
+        probability ``dose / t`` and then stored as ``t``, with sigma
+        ``sqrt(s^2 t / m + t (t - m))``. Every stored value has expectation equal
+        to the scored dose, so column sums and plan doses are unbiased for every
+        history count — the importance sampling of the dose calculation matrix of
+        Thieke et al., Med. Phys. 29 (2002) 676 (doi:10.1118/1.1469633). The
+        matrix gains the roulette's variance ``m (t - m)`` per tail entry, which
+        the stored sigma carries in expectation. The draw for the entry in voxel
+        ``v`` of column ``j`` is a pure function of ``(seed, j, v)`` on its own
+        salted stream (:data:`DIJ_ROULETTE_SALT`), so the matrix is
+        bit-reproducible for a seed and invariant to how columns are grouped into
+        blocks; ``seed`` is required in this mode and set by the engines to the
+        run seed.
+
+    ``truncation = 0`` keeps every nonzero entry in both modes, byte-identically.
     """
 
     grid_shape: tuple[int, int, int]
@@ -344,6 +443,11 @@ class DijAssembler:
     provenance: RunProvenance | None = None
     """Passed straight through to the assembled :class:`DijResult`; the engines set
     it, hand-built assemblers (test instruments) need not."""
+    truncation_mode: TruncationMode = "hard"
+    """``"hard"`` (default, the shipped behaviour) or ``"stochastic"``; see above."""
+    seed: int | None = None
+    """Seed of the stochastic mode's roulette stream; the engines set the run seed.
+    Required for ``"stochastic"``, ignored by ``"hard"``."""
     _next_beamlet: int = 0
     _indices: list[np.ndarray] = field(default_factory=list)
     _dose: list[np.ndarray] = field(default_factory=list)
@@ -351,9 +455,16 @@ class DijAssembler:
     _counts: list[int] = field(default_factory=list)
 
     def __post_init__(self) -> None:
-        """Validate the truncation threshold."""
+        """Validate the truncation threshold and mode."""
         if self.truncation < 0.0:
             raise ValueError(f"negative truncation {self.truncation}")
+        if self.truncation_mode not in _TRUNCATION_MODES:
+            raise ValueError(
+                f"unknown truncation_mode {self.truncation_mode!r}; "
+                f"expected one of {_TRUNCATION_MODES}"
+            )
+        if self.truncation_mode == "stochastic" and self.seed is None:
+            raise ValueError("truncation_mode='stochastic' needs the run seed (seed=...)")
 
     def add_block(self, start: int, dose: np.ndarray, sigma: np.ndarray) -> None:
         """Truncate and append a dense block whose first beamlet is column ``start``."""
@@ -361,6 +472,9 @@ class DijAssembler:
             raise RuntimeError(f"block starts at {start}, expected {self._next_beamlet}")
         if dose.shape != sigma.shape or dose.ndim != 2:
             raise ValueError("dose and sigma must be matching (n_beamlets, n_voxels) blocks")
+        if self.truncation_mode == "stochastic":
+            self._add_block_stochastic(start, dose, sigma)
+            return
         for row_dose, row_sigma in zip(dose, sigma, strict=True):
             col_max = float(row_dose.max(initial=0.0))
             keep = row_dose >= self.truncation * col_max
@@ -369,6 +483,28 @@ class DijAssembler:
             self._indices.append(idx.astype(np.int64))
             self._dose.append(row_dose[idx])
             self._sigma.append(row_sigma[idx])
+            self._counts.append(int(idx.size))
+        self._next_beamlet += dose.shape[0]
+
+    def _add_block_stochastic(self, start: int, dose: np.ndarray, sigma: np.ndarray) -> None:
+        """Roulette-truncate a block; column ``start + row`` keys its own stream."""
+        assert self.seed is not None  # __post_init__ enforces it for this mode
+        n_voxels = dose.shape[1]
+        for row, (row_dose, row_sigma) in enumerate(zip(dose, sigma, strict=True)):
+            col_max = float(row_dose.max(initial=0.0))
+            threshold = self.truncation * col_max
+            has_tail = bool(np.any((row_dose > 0.0) & (row_dose < threshold)))
+            # No tail, no draw: the stream is only read where the rule consults it.
+            u = (
+                _roulette_uniforms(self.seed, start + row, n_voxels)
+                if has_tail
+                else np.zeros(n_voxels, dtype=np.float64)
+            )
+            value, stored = _roulette_row(row_dose, row_sigma, threshold, u)
+            idx = np.flatnonzero(value > 0.0)
+            self._indices.append(idx.astype(np.int64))
+            self._dose.append(value[idx])
+            self._sigma.append(stored[idx])
             self._counts.append(int(idx.size))
         self._next_beamlet += dose.shape[0]
 
@@ -388,7 +524,8 @@ class DijAssembler:
         entry ``counts``. This assembler then only concatenates groups — the same
         result :meth:`add_block` would build from the dense dose maps, without the
         dense readback. ``counts`` sums to the block's entry total; the caller is
-        responsible for having applied :attr:`truncation`.
+        responsible for having applied :attr:`truncation` under
+        :attr:`truncation_mode`.
         """
         if start != self._next_beamlet:
             raise RuntimeError(f"block starts at {start}, expected {self._next_beamlet}")
@@ -438,4 +575,5 @@ class DijAssembler:
             correlated=self.correlated,
             scoring_mode=self.scoring_mode,
             provenance=self.provenance,
+            truncation_mode=self.truncation_mode,
         )
