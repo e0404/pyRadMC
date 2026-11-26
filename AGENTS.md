@@ -407,32 +407,43 @@ These outlive the work that produced them. Each is a live constraint, not histor
     not carry the truncation bias of another.
   - **`"stochastic"` keeps a tail entry with probability `m / t` and stores it as
     exactly `t`,** otherwise drops it, with stored sigma `sqrt(s^2 t / m + t (t - m))`.
-    The stored value has expectation `m`, so every column sum and plan dose is unbiased
-    at every history count, and the expected stored variance is the entry's total
-    variance `s^2 + m (t - m)`. This is the importance sampling of the dose calculation
+    The stored value has expectation `m`, so every column sum and plan dose of
+    non-negative scores is unbiased at every history count, and the expected stored
+    variance is the entry's total variance `s^2 + m (t - m)`: a survivor's sigma is
+    right for quadrature and linear uses, not a per-entry standard error. This is the
+    importance sampling of the dose calculation
     matrix of Thieke, Nill, Oelfke, Bortfeld, Med. Phys. 29 (2002) 676,
     doi:10.1118/1.1469633, with one definition,
     `pyradmc.physics.roulette.roulette_dij_entry`, applied by the host assembler and the
     Warp kernels. The uniform for voxel `v` of column `j` is keyed on
     `(seed ^ DIJ_ROULETTE_SALT, global column j, v)`: invariant to grouping, chunking,
     batch lanes and sharding, independent between columns (also for a correlated Dij),
-    and off every transport stream of the seed. **Its cost is per-voxel noise that does
-    not fall with the histories**: the roulette adds `sum_j w_j^2 m (t - m)` to a
-    plan's variance (pinned exactly, `TestPlanQuadrature`). On the 400-beamlet field at
-    80k histories per beamlet it exceeds the Monte Carlo sigma below about 3 % of the
-    plan maximum (42 % against 11 % of the local dose at 0.03-0.1 %, 6 % against 4 %
-    at 1-3 %) and is a sixth of it above 30 % (0.13 % against 0.81 %); at 20k the
-    crossover lies between 0.3 and 1 % of the maximum. Where a plan's dose is of the order of `t`, DVH
-    percentiles are dominated by that noise (a four-beamlet reference plan moved its
-    low-dose D50 by its own size); linear endpoints such as a mean dose stay unbiased.
+    and off every transport stream of the seed. The column index is the one within a
+    call, so separate `run_dij` calls with the same seed share their roulette draws
+    column by column, as they share their transport streams. **Its cost is per-voxel
+    noise that does not fall with the histories**: the roulette adds
+    `sum_j w_j^2 m (t - m)` to a plan's variance (pinned exactly,
+    `TestPlanQuadrature`). On the 400-beamlet field at 80k histories per beamlet it
+    exceeds the Monte Carlo sigma below about 3 % of the plan maximum (42 % against
+    11 % of the local dose at 0.03-0.1 %, 6 % against 4 % at 1-3 %) and is a sixth of
+    it above 30 % (0.13 % against 0.81 %); at 20k the crossover lies between 0.3 and
+    1 % of the maximum. Where a plan's dose is of the order of `t`, DVH percentiles
+    are dominated by that noise (a four-beamlet reference plan moved its low-dose D50
+    by its own size); linear endpoints such as a mean dose stay unbiased.
     The matrix keeps 1.5 to 3 times the entries of the hard rule on that field.
+  - **Both modes drop negative entries**, at every threshold including 0, and take
+    `column_max` from the positive part: a signed column (negative-weight sources)
+    loses its negative part whatever the statistics. Every unbiasedness statement here
+    is for non-negative scores.
 
   Neither mode is recommended here: the choice trades a measured bias against a
   measured noise, and is the planner's and the maintainer's. These details bind the
   implementation:
   - Host and device draw independently: the host assembler from the NumPy stream
     `(seed ^ DIJ_ROULETTE_SALT, j)`, the device from `keyed_uniform`, a 24-bit counter
-    hash (the keep probability is effectively on a 2^-24 grid). The host/device
+    hash: the keep probability is rounded up to the 2^-24 grid, so a tail entry is
+    biased upward by at most `t * 2^-24` and one with `m < t * 2^-24` is kept with
+    probability 2^-24. The host/device
     byte-identity of the Dij (`test_device_dij_equals_host_dij`, the device-reduction
     tests) holds in the hard mode only; in the stochastic mode the two agree
     statistically, never bitwise, and no test may assert otherwise.

@@ -82,7 +82,13 @@ The roulette of column ``j`` draws from the counter-based stream
 ``(seed ^ DIJ_ROULETTE_SALT, j)``. Transport streams are ``(seed, h)``, and under
 correlated sampling ``h`` runs over the within-beamlet indices ``0, 1, ...`` that
 column indices also take; the salt keeps the roulette off every transport stream of
-the same seed, the way the Warp pre-solve's ``_PRESOLVE_SAMPLING_SALT`` does."""
+the same seed, the way the Warp pre-solve's ``_PRESOLVE_SAMPLING_SALT`` does.
+
+The keys are local to one call: ``j`` is the column index *within* that ``run_dij``
+call. Two calls with the same seed — two fields computed separately, say — therefore
+share their roulette uniforms column by column, exactly as they already share their
+transport streams; give separately computed matrices distinct seeds when their draws
+must be independent."""
 
 
 def _roulette_uniforms(seed: int, column: int, n_voxels: int) -> npt.NDArray[np.float64]:
@@ -278,11 +284,17 @@ class DijResult:
 
     Column ``j`` holds beamlet ``j``'s dose per emitted history (MeV/g) in the
     voxels that survived truncation; ``sigma`` is the matching per-entry standard
-    error. Voxel indices are flat C-order over ``grid_shape``.
+    error. Voxel indices are flat C-order over ``grid_shape``. Under
+    ``truncation_mode="stochastic"`` that holds for the entries at or above the
+    threshold only: a surviving tail entry's ``sigma`` carries the entry's total
+    variance (Monte Carlo plus roulette) *in expectation over the roulette draw*,
+    which is what quadrature and other linear uses need, but it is not the
+    standard error of that one entry.
 
     ``correlated`` records the stream mapping the Dij was computed under.
     When True, columns share random streams and are statistically
-    *dependent*: each per-entry ``sigma`` stays valid on its own, but their
+    *dependent*: each per-entry ``sigma`` stays valid on its own (with the
+    stochastic-mode caveat above), but their
     quadrature across columns (``variance @ weights**2``) omits the positive
     cross-column covariance, which is not carried here, and so under-reports a
     plan's noise — increasingly at fine beamlet pitch (measured in
@@ -315,8 +327,11 @@ class DijResult:
     :class:`DijAssembler`): ``"hard"`` dropped them, ``"stochastic"`` played
     Russian roulette on them, so each surviving tail entry is stored at the
     threshold with an inflated sigma. Under ``"stochastic"`` the matrix is
-    unbiased but a tail entry's value is not its scored dose; the roulette's
-    stream is keyed on ``provenance.seed``."""
+    unbiased for non-negative scores but a tail entry's value is not its scored
+    dose; the roulette's stream is keyed on ``provenance.seed``. In both modes,
+    and at ``truncation = 0``, negative entries are dropped: a signed column (a
+    source with negative weights) loses its negative part whatever the
+    statistics."""
 
     @property
     def n_voxels(self) -> int:
@@ -363,8 +378,11 @@ class DijResult:
     def sigma_csc(self, unit: str = "mev_per_g") -> csc_array:
         """Export the per-entry sigma as a ``scipy.sparse.csc_array``, aligned with the dose.
 
-        Valid per column (per-beamlet QA) in either mode; see :meth:`variance_csc`
-        for the cross-column caveat under correlated sampling.
+        Valid per column (per-beamlet QA) in either sampling mode; see
+        :meth:`variance_csc` for the cross-column caveat under correlated sampling.
+        Under ``truncation_mode="stochastic"`` a surviving tail entry's sigma is the
+        entry's variance in expectation over the roulette draw, not its standard
+        error (see the class docstring).
         """
         return self._csc(self.sigma, self._unit_factor(unit))
 
@@ -373,7 +391,10 @@ class DijResult:
 
         The export a planning consumer stores as its dose-influence variance
         matrix (pyRadPlan's ``physical_dose_var``). Each entry is valid on its
-        own. When the Dij was computed under **correlated sampling** (the
+        own, except a surviving tail entry under ``truncation_mode="stochastic"``,
+        whose variance is the entry's total (Monte Carlo plus roulette) variance in
+        expectation over the draw: right for the quadrature below, not a per-entry
+        error bar. When the Dij was computed under **correlated sampling** (the
         shipped default) the columns are statistically *dependent* with positive
         covariance, so the cross-column quadrature ``variance @ weights**2`` is a
         *lower bound* on a plan's variance, not an estimate of it: the shortfall
@@ -435,8 +456,9 @@ class DijAssembler:
         :func:`~pyradmc.physics.roulette.roulette_dij_entry`: kept with
         probability ``dose / t`` and then stored as ``t``, with sigma
         ``sqrt(s^2 t / m + t (t - m))``. Every stored value has expectation equal
-        to the scored dose, so column sums and plan doses are unbiased for every
-        history count — the importance sampling of the dose calculation matrix of
+        to the scored dose, so for non-negative scores column sums and plan doses
+        are unbiased for every history count — the importance sampling of the dose
+        calculation matrix of
         Thieke et al., Med. Phys. 29 (2002) 676 (doi:10.1118/1.1469633). The
         matrix gains the roulette's variance ``m (t - m)`` per tail entry, which
         the stored sigma carries in expectation. The draw for the entry in voxel
@@ -444,9 +466,15 @@ class DijAssembler:
         salted stream (:data:`DIJ_ROULETTE_SALT`), so the matrix is
         bit-reproducible for a seed and invariant to how columns are grouped into
         blocks; ``seed`` is required in this mode and set by the engines to the
-        run seed.
+        run seed. The column index is the one within this assembly (one
+        ``run_dij`` call): calls with the same seed share their uniforms column by
+        column, as they share their transport streams.
 
-    ``truncation = 0`` keeps every nonzero entry in both modes, byte-identically.
+    ``truncation = 0`` keeps every positive entry in both modes, byte-identically.
+    Negative entries are dropped in both modes and at every threshold, and
+    ``column_max`` is the positive maximum: a signed column (negative-weight
+    sources) loses its negative part whatever the statistics, so the unbiasedness
+    above is for non-negative scores.
     """
 
     grid_shape: tuple[int, int, int]

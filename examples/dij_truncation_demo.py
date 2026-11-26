@@ -10,9 +10,9 @@ default, AGENTS.md 2.8). How the sub-threshold tail is treated is
   beamlet*.
 - ``"stochastic"`` (opt-in) plays Russian roulette on it: an entry of mean ``m < t``
   is kept with probability ``m / t`` and stored as ``t`` (Thieke et al., Med. Phys.
-  29 (2002) 676, doi:10.1118/1.1469633). Every plan dose is unbiased at every
-  history count; the price is a per-voxel noise ``sum_j m (t - m)`` that does not
-  fall with the histories.
+  29 (2002) 676, doi:10.1118/1.1469633). Every plan dose of non-negative scores
+  is unbiased at every history count; the price is a per-voxel noise
+  ``sum_j m (t - m)`` that does not fall with the histories.
 
 Renders one figure (``dij_truncation_demo.png``, saved beside this script):
 

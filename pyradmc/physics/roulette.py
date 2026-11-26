@@ -59,9 +59,13 @@ def roulette_dij_entry(
 
     A dropped entry returns ``(0.0, 0.0)``; every stored value is positive, so a
     zero value is the drop. The stored value's expectation over the draw is
-    ``p * threshold = mean`` for every entry, so column sums and any plan dose
-    built from the matrix are unbiased — unlike the hard cut, whose removed dose
-    depends on the statistics the tail was scored with.
+    ``p * threshold = mean`` for every positive entry, so column sums and any plan
+    dose built from a matrix of non-negative scores are unbiased — unlike the hard
+    cut, whose removed dose depends on the statistics the tail was scored with.
+    **Non-negative scores only:** a negative mean is dropped, as by the hard rule
+    (and by both at ``threshold = 0``), so a signed column — a source with
+    negative weights — loses its negative part whatever the statistics; the
+    caller's threshold is likewise taken from the positive maximum.
 
     Stored sigma of a surviving tail entry, with ``m = mean``, ``s = sigma``,
     ``t = threshold``::
@@ -73,9 +77,12 @@ def roulette_dij_entry(
     draw itself, which is the total variance of the stored entry. A quadrature
     plan-dose sigma built from the stored sigmas therefore stays unbiased *in
     expectation* wherever it was valid before (an independent Dij, AGENTS.md
-    section 8). The unbiasedness of the value is exact for any threshold, also the
-    Monte Carlo-estimated ``t = truncation * column_max``, since it holds
-    conditionally on the scored column. Stated approximation: the variance terms
+    section 8). A survivor's stored sigma is that variance in expectation over the
+    draw — right for quadrature and other linear uses — not the standard error of
+    that one entry, which is not defined after the draw. The unbiasedness of the
+    value is exact for any threshold, also the Monte Carlo-estimated
+    ``t = truncation * column_max``, since it holds conditionally on the scored
+    column. Stated approximation: the variance terms
     ``s^2`` and ``m (t - m)`` are evaluated at the scored mean, like every
     per-entry sigma of the Dij, so the variance identity is one in expectation
     over the draw given the scored column.

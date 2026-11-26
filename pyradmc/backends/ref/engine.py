@@ -442,10 +442,13 @@ class ReferenceEngine:
             amount that grows with ``n_histories_per_beamlet``; ``"stochastic"``
             (opt-in) plays Russian roulette on them, keeping each with probability
             ``dose / threshold`` at the threshold value, so the matrix is unbiased
-            for every history count at the price of the roulette's variance,
-            carried in the stored sigma. The roulette draws from its own salted
-            stream of ``seed``, so the result stays bit-reproducible for a seed.
-            Recorded in ``DijResult.truncation_mode``.
+            for every history count (for non-negative scores: negative entries are
+            dropped in both modes) at the price of the roulette's variance,
+            carried in the stored sigma in expectation. The roulette draws from its
+            own salted stream of ``seed``, keyed on the column within this call, so
+            the result stays bit-reproducible for a seed, and two calls with the
+            same seed share their roulette draws as they share their transport
+            streams. Recorded in ``DijResult.truncation_mode``.
         correlated
             Key streams on the within-beamlet index so columns share random
             sequences (correlated sampling). **This is the shipped

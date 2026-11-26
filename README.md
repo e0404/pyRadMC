@@ -48,8 +48,9 @@ Truncating each column below 1e-3 of its maximum keeps the matrix sparse, and ho
 tail is dropped matters (`examples/dij_truncation_demo.py`). The default hard cut removes
 a dose that grows with the histories per beamlet (left: 1.9 % of a 400-beamlet plan at
 5k, 6.3 % at 80k). The opt-in `truncation_mode="stochastic"` plays Russian roulette on the
-tail instead, so every plan dose is unbiased, at the price of a per-voxel noise that does
-not fall with the histories and dominates the low-dose region (right).
+tail instead, so every plan dose of non-negative scores is unbiased, at the price of a
+per-voxel noise that does not fall with the histories and dominates the low-dose region
+(right).
 
 ## Install
 

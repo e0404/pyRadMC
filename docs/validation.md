@@ -82,7 +82,8 @@ plan dose at 80k, and 0.983 above half the maximum (`examples/dij_truncation_dem
 A many-beamlet plan at planning statistics is therefore biased in the high-dose region
 too, by more than the 0.5 % the gate allows.
 
-The opt-in `truncation_mode="stochastic"` is unbiased by construction and gated as such
+The opt-in `truncation_mode="stochastic"` is unbiased by construction for non-negative
+scores (both modes drop negative entries) and gated as such
 (column sums and ROI mean doses against the untruncated matrix with the exact roulette
 variance, on both engines; DVH percentiles within the roulette's deterministic reach in
 the high-dose region). It carries a per-voxel noise that does not fall with the

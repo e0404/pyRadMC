@@ -26,13 +26,16 @@ without a field, so results are not byte-identical to the previous release.
   mode plays Russian roulette on the tail instead (Thieke et al., Med. Phys. 29 (2002)
   676, doi:10.1118/1.1469633): an entry of mean `m` below the threshold `t` is kept with
   probability `m / t` and stored as `t`, with sigma `sqrt(s^2 t / m + t (t - m))`, so
-  every column sum and plan dose is unbiased at every history count. Its cost is a
+  every column sum and plan dose of non-negative scores is unbiased at every history
+  count (both modes drop negative entries, as before); a survivor's sigma is its
+  variance in expectation over the draw, not a per-entry standard error. Its cost is a
   per-voxel noise that does not fall with the histories: on that field at 80k it
   exceeds the Monte Carlo sigma below about 3 % of the plan maximum, and the matrix
   keeps 1.5 to 3.1 times the entries of the hard cut (5k to 80k histories). The draw is keyed on
   `(seed ^ DIJ_ROULETTE_SALT, global beamlet, voxel)`, so the result is bit-reproducible
   for a seed and inert to grouping, chunking, batch lanes and sharding on one device;
-  reference and Warp draw independently and agree statistically.
+  two calls with the same seed share their draws column by column, as they share their
+  transport streams; reference and Warp draw independently and agree statistically.
   `DijResult.truncation_mode` and `DeviceDijResult.truncation_mode` record the mode.
   **The default is unchanged (`"hard"` at 1e-3) and byte-identical to before** on the
   reference engine, Warp CPU and Warp CUDA; `examples/dij_truncation_demo.py` shows

@@ -1768,7 +1768,10 @@ class WarpEngine:
             ``concurrent_batches``, and a sharded column equals its device's whole
             run, as in the hard mode; but it draws independently of the reference
             engine's roulette, so the two agree statistically, never bitwise
-            (AGENTS.md 2.3). Recorded in ``DijResult.truncation_mode``.
+            (AGENTS.md 2.3). The beamlet index is the one within this call, so two
+            calls with the same seed share their roulette draws as they share their
+            transport streams. Unbiased for non-negative scores; negative entries
+            are dropped in both modes. Recorded in ``DijResult.truncation_mode``.
 
         See Also
         --------

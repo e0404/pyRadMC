@@ -197,7 +197,10 @@ dij.truncation_mode          # recorded on the result: "hard" or "stochastic"
 - `"stochastic"` plays Russian roulette on them (Thieke et al., Med. Phys. 29 (2002)
   676): an entry of mean `m` below the threshold `t` is kept with probability `m / t` and
   stored as `t`, with sigma `sqrt(s^2 t / m + t (t - m))`. Every column sum and plan dose
-  is unbiased at every history count. The price is per-voxel noise, variance
+  is unbiased at every history count (for non-negative scores: both modes drop negative
+  entries, so a signed column from negative-weight sources loses its negative part).
+  A survivor's sigma is the entry's variance in expectation over the draw, right for
+  quadrature, not a per-entry error bar. The price is per-voxel noise, variance
   `m (t - m)` per tail entry, that **does not fall with the histories**: at 80k it
   exceeds the Monte Carlo sigma below about 3 % of the plan maximum, and DVH percentiles
   in a region whose dose is of the order of `t` are dominated by it. Mean doses stay
@@ -207,7 +210,9 @@ dij.truncation_mode          # recorded on the result: "hard" or "stochastic"
 Neither is free; the default stays `"hard"`, and AGENTS.md section 8 records both sides.
 The stochastic draw is a pure function of `(seed, beamlet, voxel)`, so the result is
 bit-reproducible for a seed and inert to grouping, chunking, batch lanes and device
-sharding, like the hard mode. The reference and Warp engines draw independently and
+sharding, like the hard mode. The beamlet index is the one within the call: two
+`run_dij` calls with the same seed share their roulette draws, as they share their
+transport streams. The reference and Warp engines draw independently and
 agree statistically, never bitwise.
 
 ![Kept plan dose against histories per beamlet, and per-voxel noise against dose level](assets/dij_truncation_demo.png)
