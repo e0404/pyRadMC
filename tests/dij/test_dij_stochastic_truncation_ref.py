@@ -137,6 +137,42 @@ class TestColumnSum:
         for name in ("indptr", "indices", "dose", "sigma"):
             assert np.array_equal(getattr(again, name), getattr(first, name)), name
 
+    def test_the_roulette_is_keyed_on_the_run_seed(
+        self, runs: dict[tuple[int, str], DijResult]
+    ) -> None:
+        """The engine's stochastic matrix is the assembler's roulette, under the run seed.
+
+        Rebuilt from the engine's own untruncated matrix (bit-identical dense columns:
+        same seed and histories) with ``seed=provenance.seed`` it matches byte for
+        byte; under another seed it does not. An engine that handed the assembler any
+        other seed would pass every statistical test and fail this one.
+        """
+        from pyradmc.scoring.dij import DijAssembler
+
+        full, sto = runs[4 * N, "full"], runs[4 * N, "stochastic"]
+        assert sto.provenance is not None and sto.provenance.seed == SEED
+
+        def roulette(seed: int) -> DijResult:
+            asm = DijAssembler(
+                grid_shape=full.grid_shape,
+                n_beamlets=full.n_beamlets,
+                n_histories_per_beamlet=full.n_histories_per_beamlet,
+                n_batches=full.n_batches,
+                truncation=DIJ_TRUNCATION_RELATIVE,
+                truncation_mode="stochastic",
+                seed=seed,
+            )
+            dose = np.stack([full.column_dense(j).ravel() for j in range(full.n_beamlets)])
+            sigma = np.stack([full.sigma_dense(j).ravel() for j in range(full.n_beamlets)])
+            asm.add_block(0, dose, sigma)
+            return asm.finalize(energy_emitted=1.0, energy_deposited=0.0, energy_escaped=0.0)
+
+        rebuilt = roulette(sto.provenance.seed)
+        for name in ("indptr", "indices", "dose", "sigma"):
+            assert np.array_equal(getattr(rebuilt, name), getattr(sto, name)), name
+        other = roulette(sto.provenance.seed + 1)
+        assert not np.array_equal(other.indices, sto.indices)
+
     def test_engine_rejects_an_unknown_mode(self) -> None:
         with pytest.raises(ValueError, match="truncation_mode"):
             _run(4, truncation_mode="soft")
