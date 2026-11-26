@@ -286,3 +286,28 @@ class TestExactStatistics:
         spread = math.sqrt(float(np.sum(var_kept**2 * p * (1.0 - p))))
         stored = float(np.sum(sto_s[tail] ** 2))
         assert abs(stored - target) < 3.29 * spread, (stored, target, spread)
+
+
+def test_stored_quadrature_is_the_plan_variance(device: str) -> None:
+    """The host's exact plan-variance oracle on the device's draws (400 seeds).
+
+    See ``tests/unit/test_dij_stochastic_truncation.py::TestPlanQuadrature``: the
+    roulette adds ``sum_j w_j^2 m (t - m)`` to the plan variance and the stored
+    quadrature carries it in expectation. Both z-scores at 4 sigma.
+    """
+    from tests.unit.test_dij_stochastic_truncation import plan_quadrature_z
+
+    dose, sigma = _block(n_cols=8)
+    n_voxels = dose.shape[1]
+    weights = np.random.default_rng(SEED).uniform(0.5, 2.0, 8)
+    plans, quads = [], []
+    for r in range(400):
+        swept = _sweep(
+            device, dose, sigma, DIJ_TRUNCATION_RELATIVE, roulette_seed=ROULETTE_SEED + r
+        )
+        value, stored = _columns(*swept, n_voxels)
+        plans.append(weights @ value)
+        quads.append(weights**2 @ stored**2)
+    z_var, z_quad = plan_quadrature_z(np.stack(plans), np.stack(quads), dose, sigma, weights)
+    assert abs(z_var) < 4.0, f"plan variance over the draws: z = {z_var:.2f}"
+    assert abs(z_quad) < 4.0, f"mean stored quadrature: z = {z_quad:.2f}"

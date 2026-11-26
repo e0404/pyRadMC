@@ -148,6 +148,83 @@ class TestExactStatistics:
         assert abs(stored - target) < 3.29 * spread, (stored, target, spread)
 
 
+def plan_quadrature_z(
+    plans: np.ndarray,
+    quads: np.ndarray,
+    dose: np.ndarray,
+    sigma: np.ndarray,
+    weights: np.ndarray,
+    truncation: float = DIJ_TRUNCATION_RELATIVE,
+) -> tuple[float, float]:
+    """z-scores of the plan-variance claim over ``R`` roulette draws of one matrix.
+
+    ``plans`` and ``quads`` are ``(R, n_voxels)``: the plan dose ``sum_j w_j X_ij``
+    and the stored quadrature ``sum_j w_j^2 sigma_stored_ij^2`` of each draw, for a
+    fixed dense block (``dose``, ``sigma``: ``(n_cols, n_voxels)``). Exact oracles,
+    because the draws are independent across entries and the dense block is held:
+
+    1. the across-draw sample variance of each voxel's plan dose has expectation
+       ``v_i = sum_j w_j^2 m_ij (t_j - m_ij)`` and the exact sampling variance
+       ``mu4_i / R - v_i^2 (R - 3) / (R (R - 1))``, with the fourth central moment
+       ``mu4_i = sum_j k4_ij + 3 (v_i^2 - sum_j v_ij^2)`` of a sum of independent
+       scaled Bernoulli terms, ``k4 = (w t)^4 p (1 - p) (1 - 3 p + 3 p^2)``;
+    2. the mean stored quadrature has expectation
+       ``sum_j w_j^2 s_ij^2 + v_i`` — the untruncated quadrature plus the roulette
+       variance — and variance ``sum_j w_j^4 sigma_kept^4 p (1 - p) / R``.
+
+    Returned pooled over voxels: ``(z_variance, z_quadrature)``.
+    """
+    r = plans.shape[0]
+    w = weights[:, None]
+    t = truncation * dose.max(axis=1, keepdims=True)
+    tail = (dose > 0.0) & (dose < t)
+    p = np.where(tail, dose / np.where(t > 0.0, t, 1.0), 0.0)
+    v_j = np.where(tail, w**2 * dose * (t - dose), 0.0)
+    v = v_j.sum(axis=0)
+    k4 = np.where(tail, (w * t) ** 4 * p * (1.0 - p) * (1.0 - 3.0 * p + 3.0 * p**2), 0.0)
+    mu4 = k4.sum(axis=0) + 3.0 * (v**2 - (v_j**2).sum(axis=0))
+    var_s2 = mu4 / r - v**2 * (r - 3) / (r * (r - 1))
+    s2 = np.var(plans, axis=0, ddof=1)
+    z_variance = float((s2.sum() - v.sum()) / math.sqrt(var_s2.sum()))
+
+    safe_m = np.where(tail, dose, 1.0)
+    var_kept = np.where(tail, sigma**2 * t / safe_m + t * (t - dose), 0.0)
+    expected = (w**2 * np.where(dose > 0.0, sigma**2, 0.0)).sum(axis=0) + v
+    spread = (w**4 * var_kept**2 * p * (1.0 - p)).sum(axis=0) / r
+    z_quadrature = float((quads.mean(axis=0).sum() - expected.sum()) / math.sqrt(spread.sum()))
+    return z_variance, z_quadrature
+
+
+class TestPlanQuadrature:
+    """The stored sigmas' quadrature is the plan's variance, roulette included.
+
+    For an independent Dij (``correlated=False``) the untruncated quadrature
+    ``sum_j w_j^2 s_ij^2`` is the plan's Monte Carlo variance (pinned in
+    ``tests/dij/test_dij_correlated.py::TestPlanVarianceQuadrature``). The roulette
+    draws are independent of the scoring given the column and of each other, so the
+    plan's total variance is that plus ``sum_j w_j^2 m_ij (t_j - m_ij)``; this test
+    pins, with exact oracles over 400 roulette seeds on one fixed block, that the
+    roulette adds exactly that variance and that the stored quadrature carries it
+    in expectation (:func:`plan_quadrature_z`). Both z-scores two-sided at 4 sigma
+    (false alarm 1.3e-4 together). The Monte Carlo half needs replicate transport
+    runs and has no exact oracle in the fast tier; it is the existing pin.
+    """
+
+    N_DRAWS = 400
+
+    def test_stored_quadrature_is_the_plan_variance(self) -> None:
+        dose, sigma = _block(n_cols=8)
+        weights = np.random.default_rng(SEED).uniform(0.5, 2.0, 8)
+        plans, quads = [], []
+        for r in range(self.N_DRAWS):
+            dij = _assemble(dose, sigma, seed=SEED + 1_000 + r)
+            plans.append(dij.dose_for_weights(weights).ravel())
+            quads.append(np.asarray(dij.variance_csc() @ weights**2).ravel())
+        z_var, z_quad = plan_quadrature_z(np.stack(plans), np.stack(quads), dose, sigma, weights)
+        assert abs(z_var) < 4.0, f"plan variance over the draws: z = {z_var:.2f}"
+        assert abs(z_quad) < 4.0, f"mean stored quadrature: z = {z_quad:.2f}"
+
+
 class TestReproducibility:
     def test_same_seed_is_byte_identical(self) -> None:
         dose, sigma = _block()
