@@ -14,10 +14,11 @@ in ``tests/unit/test_interface_contracts.py``.
 from __future__ import annotations
 
 import numpy as np
+import numpy.typing as npt
 
 from pyradmc.rng.interface import RNG
 
-__all__ = ["HostRNG", "uniform"]
+__all__ = ["HostRNG", "uniform", "uniform_block"]
 
 
 def uniform(state: np.random.Generator) -> float:
@@ -28,6 +29,18 @@ def uniform(state: np.random.Generator) -> float:
     (:mod:`pyradmc.rng.warp_shim`) at kernel compile time and never import this one.
     """
     return float(state.random())
+
+
+def uniform_block(state: np.random.Generator, n: int) -> npt.NDArray[np.float64]:
+    """Draw ``n`` float64 from U[0, 1): exactly ``n`` successive :func:`uniform` calls.
+
+    The bulk form for host-side *scoring* code that needs one uniform per array
+    element (the Dij assembler's stochastic truncation, one per voxel of a column).
+    ``Generator.random(n)`` fills its output from the same PCG64 stream, one
+    53-bit double per draw, so element ``i`` is the ``i``-th scalar draw and the
+    state advances identically (contract-tested). Physics routines never call it.
+    """
+    return state.random(n)
 
 
 class HostRNG(RNG):

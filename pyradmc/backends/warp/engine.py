@@ -53,7 +53,7 @@ from pyradmc import (
     __version__,
 )
 from pyradmc.backends.results import RunProvenance, TransportResult
-from pyradmc.backends.warp import kernels
+from pyradmc.backends.warp import kernels, sparsify
 from pyradmc.backends.warp.dij import DeviceDijResult
 from pyradmc.backends.warp.kernels import ENERGY_QUANTUM_MEV, GridInfo, Queue, Tables
 from pyradmc.data.interface import CrossSectionSource, require_energy_domain
@@ -88,7 +88,13 @@ from pyradmc.physics_options import (
 )
 from pyradmc.progress import ProgressCallback, ProgressEmitter
 from pyradmc.scoring.cylinder import CylindricalScoringGrid
-from pyradmc.scoring.dij import DijAssembler, DijResult
+from pyradmc.scoring.dij import (
+    DIJ_ROULETTE_SALT,
+    DijAssembler,
+    DijResult,
+    TruncationMode,
+    check_truncation,
+)
 from pyradmc.scoring.dose import ScoringGeometry
 from pyradmc.scoring.dose_to_water import validate_scoring_mode
 from pyradmc.scoring.grid import ScoringGrid
@@ -1643,6 +1649,7 @@ class WarpEngine:
         concurrent_batches: int = 1,
         progress: ProgressCallback | None = None,
         physics: PhysicsOptions | str = "auto",
+        truncation_mode: TruncationMode = "hard",
     ) -> DijResult:
         """Compute the Dij over the lattice; same contract as the reference engine.
 
@@ -1750,6 +1757,21 @@ class WarpEngine:
             ticks): the emitter's own lock serializes ticks arriving from
             multiple device threads, so the callback is thread-safe without any
             extra care on the caller's part.
+        truncation_mode
+            ``"hard"`` (default) or the opt-in ``"stochastic"``, as in the
+            reference engine: Russian roulette on the sub-threshold tail, applied
+            on the device by the same rule
+            (:func:`~pyradmc.physics.roulette.roulette_dij_entry`, in float64) with
+            a uniform keyed on ``(seed, global beamlet, voxel)``
+            (:mod:`pyradmc.backends.warp.sparsify`). The result is therefore
+            bit-identical for any ``beamlet_group_size``, ``chunk_size`` and
+            ``concurrent_batches``, and a sharded column equals its device's whole
+            run, as in the hard mode; but it draws independently of the reference
+            engine's roulette, so the two agree statistically, never bitwise
+            (AGENTS.md 2.3). The beamlet index is the one within this call, so two
+            calls with the same seed share their roulette draws as they share their
+            transport streams. Unbiased for non-negative scores; negative entries
+            are dropped in both modes. Recorded in ``DijResult.truncation_mode``.
 
         See Also
         --------
@@ -1777,6 +1799,7 @@ class WarpEngine:
             progress=progress,
             physics=physics,
             device_blocks=False,
+            truncation_mode=truncation_mode,
         )
         assembler = DijAssembler(
             grid_shape=run.grid_shape,
@@ -1787,6 +1810,8 @@ class WarpEngine:
             correlated=correlated,
             scoring_mode=scoring_mode,
             provenance=run.provenance,
+            truncation_mode=truncation_mode,
+            seed=seed,
         )
         # The assembler takes blocks in ascending, gap-free beamlet order; shards
         # finish in whatever order the devices happen to, so feed it from the merged
@@ -1822,6 +1847,7 @@ class WarpEngine:
         concurrent_batches: int = 1,
         progress: ProgressCallback | None = None,
         physics: PhysicsOptions | str = "auto",
+        truncation_mode: TruncationMode = "hard",
     ) -> DeviceDijResult:
         """Compute the Dij exactly as :meth:`run_dij` does, and leave it on the device.
 
@@ -1893,6 +1919,7 @@ class WarpEngine:
             progress=progress,
             physics=physics,
             device_blocks=True,
+            truncation_mode=truncation_mode,
         )
         device = run.devices[0]
         n_beamlets = source.n_beamlets
@@ -1941,6 +1968,7 @@ class WarpEngine:
             correlated=correlated,
             scoring_mode=scoring_mode,
             provenance=run.provenance,
+            truncation_mode=truncation_mode,
         )
 
     def _compute_dij(
@@ -1966,6 +1994,7 @@ class WarpEngine:
         progress: ProgressCallback | None,
         physics: PhysicsOptions | str,
         device_blocks: bool,
+        truncation_mode: TruncationMode = "hard",
     ) -> _DijRun:
         """Validate, schedule and run every beamlet group; merge shards and books.
 
@@ -1974,10 +2003,9 @@ class WarpEngine:
         are concatenated.
         """
         require_energy_domain(self.cross_sections, source.max_energy)
-        if truncation < 0.0:
-            # The host assembler's own check, made before any transport so the
-            # device path (which has no assembler) refuses it equally early.
-            raise ValueError(f"negative truncation {truncation}")
+        # The host assembler's own check, made before any transport so the device
+        # path (which has no assembler) refuses a bad argument equally early.
+        check_truncation(truncation, truncation_mode)
         if n_histories_per_beamlet < 1:
             raise ValueError(
                 f"need at least one history per beamlet, got {n_histories_per_beamlet}"
@@ -2105,6 +2133,7 @@ class WarpEngine:
             concurrent_batches=concurrent_batches,
             emitter=emitter,
             device_blocks=device_blocks,
+            truncation_mode=truncation_mode,
         )
         # Kernel modules are loaded up front whenever any host thread beyond this
         # one will launch (device workers or batch lanes): warp's module loading is
@@ -2121,6 +2150,8 @@ class WarpEngine:
             )
             for d in device_list:
                 wp.load_module(kernels, device=d)
+                if truncation_mode == "stochastic":
+                    wp.load_module(sparsify, device=d)
                 for model_kernel in model_kernels:
                     wp.load_module(model_kernel.module, device=d)
             if type(source) is SegmentedFanSource:
@@ -2193,6 +2224,7 @@ class WarpEngine:
         concurrent_batches: int,
         emitter: ProgressEmitter,
         device_blocks: bool = False,
+        truncation_mode: TruncationMode = "hard",
     ) -> _DijShard:
         """Pull beamlet groups from the shared queue and run them on one device.
 
@@ -2306,6 +2338,9 @@ class WarpEngine:
         )
         col_max_dev = wp.zeros(max_group, dtype=wp.float64, device=device)
         chunk_counts_dev = wp.zeros(max_group * n_chunks, dtype=wp.int32, device=device)
+        stochastic = truncation_mode == "stochastic"
+        # The roulette's own stream (DIJ_ROULETTE_SALT), as on the host assembler.
+        roulette_seed = seed ^ DIJ_ROULETTE_SALT
 
         route_args = dict(
             source=source,
@@ -2439,8 +2474,10 @@ class WarpEngine:
             # Truncate + compact each column on the device; only the surviving sparse
             # CSC entries read back, never the dense per-column dose maps. col_max is
             # a maximum and the keep test uses the same float64 threshold product as
-            # DijAssembler.add_block, so this is byte-identical to host truncation on
-            # these maps. Each column's sweep is split over ``n_chunks`` threads (a
+            # DijAssembler.add_block, so the hard mode is byte-identical to host
+            # truncation on these maps (the stochastic mode draws its own uniforms and
+            # agrees with the host only statistically). Each column's sweep is split
+            # over ``n_chunks`` threads (a
             # single thread per column left the GPU essentially idle through the
             # dominant phase of the Dij); determinism survives because the maximum is
             # order-independent and each chunk writes from the exclusive prefix of the
@@ -2452,20 +2489,42 @@ class WarpEngine:
                 inputs=[mean_dev, n_voxels, col_max_dev],
                 device=device,
             )
-            wp.launch(
-                kernels.count_kept_per_chunk,
-                dim=group * n_chunks,
-                inputs=[
-                    mean_dev,
-                    n_voxels,
-                    n_chunks,
-                    voxel_chunk,
-                    float(truncation),
-                    col_max_dev,
-                    chunk_counts_dev,
-                ],
-                device=device,
-            )
+            if stochastic:
+                # Russian roulette on the tail (sparsify module): the same tiling and
+                # threshold, the roulette's uniform keyed on the *global* column
+                # (group_start + local), so both passes and every grouping agree.
+                wp.launch(
+                    sparsify.count_kept_per_chunk_stochastic,
+                    dim=group * n_chunks,
+                    inputs=[
+                        mean_dev,
+                        sigma_dev,
+                        n_voxels,
+                        n_chunks,
+                        voxel_chunk,
+                        float(truncation),
+                        col_max_dev,
+                        group_start,
+                        roulette_seed,
+                        chunk_counts_dev,
+                    ],
+                    device=device,
+                )
+            else:
+                wp.launch(
+                    kernels.count_kept_per_chunk,
+                    dim=group * n_chunks,
+                    inputs=[
+                        mean_dev,
+                        n_voxels,
+                        n_chunks,
+                        voxel_chunk,
+                        float(truncation),
+                        col_max_dev,
+                        chunk_counts_dev,
+                    ],
+                    device=device,
+                )
             per_chunk = chunk_counts_dev.numpy()[: group * n_chunks].reshape(group, n_chunks)
             counts = per_chunk.sum(axis=1).astype(np.int32)
             column_base = np.zeros(group, dtype=np.int64)
@@ -2477,24 +2536,47 @@ class WarpEngine:
             out_indices = wp.zeros(nnz, dtype=wp.int64, device=device)
             out_dose = wp.zeros(nnz, dtype=wp.float64, device=device)
             out_sigma = wp.zeros(nnz, dtype=wp.float64, device=device)
-            wp.launch(
-                kernels.compact_column_chunked,
-                dim=group * n_chunks,
-                inputs=[
-                    mean_dev,
-                    sigma_dev,
-                    n_voxels,
-                    n_chunks,
-                    voxel_chunk,
-                    float(truncation),
-                    col_max_dev,
-                    wp.array(chunk_base, dtype=wp.int32, device=device),
-                    out_indices,
-                    out_dose,
-                    out_sigma,
-                ],
-                device=device,
-            )
+            chunk_base_dev = wp.array(chunk_base, dtype=wp.int32, device=device)
+            if stochastic:
+                wp.launch(
+                    sparsify.compact_column_chunked_stochastic,
+                    dim=group * n_chunks,
+                    inputs=[
+                        mean_dev,
+                        sigma_dev,
+                        n_voxels,
+                        n_chunks,
+                        voxel_chunk,
+                        float(truncation),
+                        col_max_dev,
+                        group_start,
+                        roulette_seed,
+                        chunk_base_dev,
+                        out_indices,
+                        out_dose,
+                        out_sigma,
+                    ],
+                    device=device,
+                )
+            else:
+                wp.launch(
+                    kernels.compact_column_chunked,
+                    dim=group * n_chunks,
+                    inputs=[
+                        mean_dev,
+                        sigma_dev,
+                        n_voxels,
+                        n_chunks,
+                        voxel_chunk,
+                        float(truncation),
+                        col_max_dev,
+                        chunk_base_dev,
+                        out_indices,
+                        out_dose,
+                        out_sigma,
+                    ],
+                    device=device,
+                )
             if device_blocks:
                 # run_dij_device: the compaction buffers are fresh per group, so they
                 # are the block itself — handed over without a readback or a copy.

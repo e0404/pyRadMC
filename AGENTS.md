@@ -134,6 +134,13 @@ The Dij truncation threshold in particular is a physics decision disguised as a 
 optimization: it biases the low-dose tail, which is exactly where NTCP and LET-guided
 objectives operate. It is tested against **DVH endpoints**, never against a matrix norm.
 
+What happens below the threshold is the second half of that decision,
+`truncation_mode`: `"hard"` (the default) drops the entries, `"stochastic"` plays
+Russian roulette on them (section 8 states both rules and what each costs). Summed over
+many overlapping beamlets, the hard rule's bias reaches the high-dose region too, and
+it grows with the histories per beamlet. The default mode is as accuracy-defining as
+the threshold, and changing either is a maintainer decision under the same rule.
+
 ### 2.9 Every approximation is documented where it is implemented
 
 Docstrings carry the governing equation and a DOI-cited reference. Stated approximations
@@ -383,6 +390,77 @@ These outlive the work that produced them. Each is a live constraint, not histor
   anything the source emits; `run_energy_ceiling` is what both engines size tables to and
   check the energy domain against. Any future process that can do the same (it would have
   to add rest mass) belongs in that function, not in a table margin.
+- **The Dij has two truncation modes; neither is free, and the default stays `"hard"` at
+  1e-3.** With `t = truncation * column_max` (default `DIJ_TRUNCATION_RELATIVE` = 1e-3),
+  an entry with `m >= t` is kept unchanged in both modes; the modes differ below `t`.
+  Changing the default mode or threshold is a maintainer decision (section 2.8). Both
+  sides, measured:
+  - **`"hard"` drops every entry below `t`, and the dose it removes grows with the
+    histories per beamlet.** At low statistics a lone hit in a tail voxel clears `t`
+    and survives; at high statistics the tail converges below `t` and is dropped
+    whole. On a TG-119 arc, truncated over untruncated at 20k / 40k / 80k / 160k
+    histories per beamlet: body 0.992 / 0.979 / 0.947 / 0.894, target 0.997 / 0.992 /
+    0.980 / 0.962, while the untruncated matrix is independent of the histories within
+    0.03 %. A 400-beamlet 10 x 10 cm field in water keeps 0.953 of the plan dose at 20k
+    and 0.937 at 80k, and 0.988 / 0.983 even above 50 % of the maximum
+    (`examples/dij_truncation_demo.py`). A result computed at one history count does
+    not carry the truncation bias of another.
+  - **`"stochastic"` keeps a tail entry with probability `m / t` and stores it as
+    exactly `t`,** otherwise drops it, with stored sigma `sqrt(s^2 t / m + t (t - m))`.
+    The stored value has expectation `m`, so every column sum and plan dose of
+    non-negative scores is unbiased at every history count, and the expected stored
+    variance is the entry's total variance `s^2 + m (t - m)`: a survivor's sigma is
+    right for quadrature and linear uses, not a per-entry standard error. This is the
+    importance sampling of the dose calculation
+    matrix of Thieke, Nill, Oelfke, Bortfeld, Med. Phys. 29 (2002) 676,
+    doi:10.1118/1.1469633, with one definition,
+    `pyradmc.physics.roulette.roulette_dij_entry`, applied by the host assembler and the
+    Warp kernels. The uniform for voxel `v` of column `j` is keyed on
+    `(seed ^ DIJ_ROULETTE_SALT, global column j, v)`: invariant to grouping, chunking,
+    batch lanes and sharding, independent between columns (also for a correlated Dij),
+    and off every transport stream of the seed. The column index is the one within a
+    call, so separate `run_dij` calls with the same seed share their roulette draws
+    column by column, as they share their transport streams. **Its cost is per-voxel
+    noise that does not fall with the histories**: the roulette adds
+    `sum_j w_j^2 m (t - m)` to a plan's variance (pinned exactly,
+    `TestPlanQuadrature`). On the 400-beamlet field at 80k histories per beamlet it
+    exceeds the Monte Carlo sigma below about 3 % of the plan maximum (42 % against
+    11 % of the local dose at 0.03-0.1 %, 6 % against 4 % at 1-3 %) and is a sixth of
+    it above 30 % (0.13 % against 0.81 %); at 20k the crossover lies between 0.3 and
+    1 % of the maximum. Where a plan's dose is of the order of `t`, DVH percentiles
+    are dominated by that noise (a four-beamlet reference plan moved its low-dose D50
+    by its own size); linear endpoints such as a mean dose stay unbiased.
+    The matrix keeps 1.5 to 3 times the entries of the hard rule on that field.
+  - **Both modes drop negative entries**, at every threshold including 0, and take
+    `column_max` from the positive part: a signed column (negative-weight sources)
+    loses its negative part whatever the statistics. Every unbiasedness statement here
+    is for non-negative scores.
+
+  Neither mode is recommended here: the choice trades a measured bias against a
+  measured noise, and is the planner's and the maintainer's. These details bind the
+  implementation:
+  - Host and device draw independently: the host assembler from the NumPy stream
+    `(seed ^ DIJ_ROULETTE_SALT, j)`, the device from `keyed_uniform`, a 24-bit counter
+    hash: the keep probability is rounded up to the 2^-24 grid, so a tail entry is
+    biased upward by at most `t * 2^-24` and one with `m < t * 2^-24` is kept with
+    probability 2^-24. The host/device
+    byte-identity of the Dij (`test_device_dij_equals_host_dij`, the device-reduction
+    tests) holds in the hard mode only; in the stochastic mode the two agree
+    statistically, never bitwise, and no test may assert otherwise.
+  - `pyradmc/backends/warp/sparsify.py` compiles **without** `fast_math`. Its count and
+    compaction passes must reach the same decision for every entry, or the compaction
+    writes outside the extents the count sized; IEEE semantics guarantee that, while
+    fast-math lets each kernel's compilation rewrite `u < m / t` on its own.
+  - Only the chunked truncation kernels have stochastic variants; the serial hard
+    kernels are retained as the hard mode's oracle.
+  - Float64 in single-source physics: `roulette_dij_entry` works on float64 dose maps,
+    so it is annotated with `pyradmc.data.handles.Float64` and writes every literal as
+    `Float64(...)` — `float` on the host, `wp.float64` in kernels through the loader's
+    handles shim. Warp types a bare literal as float32 and refuses to mix it with
+    float64. Everything else in `physics/` stays plain `float` (float32 in kernels);
+    use the alias only for a function whose data is float64.
+  - Seeds: the device passes `seed ^ DIJ_ROULETTE_SALT` as a Warp int32 seed, so seeds
+    of 2^31 and above wrap there exactly as they already do for transport.
 - **A physics model must not slow the default path.** A run-time branch on the model,
   never taken, cost 7 to 8 % on CUDA in the electron kernel, and unread table fields on
   `Tables` 1 to 2 % (interleaved ratios, 2026-11-14; cause not established). So each

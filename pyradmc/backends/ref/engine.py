@@ -47,7 +47,7 @@ from pyradmc.physics_options import (
 )
 from pyradmc.progress import ProgressCallback, ProgressEmitter
 from pyradmc.rng.interface import RNG
-from pyradmc.scoring.dij import BatchedBeamletScorer, DijAssembler, DijResult
+from pyradmc.scoring.dij import BatchedBeamletScorer, DijAssembler, DijResult, TruncationMode
 from pyradmc.scoring.dose import BatchedDoseScorer, ScoringGeometry
 from pyradmc.scoring.dose_to_water import validate_scoring_mode, water_spr
 from pyradmc.scoring.grid import ScoringGrid
@@ -397,6 +397,7 @@ class ReferenceEngine:
         msc_model: str = "gs",
         progress: ProgressCallback | None = None,
         physics: PhysicsOptions | str = "auto",
+        truncation_mode: TruncationMode = "hard",
     ) -> DijResult:
         """Compute the beamlet-resolved dose influence matrix over the lattice.
 
@@ -434,6 +435,20 @@ class ReferenceEngine:
             Per-column relative truncation threshold. Accuracy-defining
             (AGENTS.md 2.8): the default is :data:`pyradmc.DIJ_TRUNCATION_RELATIVE`
             and a different value in a call is a visible, greppable decision.
+        truncation_mode
+            What happens to the entries below the threshold (see
+            :class:`~pyradmc.scoring.dij.DijAssembler`): ``"hard"`` (default, the
+            shipped behaviour) drops them, which biases the low-dose tail by an
+            amount that grows with ``n_histories_per_beamlet``; ``"stochastic"``
+            (opt-in) plays Russian roulette on them, keeping each with probability
+            ``dose / threshold`` at the threshold value, so the matrix is unbiased
+            for every history count (for non-negative scores: negative entries are
+            dropped in both modes) at the price of the roulette's variance,
+            carried in the stored sigma in expectation. The roulette draws from its
+            own salted stream of ``seed``, keyed on the column within this call, so
+            the result stays bit-reproducible for a seed, and two calls with the
+            same seed share their roulette draws as they share their transport
+            streams. Recorded in ``DijResult.truncation_mode``.
         correlated
             Key streams on the within-beamlet index so columns share random
             sequences (correlated sampling). **This is the shipped
@@ -498,6 +513,21 @@ class ReferenceEngine:
         per_batch = n_histories_per_beamlet // n_batches
         scoring = scoring_grid if scoring_grid is not None else ScoringGrid.for_grid(self.grid)
         scorer = BatchedBeamletScorer(scoring, n_batches, n_beamlets)
+        # Built before transport so a bad truncation argument fails before the run.
+        assembler = DijAssembler(
+            grid_shape=scoring.shape,
+            n_beamlets=n_beamlets,
+            n_histories_per_beamlet=n_histories_per_beamlet,
+            n_batches=n_batches,
+            truncation=truncation,
+            correlated=correlated,
+            scoring_mode=scoring_mode,
+            truncation_mode=truncation_mode,
+            seed=seed,
+            provenance=self._provenance(
+                seed, pcut, ecut, msc_model, step_energy_fraction, deposit_resolution_cm, resolved
+            ),
+        )
         energy_emitted = 0.0
         energy_escaped = 0.0
         emitter = ProgressEmitter(progress, n_beamlets * n_histories_per_beamlet)
@@ -540,18 +570,6 @@ class ReferenceEngine:
             emitter.tick(n_beamlets * per_batch)
 
         block = scorer.finalize()
-        assembler = DijAssembler(
-            grid_shape=scoring.shape,
-            n_beamlets=n_beamlets,
-            n_histories_per_beamlet=n_histories_per_beamlet,
-            n_batches=n_batches,
-            truncation=truncation,
-            correlated=correlated,
-            scoring_mode=scoring_mode,
-            provenance=self._provenance(
-                seed, pcut, ecut, msc_model, step_energy_fraction, deposit_resolution_cm, resolved
-            ),
-        )
         assembler.add_block(0, block.dose, block.sigma)
         return assembler.finalize(
             energy_emitted=energy_emitted,

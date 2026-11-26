@@ -19,7 +19,16 @@ from typing import TypeAlias
 import numpy as np
 import numpy.typing as npt
 
-__all__ = ["Table1D", "Table2D", "Table3D", "Vector3Field"]
+__all__ = ["Float64", "Table1D", "Table2D", "Table3D", "Vector3Field"]
+
+Float64: TypeAlias = float
+"""A scalar a kernel must hold in double precision, used as annotation *and* as
+constructor (``Float64(0.0)``) by the few kernel-compiled functions that operate on
+float64 data (the Dij's float64 dose maps). On the host it is ``float``, which is
+float64 already, so ``Float64(x)`` is ``float(x)``. In kernels it is ``wp.float64``:
+Warp types a bare float literal as float32 and refuses to mix it with float64, so
+such a function writes every literal as ``Float64(...)``. Everything else in the
+physics stays plain ``float``, which kernels compile as float32."""
 
 Table1D: TypeAlias = npt.NDArray[np.floating]
 """One quantity on an energy grid, indexed ``[energy_node]``."""

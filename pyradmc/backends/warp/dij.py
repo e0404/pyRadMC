@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from pyradmc.scoring.dij import DijResult
+from pyradmc.scoring.dij import DijResult, TruncationMode
 
 if TYPE_CHECKING:
     import warp as wp
@@ -66,6 +66,8 @@ class DeviceDijResult:
     correlated: bool = False
     scoring_mode: str = "dose_to_medium"
     provenance: RunProvenance | None = None
+    truncation_mode: TruncationMode = "hard"
+    """As :attr:`pyradmc.scoring.dij.DijResult.truncation_mode`."""
 
     @property
     def n_voxels(self) -> int:
@@ -102,4 +104,5 @@ class DeviceDijResult:
             correlated=self.correlated,
             scoring_mode=self.scoring_mode,
             provenance=self.provenance,
+            truncation_mode=self.truncation_mode,
         )

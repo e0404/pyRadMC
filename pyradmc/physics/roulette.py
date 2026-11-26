@@ -13,13 +13,21 @@ Standard variance-reduction technique; see Salvat et al., PENELOPE-2018, sec. 1.
 Where the game is *played* — which particles, below which energy, up to which
 weight — is transport-loop policy, controlled by the ``PHOTON_ROULETTE_*``
 constants in :mod:`pyradmc`; this module owns only the fair game itself.
+
+The same game is played on the entries of a dose influence matrix by
+:func:`roulette_dij_entry`, the per-entry rule of the Dij's stochastic truncation
+mode; which entries, against which threshold, is the assembler's policy
+(:class:`pyradmc.scoring.dij.DijAssembler`).
 """
 
 from __future__ import annotations
 
+import math
+
+from pyradmc.data.handles import Float64
 from pyradmc.rng import RNGState, uniform
 
-__all__ = ["roulette_weight"]
+__all__ = ["roulette_dij_entry", "roulette_weight"]
 
 
 def roulette_weight(weight: float, survival: float, rng_state: RNGState) -> float:
@@ -32,3 +40,72 @@ def roulette_weight(weight: float, survival: float, rng_state: RNGState) -> floa
     if uniform(rng_state) < survival:
         survivor = weight / survival
     return survivor
+
+
+def roulette_dij_entry(
+    mean: Float64, sigma: Float64, threshold: Float64, u: Float64
+) -> tuple[Float64, Float64]:
+    """Truncate one Dij entry stochastically: return its stored ``(value, sigma)``.
+
+    The importance sampling of the dose calculation matrix of Thieke, Nill,
+    Oelfke and Bortfeld, Med. Phys. 29 (2002) 676 (doi:10.1118/1.1469633), which is
+    Russian roulette on the entry with survival ``p = mean / threshold``:
+
+    - ``mean >= threshold`` (``threshold = 0`` included): kept unchanged,
+      ``(mean, sigma)`` — exactly what the hard rule keeps;
+    - ``0 < mean < threshold``: kept with probability ``p``, i.e. when ``u < p``,
+      and then stored with value ``threshold``; otherwise dropped;
+    - ``mean <= 0``: dropped, as under the hard rule.
+
+    A dropped entry returns ``(0.0, 0.0)``; every stored value is positive, so a
+    zero value is the drop. The stored value's expectation over the draw is
+    ``p * threshold = mean`` for every positive entry, so column sums and any plan
+    dose built from a matrix of non-negative scores are unbiased — unlike the hard
+    cut, whose removed dose depends on the statistics the tail was scored with.
+    **Non-negative scores only:** a negative mean is dropped, as by the hard rule
+    (and by both at ``threshold = 0``), so a signed column — a source with
+    negative weights — loses its negative part whatever the statistics; the
+    caller's threshold is likewise taken from the positive maximum.
+
+    Stored sigma of a surviving tail entry, with ``m = mean``, ``s = sigma``,
+    ``t = threshold``::
+
+        sigma_stored = sqrt(s^2 t / m + t (t - m))
+
+    Over the draw its expected square is ``p * sigma_stored^2 = s^2 + m (t - m)``:
+    the Monte Carlo variance plus the Bernoulli variance ``t^2 p (1 - p)`` of the
+    draw itself, which is the total variance of the stored entry. A quadrature
+    plan-dose sigma built from the stored sigmas therefore stays unbiased *in
+    expectation* wherever it was valid before (an independent Dij, AGENTS.md
+    section 8). A survivor's stored sigma is that variance in expectation over the
+    draw — right for quadrature and other linear uses — not the standard error of
+    that one entry, which is not defined after the draw. The unbiasedness of the
+    value is exact for any threshold, also the Monte Carlo-estimated
+    ``t = truncation * column_max``, since it holds conditionally on the scored
+    column. Stated approximation: the variance terms
+    ``s^2`` and ``m (t - m)`` are evaluated at the scored mean, like every
+    per-entry sigma of the Dij, so the variance identity is one in expectation
+    over the draw given the scored column.
+
+    ``u`` is one uniform from U[0, 1) drawn through the RNG interface by the
+    caller, which owns the stream (a pure function of seed, column and voxel; see
+    :class:`~pyradmc.scoring.dij.DijAssembler`). Taking the uniform rather than a
+    state lets the caller key it per entry, so the decision is the same however
+    the matrix is partitioned or how many passes read it.
+
+    Precision: it operates on the Dij's float64 dose maps, so every argument and
+    literal is :data:`~pyradmc.data.handles.Float64` — ``float`` on the host,
+    ``wp.float64`` in kernels — unlike the float32 transport physics. A stored
+    threshold is therefore exactly the float64 ``t`` on every target.
+    """
+    value = Float64(0.0)
+    stored_sigma = Float64(0.0)
+    if mean > Float64(0.0):
+        if mean >= threshold:
+            value = mean
+            stored_sigma = sigma
+        elif u < mean / threshold:
+            value = threshold
+            variance = sigma * sigma * threshold / mean + threshold * (threshold - mean)
+            stored_sigma = math.sqrt(variance)
+    return value, stored_sigma
