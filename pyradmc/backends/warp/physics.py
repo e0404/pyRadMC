@@ -14,6 +14,11 @@ two import-time substitutions, then wraps each public function with ``wp.func``:
     genuine ``math`` functions to its intrinsics) except ``log1p``, which Warp lacks
     and which becomes ``wp.log(1.0 + x)``. In float32 the precision distinction is
     void; the float64 reference keeps the true ``log1p``.
+``pyradmc.data.handles``
+    Replaced by a shim whose array aliases are Warp array types and whose scalar
+    alias ``Float64`` is ``wp.float64`` (``float`` on the host), so the few
+    functions that work on float64 data — the Dij-entry roulette — compile in
+    float64 while everything annotated plain ``float`` compiles in float32.
 
 Warp rejects ``exec``-generated sources, so substitution happens at import machinery
 level: the physics files on disk are what compiles, and the reference backend and the
@@ -130,8 +135,9 @@ def _make_rng_shim() -> types.ModuleType:
 
 
 def _make_handles_shim() -> types.ModuleType:
-    """Build a stand-in for ``pyradmc.data.handles`` with Warp array types."""
+    """Build a stand-in for ``pyradmc.data.handles`` with Warp array and scalar types."""
     shim = types.ModuleType("pyradmc.data.handles")
+    shim.Float64 = wp.float64
     shim.Table1D = wp.array(dtype=float)
     shim.Table2D = wp.array2d(dtype=float)
     shim.Table3D = wp.array3d(dtype=float)

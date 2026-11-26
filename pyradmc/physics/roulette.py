@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import math
 
+from pyradmc.data.handles import Float64
 from pyradmc.rng import RNGState, uniform
 
 __all__ = ["roulette_dij_entry", "roulette_weight"]
@@ -42,8 +43,8 @@ def roulette_weight(weight: float, survival: float, rng_state: RNGState) -> floa
 
 
 def roulette_dij_entry(
-    mean: float, sigma: float, threshold: float, u: float
-) -> tuple[float, float]:
+    mean: Float64, sigma: Float64, threshold: Float64, u: Float64
+) -> tuple[Float64, Float64]:
     """Truncate one Dij entry stochastically: return its stored ``(value, sigma)``.
 
     The importance sampling of the dose calculation matrix of Thieke, Nill,
@@ -84,10 +85,15 @@ def roulette_dij_entry(
     :class:`~pyradmc.scoring.dij.DijAssembler`). Taking the uniform rather than a
     state lets the caller key it per entry, so the decision is the same however
     the matrix is partitioned or how many passes read it.
+
+    Precision: it operates on the Dij's float64 dose maps, so every argument and
+    literal is :data:`~pyradmc.data.handles.Float64` — ``float`` on the host,
+    ``wp.float64`` in kernels — unlike the float32 transport physics. A stored
+    threshold is therefore exactly the float64 ``t`` on every target.
     """
-    value = 0.0
-    stored_sigma = 0.0
-    if mean > 0.0:
+    value = Float64(0.0)
+    stored_sigma = Float64(0.0)
+    if mean > Float64(0.0):
         if mean >= threshold:
             value = mean
             stored_sigma = sigma
