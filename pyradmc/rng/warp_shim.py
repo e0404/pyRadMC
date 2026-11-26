@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import warp as wp
 
-__all__ = ["WarpRNGState", "init_slot", "spawn_stream", "uniform"]
+__all__ = ["WarpRNGState", "init_slot", "keyed_uniform", "spawn_stream", "uniform"]
 
 
 @wp.struct
@@ -62,6 +62,25 @@ def uniform(state: WarpRNGState) -> float:
     r = wp.randf(s)
     state.slots[state.idx] = s
     return r
+
+
+@wp.func
+def keyed_uniform(seed: int, key: int, subkey: int) -> float:
+    """One U[0, 1) draw that is a pure function of ``(seed, key, subkey)``.
+
+    For decisions that must come out the same however a computation is split and
+    however often it is repeated — the Dij's stochastic truncation keys it on
+    ``(salted seed, global column, voxel)`` and evaluates it in both its count and
+    its compaction pass. Two-level counter hashing, ``rand_init(rand_init(seed,
+    key), subkey)``, so no product ``key * n_subkeys`` is ever formed and nothing
+    overflows int32 for any column and voxel count the kernels index. The first
+    level's uint32 state is reinterpreted as the int32 seed of the second
+    (two's-complement wrap; a bijection, so it loses nothing).
+
+    ``wp.randf`` resolution: 24 bits, so a probability compared against the draw
+    is quantized to multiples of 2^-24 (about 6e-8).
+    """
+    return wp.randf(wp.rand_init(int(wp.rand_init(seed, key)), subkey))
 
 
 @wp.func
