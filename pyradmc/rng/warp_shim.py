@@ -77,8 +77,9 @@ def keyed_uniform(seed: int, key: int, subkey: int) -> float:
     level's uint32 state is reinterpreted as the int32 seed of the second
     (two's-complement wrap; a bijection, so it loses nothing).
 
-    ``wp.randf`` resolution: 24 bits, so a probability compared against the draw
-    is quantized to multiples of 2^-24 (about 6e-8).
+    ``wp.randf`` resolution: 24 bits (multiples of 2^-24 in [0, 1 - 2^-24]), so
+    ``keyed_uniform(...) < p`` holds with probability ``p`` rounded *up* to the
+    2^-24 grid (about 6e-8).
     """
     return wp.randf(wp.rand_init(int(wp.rand_init(seed, key)), subkey))
 

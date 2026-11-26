@@ -12,17 +12,22 @@ sub-threshold tail; Thieke et al., Med. Phys. 29 (2002) 676, doi:10.1118/1.14696
 The roulette's uniform for voxel ``v`` of column ``j`` is
 ``keyed_uniform(seed ^ DIJ_ROULETTE_SALT, j, v)``
 (:func:`pyradmc.rng.warp_shim.keyed_uniform`), with ``j`` the *global* beamlet
-index (the group's first column plus the local one). It is therefore a pure function
-of ``(seed, j, v)``: the count pass and the compaction pass draw the same uniform for
-the same entry, and nothing — chunk layout, beamlet group size, batch lanes, the
-device a group was sharded to — can change a decision. It shares nothing with the
-host assembler's stream (AGENTS.md 2.3): host and device apply the same rule to
-independent draws, so their stochastic matrices agree statistically, never bitwise.
+index (the group's first column plus the local one) *within this call*. It is
+therefore a pure function of ``(seed, j, v)``: the count pass and the compaction pass
+draw the same uniform for the same entry, and nothing — chunk layout, beamlet group
+size, batch lanes, the device a group was sharded to — can change a decision. Two
+``run_dij`` calls with the same seed share their uniforms column by column, as they
+share their transport streams. It shares nothing with the host assembler's stream
+(AGENTS.md 2.3): host and device apply the same rule to independent draws, so their
+stochastic matrices agree statistically, never bitwise.
 
-Approximation stated at the point of implementation: ``wp.randf`` has 24 bits, so
-the keep probability ``m / t`` is effectively compared on a grid of 2^-24; the
-stored value's expectation is ``m`` to within ``t * 2^-24`` (relative 6e-8 of the
-threshold), against exactly ``m`` with the host's 53-bit draws.
+Approximation stated at the point of implementation: ``wp.randf`` returns multiples
+of 2^-24 in [0, 1 - 2^-24], so ``u < m / t`` keeps an entry with probability
+``ceil(2^24 m / t) / 2^24`` — the keep probability ``m / t`` rounded *up* to the
+2^-24 grid. Each tail entry's stored expectation is therefore biased upward by at
+most ``t * 2^-24`` (6e-8 of the threshold), and an entry with ``m < t * 2^-24`` is
+kept with probability 2^-24 rather than ``m / t``; the host's 53-bit draws give
+``m`` to the float64 grid.
 
 Module options: no ``fast_math``, unlike the transport kernels. The two passes must
 reach the same decision for every entry, or the compaction writes outside the
