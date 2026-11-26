@@ -52,12 +52,28 @@ __all__ = [
     "DijAssembler",
     "DijResult",
     "TruncationMode",
+    "check_truncation",
 ]
 
 TruncationMode: TypeAlias = Literal["hard", "stochastic"]
 """How sub-threshold Dij entries are treated; see :class:`DijAssembler`."""
 
 _TRUNCATION_MODES: tuple[str, ...] = ("hard", "stochastic")
+
+
+def check_truncation(truncation: float, truncation_mode: str) -> None:
+    """Refuse a negative threshold or an unknown mode, as the assembler does.
+
+    For engines to call before transport, so a bad argument fails before the run;
+    a device path that never builds an assembler refuses it equally.
+    """
+    if truncation < 0.0:
+        raise ValueError(f"negative truncation {truncation}")
+    if truncation_mode not in _TRUNCATION_MODES:
+        raise ValueError(
+            f"unknown truncation_mode {truncation_mode!r}; expected one of {_TRUNCATION_MODES}"
+        )
+
 
 DIJ_ROULETTE_SALT = 0x44494A52
 """Salt of the stochastic truncation's stream (ASCII ``DIJR``).
@@ -456,13 +472,7 @@ class DijAssembler:
 
     def __post_init__(self) -> None:
         """Validate the truncation threshold and mode."""
-        if self.truncation < 0.0:
-            raise ValueError(f"negative truncation {self.truncation}")
-        if self.truncation_mode not in _TRUNCATION_MODES:
-            raise ValueError(
-                f"unknown truncation_mode {self.truncation_mode!r}; "
-                f"expected one of {_TRUNCATION_MODES}"
-            )
+        check_truncation(self.truncation, self.truncation_mode)
         if self.truncation_mode == "stochastic" and self.seed is None:
             raise ValueError("truncation_mode='stochastic' needs the run seed (seed=...)")
 
