@@ -21,8 +21,10 @@ family with its beamlet of origin.
 Because RNG streams are pure functions of `(seed, history)` and scoring is associative
 fixed-point, *how* beamlets are scheduled — grouping, chunking, batch merging, which GPU
 gets which column — cannot change the matrix by one bit. That is test-pinned, along with
-per-column statistical equivalence to the reference oracle and a DVH-endpoint
-certification of the default column truncation.
+per-column statistical equivalence to the reference oracle and DVH-endpoint tests of
+the column truncation. The default, hard truncation removes a dose that grows with the
+histories per beamlet; an opt-in stochastic mode removes that bias at the price of
+per-voxel noise ([validation status](validation.md) states both).
 
 Measured end to end on a laptop RTX 4070 at planning statistics: **~1.1e7 histories/s**,
 i.e. a 100-beamlet 6 MeV field at 2–3 % per-beamlet sigma in single-digit seconds.

@@ -17,6 +17,27 @@ without a field, so results are not byte-identical to the previous release.
 
 ### Added
 
+- **Stochastic Dij truncation: `run_dij(..., truncation_mode="stochastic")`.** An opt-in
+  second treatment of the entries below `truncation * column_max`, on the reference
+  engine and on both Warp paths (`run_dij`, `run_dij_device`). The default hard cut
+  removes a dose that grows with the histories per beamlet (TG-119 arc, body kept 0.992
+  / 0.979 / 0.947 / 0.894 and target 0.997 / 0.992 / 0.980 / 0.962 at 20k / 40k / 80k /
+  160k; a 400-beamlet water field keeps 0.937 of its plan dose at 80k). The stochastic
+  mode plays Russian roulette on the tail instead (Thieke et al., Med. Phys. 29 (2002)
+  676, doi:10.1118/1.1469633): an entry of mean `m` below the threshold `t` is kept with
+  probability `m / t` and stored as `t`, with sigma `sqrt(s^2 t / m + t (t - m))`, so
+  every column sum and plan dose is unbiased at every history count. Its cost is a
+  per-voxel noise that does not fall with the histories: on that field at 80k it
+  exceeds the Monte Carlo sigma below about 3 % of the plan maximum, and the matrix
+  keeps 1.5 to 3.1 times the entries of the hard cut (5k to 80k histories). The draw is keyed on
+  `(seed ^ DIJ_ROULETTE_SALT, global beamlet, voxel)`, so the result is bit-reproducible
+  for a seed and inert to grouping, chunking, batch lanes and sharding on one device;
+  reference and Warp draw independently and agree statistically.
+  `DijResult.truncation_mode` and `DeviceDijResult.truncation_mode` record the mode.
+  **The default is unchanged (`"hard"` at 1e-3) and byte-identical to before** on the
+  reference engine, Warp CPU and Warp CUDA; `examples/dij_truncation_demo.py` shows
+  both sides, and AGENTS.md section 8 records them.
+
 - **Bethe-Heitler pair sharing and a Bhabha / in-flight-annihilation positron:
   `PhysicsOptions(pair="bethe-heitler", positron="bhabha-in-flight")`.** A second model
   for each of the two remaining processes, on both engines. `pair="bethe-heitler"`

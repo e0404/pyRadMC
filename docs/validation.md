@@ -13,7 +13,8 @@ than the passes.
 | CSDA ranges | NIST ESTAR | gated | — |
 | Central-axis depth dose, water | EGSnrc (maintainer-supplied) | **5 %/3 mm gamma** | passes |
 | Backend vs backend, device vs device | reference oracle | chi-squared detection oracle | passes |
-| Dij column truncation | DVH endpoints D2/D50/D98 | < 0.5 % | passes |
+| Dij column truncation, hard (default), 9-beamlet plan at 24000 histories per beamlet | DVH endpoints D2/D50/D98 above 10 % of the maximum | < 0.5 % | passes; does not generalize to more histories or beamlets, see below |
+| Dij column truncation, stochastic (opt-in), reference and Warp | untruncated matrix, same seed: exact roulette variance | column sums and ROI mean doses within 4 sigma; D2/D50/D98 above 10 % of the maximum within the roulette's deterministic reach | passes |
 | Charged-particle gyration in a magnetic field | analytic helix (Bielajew 1988) | radius within 1.5 %, handedness, straight along B | 0.1 % |
 | Backend vs backend, field on (water slabs, electron beam, tabulated spectral thorax at 1.5 T) | reference oracle | chi-squared detection oracle | passes |
 | Fano test in a field, density ratios 0.1 / 0.01 / 0.001 (0.2 and 2 cm gaps), 0.5 and 1 MeV, 0.35 and 1.5 T | Fano theorem (Bouchard et al. 2015) | the field moves the gap-to-wall dose per mass by < 1 % | 2026-10-20, GS fraction 0.20: moved by <= 0.25 % at a tenth and a hundredth, <= 0.7 % in a 2 cm air gap; in a 0.2 cm air gap the field shrinks the field-free residual (0.971 / 0.979 -> 0.995), held to that residual's 3 % gate |
@@ -68,6 +69,26 @@ This is a correctness trap rather than an inaccuracy: the individual numbers are
 and the numerically identical quadrature means something different in each mode. A
 plan-dose sigma from batch-resolved scoring, which `DijResult` does not carry, would be
 exact in either; the choice among the routes belongs to the planning adapter.
+
+### The truncation gate holds for one plan at one history count
+
+The gated row above is the hard rule on the nine-beamlet plan of
+`tests/dij/test_dij_warp.py` at 24000 histories per beamlet, in the region above 10 % of
+the maximum. It does not generalize: the dose the hard rule removes **grows with the
+histories per beamlet**. On a TG-119 arc the body keeps 0.992 / 0.979 / 0.947 / 0.894 of
+its untruncated dose and the target 0.997 / 0.992 / 0.980 / 0.962 at 20k / 40k / 80k /
+160k histories per beamlet; a 400-beamlet 10 x 10 cm field in water keeps 0.937 of its
+plan dose at 80k, and 0.983 above half the maximum (`examples/dij_truncation_demo.py`).
+A many-beamlet plan at planning statistics is therefore biased in the high-dose region
+too, by more than the 0.5 % the gate allows.
+
+The opt-in `truncation_mode="stochastic"` is unbiased by construction and gated as such
+(column sums and ROI mean doses against the untruncated matrix with the exact roulette
+variance, on both engines; DVH percentiles within the roulette's deterministic reach in
+the high-dose region). It carries a per-voxel noise that does not fall with the
+histories and exceeds the Monte Carlo sigma below a few percent of the maximum at
+planning statistics, so its low-dose DVH percentiles are not gated. The default remains
+the hard rule; AGENTS.md section 8 records both sides.
 
 ### Soft-spectrum columns are not gated against the analytic backend
 

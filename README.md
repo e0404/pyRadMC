@@ -42,6 +42,15 @@ against an independently simulated open field (middle — columns partition the 
 and a wedge plan as `Dij @ weights`, no re-simulation (right), which is the loop a
 treatment-plan optimizer runs thousands of times.
 
+![Hard and stochastic Dij truncation: kept plan dose against histories, and per-voxel noise](https://raw.githubusercontent.com/e0404/pyRadMC/main/docs/assets/dij_truncation_demo.png)
+
+Truncating each column below 1e-3 of its maximum keeps the matrix sparse, and how the
+tail is dropped matters (`examples/dij_truncation_demo.py`). The default hard cut removes
+a dose that grows with the histories per beamlet (left: 1.9 % of a 400-beamlet plan at
+5k, 6.3 % at 80k). The opt-in `truncation_mode="stochastic"` plays Russian roulette on the
+tail instead, so every plan dose is unbiased, at the price of a per-voxel noise that does
+not fall with the histories and dominates the low-dose region (right).
+
 ## Install
 
 ```bash

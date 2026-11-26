@@ -1435,3 +1435,62 @@ The fix was a maintainer decision. It moves water's radiative stopping by about 
 the total stopping power at 20 MeV and under 0.05 % below 8 MeV, and under 0.05 % in the
 CSDA range from 6 to 20 MeV. That is too small to resolve in a transport-level dose
 comparison, so none was run.
+
+## Stochastic Dij truncation, 2026-11-25
+
+**The hard truncation's bias depends on the statistics, so a second mode was added
+rather than a new threshold.** Measured on a TG-119 arc, the default 1e-3 cut kept
+0.992 / 0.979 / 0.947 / 0.894 of the body dose and 0.997 / 0.992 / 0.980 / 0.962 of the
+target dose at 20k / 40k / 80k / 160k histories per beamlet, while the untruncated matrix
+moved by under 0.03 %. A lone hit in a tail voxel clears the threshold at low statistics
+and survives; a converged tail sits below it and is dropped whole. Lowering the
+threshold would only move the onset. The maintainer approved an opt-in mode that
+removes the bias; the default stays `"hard"`.
+
+**The rule is Russian roulette on each sub-threshold entry** (Thieke, Nill, Oelfke,
+Bortfeld, Med. Phys. 29 (2002) 676, doi:10.1118/1.1469633): kept with probability
+`m / t`, stored as `t`, sigma `sqrt(s^2 t / m + t (t - m))`. Storing exactly `t` makes
+every stored tail value the same and keeps the expectation exact; the sigma makes the
+expected stored variance the entry's total variance, so a quadrature plan sigma from an
+independent Dij stays unbiased in expectation (pinned with exact oracles over 400
+roulette seeds on host and device: z = -1.19 / 0.63 and -0.18 / 0.54).
+
+**What the measurements say, both sides** (`examples/dij_truncation_demo.py`, 400
+beamlets of 0.5 cm, 10 x 10 cm field, 6 MeV, water, independent columns, CUDA):
+
+| histories / beamlet | hard: plan dose kept | hard: kept above 50 % max | stochastic: kept | entries hard / stochastic |
+|---|---|---|---|---|
+| 5k | 0.981 | 0.995 | 1.0000 | 0.64M / 0.94M |
+| 20k | 0.953 | 0.988 | 1.0000 | 0.62M / 1.40M |
+| 80k | 0.937 | 0.983 | 0.9999 | 0.52M / 1.58M |
+
+Per-voxel sigma relative to the local dose, median per dose bin (unit weights):
+
+| dose / max | 20k: MC | 20k: roulette | 80k: MC | 80k: roulette |
+|---|---|---|---|---|
+| 3e-4 to 1e-3 | 22 % | 37 % | 11 % | 42 % |
+| 1e-3 to 3e-3 | 16 % | 22 % | 8 % | 26 % |
+| 3e-3 to 1e-2 | 12 % | 11 % | 6 % | 15 % |
+| 1e-2 to 3e-2 | 8 % | 4.6 % | 4 % | 6 % |
+| 3e-2 to 0.1 | 6 % | 2.0 % | 3 % | 2.7 % |
+| 0.1 to 0.3 | 3.6 % | 0.6 % | 1.8 % | 0.7 % |
+| 0.3 to 1 | 1.6 % | 0.1 % | 0.8 % | 0.13 % |
+
+The roulette's sigma does not fall with the histories, the Monte Carlo sigma does, so
+the stochastic mode trades a bias that grows with the statistics for a noise that
+dominates the low-dose region once the statistics are good. The analytic roulette
+sigma was checked against the realized difference of stochastic and untruncated
+matrices in every bin (|z| <= 1.5). No default was proposed on this evidence.
+
+**Implementation choices.** The draw is keyed, not streamed, so that it is a pure
+function of `(seed, global column, voxel)`: the host takes the `v`-th uniform of the
+NumPy stream `(seed ^ DIJ_ROULETTE_SALT, j)`, the device a two-level counter hash
+(`keyed_uniform`), both off the transport streams by the salt. A device decision has to
+come out the same in the count pass and in the compaction pass; recomputing it from the
+key costs one hash per tail entry per pass and no dense mask. The sparsify kernels
+compile without fast-math for the same reason. The rule compiles in float64 through a
+scalar handles alias (`Float64`), because the dose maps are float64 and a float32
+instantiation would round the stored threshold; Warp types bare literals as float32, so
+the rule writes them as `Float64(...)`. Porting the device hash to the host to make the
+two bit-identical was considered and not done: it would create a cross-target stream
+contract that AGENTS.md section 2.3 rules out.

@@ -177,6 +177,46 @@ plan_dose = matrix @ weights # the loop an optimizer runs thousands of times
     sigma is invalid. `dij.variance_csc()` exports per-column variance and warns about
     exactly this. A per-batch plan-dose sigma is a known gap.
 
+### Truncation: hard or stochastic
+
+Each column keeps the entries at or above `truncation * column_max` (`truncation`
+defaults to `DIJ_TRUNCATION_RELATIVE` = 1e-3). What happens to the rest is
+`truncation_mode`, the same argument on both engines and on `run_dij_device`:
+
+```python
+dij = engine.run_dij(source, n_histories_per_beamlet=80_000, n_batches=10,
+                     seed=20260726, truncation_mode="stochastic")
+dij.truncation_mode          # recorded on the result: "hard" or "stochastic"
+```
+
+- `"hard"` (the default) drops them. The dose this removes **grows with the histories
+  per beamlet**: at low statistics a lone hit in a tail voxel clears the threshold, at
+  high statistics the converged tail sits below it and is dropped whole. On a 400-beamlet
+  field the plan keeps 0.981 of its dose at 5k histories per beamlet and 0.937 at 80k
+  (0.995 and 0.983 above half the maximum); on a TG-119 arc the body keeps 0.894 at 160k.
+- `"stochastic"` plays Russian roulette on them (Thieke et al., Med. Phys. 29 (2002)
+  676): an entry of mean `m` below the threshold `t` is kept with probability `m / t` and
+  stored as `t`, with sigma `sqrt(s^2 t / m + t (t - m))`. Every column sum and plan dose
+  is unbiased at every history count. The price is per-voxel noise, variance
+  `m (t - m)` per tail entry, that **does not fall with the histories**: at 80k it
+  exceeds the Monte Carlo sigma below about 3 % of the plan maximum, and DVH percentiles
+  in a region whose dose is of the order of `t` are dominated by it. Mean doses stay
+  unbiased. The matrix keeps more entries than the hard rule (1.5 to 3 times on that
+  field).
+
+Neither is free; the default stays `"hard"`, and AGENTS.md section 8 records both sides.
+The stochastic draw is a pure function of `(seed, beamlet, voxel)`, so the result is
+bit-reproducible for a seed and inert to grouping, chunking, batch lanes and device
+sharding, like the hard mode. The reference and Warp engines draw independently and
+agree statistically, never bitwise.
+
+![Kept plan dose against histories per beamlet, and per-voxel noise against dose level](assets/dij_truncation_demo.png)
+
+`examples/dij_truncation_demo.py`: left, the plan dose kept by each mode against the
+histories per beamlet (same seed, so only the truncation shows); right, at 80k histories
+per beamlet, the median per-voxel sigma relative to the local dose, Monte Carlo against
+the roulette's, by dose level.
+
 ### Keeping the matrix on the GPU
 
 An optimizer that recomputes the Dij every iteration and keeps its own dose matrix on
@@ -327,7 +367,9 @@ dose), `warp_backend_demo.py` (one physics source compiled three ways),
 `Dij @ weights`), `device_dij_demo.py` (the Dij kept on the GPU and a plan dose formed
 there, against the host route), `dij_plan_sigma_demo.py` (plan-dose sigma from the column variances:
 exact for independent columns, a lower bound for correlated ones, against a direct
-forward run), `tabulated_demo.py` (EPDL/EEDL cross-sections), `materials_demo.py`
+forward run), `dij_truncation_demo.py` (hard against stochastic truncation: the hard
+rule's bias growing with the histories, the roulette's noise by dose level),
+`tabulated_demo.py` (EPDL/EEDL cross-sections), `materials_demo.py`
 (bone/lung heterogeneity), `ct_demo.py` (dose on a CT), `dose_grid_demo.py` (decoupled
 scoring grid and dose-to-water), `spectral_source_demo.py` (6 MV polyenergetic fan),
 `collimation_demo.py` (staircase MLC field), `segmented_fan_demo.py` (four MLC segments of
